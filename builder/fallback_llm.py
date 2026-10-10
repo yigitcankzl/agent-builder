@@ -4,13 +4,8 @@ One `claude -p` call (no tools, no simulation, no Freya call) reads the brief, t
 and examples/base-agent.json, and writes a complete Freya workflow. A local static check (shape, targets, OAS tools,
 fields and enums, nulls, agent_config, code size, spoken placeholders) runs on it; one repair call on errors.
 
-It runs in a thread from t0 of build.py and only writes a local candidate. build.py picks one candidate with
-select_candidate() and saves exactly once:
-
-    fb = fallback_llm.Fallback(briefs, openapi, log=trace.model_call).start()      # at t0
-    ...main path...
-    wf, candidate, why = fallback_llm.select_candidate(main_wf, signals, fb, wait_s=...)   # main_wf None if it failed
-    if wf is not None: save once
+It runs in a thread and only produces a local candidate. build.py (build(fallback=factory)) starts it once the sources
+are readable, cancels it when the main path passes, and on EXTRACT/S2/S5/GUARD waits for it and saves it once.
 
     python3 builder/fallback_llm.py <brief files or folders...> <openapi.json> [--out f.json]   # local, prints the check
 """
@@ -23,8 +18,6 @@ from builder.oas import load_oas
 
 CODE_LIMIT = 131072                      # code_exec: code + data
 CAP_S = 600                              # the L3 thread's own cap (plan: 10 min)
-L3_SIGNALS = {"main_failed", "S2_identity", "S2_closing", "S3", "S5_core", "S7"}
-ABORT_SIGNALS = {"S0"}                   # engine not loaded: a packaging bug, never covered by L3
 
 PROMPT = """You write a Freya workflow (a phone agent) for the bank brief below. Output ONLY the workflow JSON object, nothing else.
 
@@ -237,6 +230,8 @@ class Fallback:
         cmd = ["claude", "-p", "--output-format", "json", "--tools", "", "--no-session-persistence"] + (["--model", MODEL] if MODEL else [])
         t = time.time()
         self.proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        if self.cancelled:                                   # cancel() ran between the check above and Popen
+            self.proc.kill()
         try:
             out, err = self.proc.communicate(prompt, timeout=left)
         except subprocess.TimeoutExpired:
@@ -281,25 +276,6 @@ class Fallback:
         finally:
             self.result["seconds"] = round(time.time() - self.t0, 1)
             self.done.set()
-
-
-def select_candidate(main_wf, signals, fb, wait_s):
-    """-> (workflow or None, candidate 'main'|'llm'|'none'|'abort', reason).
-    main_wf is the main path's validator-passing workflow, or None when it failed. signals: codes raised on the way."""
-    signals = set(signals or [])
-    if signals & ABORT_SIGNALS:
-        fb and fb.cancel()
-        return None, "abort", ",".join(sorted(signals & ABORT_SIGNALS))
-    if main_wf is not None and not signals & L3_SIGNALS:
-        fb and fb.cancel()                                   # build time is tie-break 2
-        return main_wf, "main", None
-    why = ",".join(sorted(signals & L3_SIGNALS)) or "main_failed"
-    if fb is None:
-        return None, "none", why + "; no L3 thread"
-    r = fb.wait(wait_s)
-    if r["workflow"] is not None and not r["errors"]:
-        return r["workflow"], "llm", why
-    return None, "none", why + "; L3 " + ("not ready in time" if not fb.done.is_set() else "invalid: " + "; ".join(r["errors"][:3]))
 
 
 if __name__ == "__main__":
