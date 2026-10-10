@@ -1,5 +1,7 @@
 # Audit packages 1–3 + 5
 
+Initial audit verification recorded at `5e89970`; the later authorized chat check and reducer follow-up are documented in `BULK-REFUSAL-FIX.md`.
+
 Base: `657ab184fb5252db27766d9ee7a7245c7099329e`. Worktree: `/tmp/codex-audit`, branch: `codex-audit`.
 Only this worktree was edited. No merge, push, Freya, chat API, or real model calls.
 

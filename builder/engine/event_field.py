@@ -7,7 +7,7 @@ import re
 
 KINDS = ["identity", "who", "date", "amount", "date_amount", "accept", "reject", "yes", "no", "callback", "topic", "other"]
 STATUS = ["complete", "partial", "ambiguous", "none"]
-PAYLOAD_KEYS = ["field", "ans", "y", "who", "party", "rel", "d", "m", "wd", "wk", "vague", "amt", "why", "tm", "t"]
+PAYLOAD_KEYS = ["field", "ans", "y", "who", "party", "rel", "d", "m", "wd", "wk", "vague", "amt", "why", "tm", "t", "refused"]
 
 
 def platform_pattern():
@@ -42,6 +42,12 @@ def field(vocab):
         "only for a day they offer.\n"
         "Never add up amounts across products: when the customer gives one amount per product (or several amounts), "
         "write prod=all and no amt; write amt only for a single amount meant for one product.\n"
+        "Refusal payload: refused=<comma-separated product numbers in get_account order, or empty>. List every "
+        "product the customer explicitly and flatly refuses to pay, even when kind is a date or amount for another "
+        "product. Resolve product names to their positions. 'The others' or 'the rest' means the other products only "
+        "when the customer clearly identifies which product they will pay. Never include that payment's product. "
+        "Leave refused empty for an unqualified no to the bulk ask, 'not today', rejection of a date or amount, "
+        "too much, a partial message, or products you cannot identify. Do not write all or rest: list the numbers.\n"
         "A past event (a salary or wage date, when they were paid) is never a payment date and never t=paid: kind=other. "
         "A time for a call ('call me at 4', 'today at four thirty would be better') is kind=callback with tm. An amount the "
         "customer only repeats from the agent (asking about it) is not amt: write amt only for an amount they offer to pay.\n"
@@ -91,6 +97,8 @@ def field(vocab):
         "code ktmchx, 'That is too much money for me right now.' -> n=ktmchx;src=user;kind=reject;also=none;st=complete;"
         "prod=;why=too_much\n"
         "code kpwrnd, 'I can pay 300 but not today' -> n=kpwrnd;src=user;kind=amount;also=reject;st=complete;prod=;amt=300\n"
+        "code kbrfsl, three products, 'I will pay the first product tomorrow but I refuse the others' -> "
+        "n=kbrfsl;src=user;kind=date;also=reject;st=complete;prod=1;rel=tomorrow;refused=2,3\n"
         "code kfrbte, someone else answers and says 'she is back tomorrow around eleven' -> n=kfrbte;src=user;kind=callback;"
         "also=none;st=complete;prod=;rel=tomorrow;d=;m=;wd=;wk=none;vague=no;tm=11:00\n"
         "code kvmlqs, an answering machine or voicemail greeting -> n=kvmlqs;src=user;kind=who;also=none;st=complete;prod=;"

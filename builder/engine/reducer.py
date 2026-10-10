@@ -1330,6 +1330,36 @@ def vague_event(policy, st, today):
     return ask(st, v.get('say_ask') or 'Which exact day can you make the payment?', 'exact_day')
 
 
+def consume_bulk_refusals(policy, st, ev):
+    """An explicit per-product flat refusal of the bulk ask consumes that product's next attempt."""
+    flag = (policy.get('attempts') or dict()).get('flat_refusal_uses_attempt', True)
+    flag = flag.get('value') if isinstance(flag, dict) else flag
+    k = ev.get('kind')
+    if flag is False or len(st['products']) < 2 or st['cur'] is not None or st['q'] != 'pay_today' \
+            or st.get('verified') != 'yes' or ev.get('st') != 'complete' or ev.get('why') == 'too_much':
+        return
+    if k not in ('reject', 'no', 'date', 'date_amount', 'amount'):
+        return
+    raw = str(ev.get('refused') or '')
+    if not re.fullmatch(r'[1-9][0-9]?(,[1-9][0-9]?)*', raw):
+        return
+    targets = set(int(x) - 1 for x in raw.split(','))
+    if any(i >= len(st['products']) for i in targets):
+        return
+    if k in ('date', 'date_amount', 'amount'):
+        # A payment proposal is never a refusal of the product it names.
+        targets.discard(_valid_prod(st, ev, None))
+    for i in sorted(targets):
+        p, pd = _p(st, i)
+        if p['status'] != 'open':
+            continue
+        p['attempts'] = min(p['attempts'] + 1, len(pd['plan']))
+        if p['attempts'] >= len(pd['plan']):
+            p['status'] = 'refused'
+            pd['note_reason'] = pd.get('note_reason') or V(policy)['note']['refused']
+        hook_point(st, 'on_refusal')
+
+
 def reject_event(policy, st, ev, today, cv):
     if not st['products']:
         return resay(st)
@@ -1847,6 +1877,7 @@ def on_user(policy, st, ev, today, cv):
             return do_close(policy, st, o, r, D_FAREWELL)
         return resay(st)
     # negotiation / readback / account
+    consume_bulk_refusals(policy, st, ev)
     if k == 'topic':
         return topic_event(policy, st, ev, today, cv)
     if k in ('yes', 'accept'):
