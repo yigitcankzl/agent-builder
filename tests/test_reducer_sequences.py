@@ -11,8 +11,9 @@ sys.path.insert(0, ROOT)
 from builder.engine import reducer as R
 
 FIX = json.load(open(os.path.join(ROOT, "tests", "fixtures", "reducer", "public_sequences.json")))
-POL = {"A": json.load(open(os.path.join(ROOT, "tests", "generated", "brief-a.reducer_policy.json"))),
-       "A+B": json.load(open(os.path.join(ROOT, "tests", "generated", "brief-ab.reducer_policy.json")))}
+PDIR = os.path.join(ROOT, os.environ.get("POLICY_DIR", os.path.join("tests", "generated")))   # e.g. tests/generated/e2e8
+POL = {"A": json.load(open(os.path.join(PDIR, "brief-a.reducer_policy.json"))),
+       "A+B": json.load(open(os.path.join(PDIR, "brief-ab.reducer_policy.json")))}
 TOPICS = ["injection", "hardship", "dispute", "paid", "restructure", "human", "stop", "decline", "purpose",
           "change_promise", "terms", "scam", "robot", "unknown_info", "other"]
 

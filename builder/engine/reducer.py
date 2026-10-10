@@ -240,6 +240,11 @@ def vocab(policy):
     others = [w for w in policy.get('who_rules') or [] if w.get('who') == 'other' and w.get('party', 'relative') in ('relative', '', None)]
     cb_ok = next((w for w in others if pair(w) != out['callback_failed'] and pair(w)[0]), others[0] if others else None)
     out['callback'] = pick('who_rules other (callback)', pair(cb_ok))
+    if out['callback'][0] and not out['callback'][1]:    # a reason-less callback row: the closing row named callback
+        row = next((r for r in table if _none(r.get('outcome')) == out['callback'][0] and _none(r.get('reason')) == 'callback'), None)
+        if row:
+            log.append('who_rules other (callback) has no reason: closing row callback used')
+            out['callback'] = pair(row)
     out['callback_say'] = (cb_ok or dict()).get('say') or ''
     cb_no = next((w for w in policy.get('who_rules') or [] if pair(w) == out['callback_failed']), None)
     out['callback_retry_say'] = (cb_no or dict()).get('say') or ''

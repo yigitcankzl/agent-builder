@@ -12,9 +12,10 @@ sys.path.insert(0, ROOT)
 from builder.engine import reducer as R
 from tests.test_reducer_sequences import same
 
+PDIR = os.environ.get("POLICY_DIR", "tests/generated")
 FIXTURES = {
-    "ins-clean": ("tests/fixtures/general/ins-clean/personas.json", "tests/generated/ins-clean.reducer_policy.json"),
-    "raw-b": ("tests/fixtures/general/raw-b/personas.json", "tests/generated/raw-b.reducer_policy.json"),
+    "ins-clean": ("tests/fixtures/general/ins-clean/personas.json", PDIR + "/ins-clean.reducer_policy.json"),
+    "raw-b": ("tests/fixtures/general/raw-b/personas.json", PDIR + "/raw-b.reducer_policy.json"),
 }
 
 
