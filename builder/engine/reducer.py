@@ -26,7 +26,7 @@ D_FAREWELL = 'Thank you, goodbye.'
 D_RECORDED = 'Your promise is recorded.'
 D_SAFE = 'Sorry, could you say that again?'
 D_CONTINUE = 'Go on, please.'
-D_NO_TERMS = 'I am sorry, there are no other terms.'
+D_NO_TERMS = 'There are no other terms.'
 D_CHANGE = 'You can change it in the mobile app.'
 D_WHAT_CHANGE = 'What would you like to change?'
 D_CLARIFY = 'Sorry, which exact date do you mean?'
@@ -34,8 +34,22 @@ D_HINT_MONTH = 'Could you say the month as a word, please?'
 D_HELP_FIRST = 'Can I help you with this first?'
 D_ASK_TIME = 'At what time could I reach them?'
 D_ALL_TODAY = 'Can you pay all of them today?'
+D_SUPPORT = 'I am sorry to hear that. Would you like me to connect you with our <DESK>?'
+D_DESK = 'customer support team'
+
+
+def desk_name(row):
+    """The support desk's name in the brief's own words ("offer the hardship desk" -> hardship desk), read from the row's
+    verbatim source quotes only (the effect is the bridge's paraphrase). Else the contract default."""
+    if (row or dict()).get('desk'):
+        return row['desk']
+    quotes = ' '.join(str(q.get('quote') or '') for q in (row or dict()).get('source') or [] if isinstance(q, dict))
+    m = re.search(r'\boffer (?:the |our |a )?([a-z][a-z ]{0,30}?\b(?:team|desk|unit|department|line))\b', quotes, re.I)
+    return m.group(1).lower() if m else D_DESK
+
+
 D_PROTECT = 'These questions protect your account.'
-D_REACH = 'When can I reach {title} {last_name}?'
+D_REACH = 'Could you tell me when I can reach {title} {last_name}?'   # the kit (PUB-02) checks 'when'
 D_OVERDUE = 'The rest stays overdue.'
 COUNTERS = ['confirm_name', 'clarify', 'vague', 'stop_talking', 'human_asks', 'decline_explain', 'support_offered']
 TOOL_NODE = dict(verify_identity='t_verify_identity', get_account='t_get_account', create_promise='t_create_promise',
@@ -69,6 +83,15 @@ def sentence(policy, key, default=''):
     if isinstance(s, dict):
         return s.get('text') or default
     return s or default
+
+
+def brief_sentence(policy, key, default=''):
+    """A sentence only when the brief words it (the bridge's own defaults, source file 'default', do not count)."""
+    s = (policy.get('sentences') or dict()).get(key)
+    if isinstance(s, dict) and (s.get('default') or (s.get('source') and all(
+            isinstance(q, dict) and q.get('file') == 'default' for q in s.get('source')))):
+        return default
+    return sentence(policy, key, default)
 
 
 def fill_names(text, vars_):
@@ -174,9 +197,13 @@ def vocab(policy):
             return pair(row)
         log.append(label + ' missing: unclear slot used')
         return unclear
-    hard = rows('hardship')
-    hard_accept = next((r for r in hard if not _none(r.get('note_reason'))), hard[0] if hard else None)
-    hard_decline = next((r for r in hard if _none(r.get('note_reason'))), hard[-1] if hard else None)
+    hard = [r for r in rows('hardship') if _none(r.get('outcome'))]
+    # accepted = the transfer to the hardship queue (its closing reason is the queue name); declined = any other row
+    hq = queue_for(policy, 'hardship')
+    is_acc = lambda r: bool(hq) and _none(r.get('reason')) == hq
+    acc_row = next((r for r in (policy.get('closing') or dict()).get('table') or [] if is_acc(r)), None)
+    hard_accept = next((r for r in hard if is_acc(r)), acc_row)
+    hard_decline = next((r for r in hard if not is_acc(r)), None)
     stops = rows('stop')
     stop_after = next((r for r in stops if pair(r) != declined), stops[0] if stops else None)
     paid_row = (rows('paid') or [None])[0]
@@ -404,8 +431,20 @@ def resay(st, prefix=''):
     if st['_resay_n'] > RESAY_CAP:
         st['_resay_n'] = 0
         return dict(type='_loop')         # step() turns it into the stage's on-cap action (loop_break)
-    text = ((prefix + ' ') if prefix else '') + (st.get('_last_ask') or D_SAFE)
+    text = ((prefix + ' ') if prefix else '') + reask_line(st)
     return dict(type='say_exact', text=text.strip())
+
+
+def reask_line(st):
+    """The open question again, without the statement before it (a debt intro is never re-said as if new); the
+    read-back is re-said whole."""
+    last = st.get('_last_ask') or D_SAFE
+    if st.get('q') == 'readback':
+        return last
+    parts = re.split(r'(?<=[.?!])\s+', last.strip())
+    if len(parts) > 1 and parts[-1].endswith('?'):
+        return parts[-1]
+    return last
 
 
 # ---------------------------------------------------------------- closing
@@ -491,7 +530,20 @@ def normalise(ev, st):
         e['kind'] = 'callback'
     if e.get('kind') == 'other' and st['q'] == 'confirm_name':
         e['kind'], e['who'] = 'who', 'unclear'
+    a = e.get('also')
+    if a in TOPIC_RANK and a != 'other' and (st.get('verified') == 'yes' or a == 'injection'):
+        if e.get('kind') == 'topic' and TOPIC_RANK.index(a) < TOPIC_RANK.index(e.get('t') if e.get('t') in TOPIC_RANK else 'other'):
+            e['t'], e['also'] = a, 'none'     # §1.5: the higher topic is primary (hardship before terms)
+        elif e.get('kind') != 'topic' and a in TOPIC_FIRST:
+            e['kind'], e['t'], e['also'] = 'topic', a, e.get('kind')
     return e
+
+
+TOPIC_RANK = ['injection', 'hardship', 'dispute', 'paid', 'restructure', 'human', 'stop', 'decline', 'purpose',
+              'change_promise', 'terms', 'scam', 'robot', 'unknown_info', 'other']   # contract §1.5 precedence
+TOPIC_FIRST = TOPIC_RANK[:7]       # these outrank any non-topic kind
+TOPIC_INFO = ('scam', 'robot', 'unknown_info', 'terms')   # an answer line; a substantive also= is still handled
+SUBSTANTIVE = ('date_amount', 'date', 'amount', 'accept', 'yes', 'reject', 'no', 'callback')
 
 
 # ---------------------------------------------------------------- the step
@@ -523,6 +575,12 @@ def step(policy, st, event, tool_event, now, call_vars=None):
             act = dict(type='_loop')
     else:
         st['_said_n'], st['_said_last'] = 0, None
+    if st.get('verified') == 'yes' and st.get('q') == 'offer' and act.get('type') in ('say_exact', 'speak_free'):
+        act = no_restated_amount(st, act)
+    if st.get('verified') == 'yes' and act.get('type') == 'say_exact':   # amounts already spoken (statement, offers)
+        new = [a for a in re.findall(AMT, act['text']) if a not in (st.get('_spoken') or [])]
+        if new:
+            st['_spoken'] = (st.get('_spoken') or []) + new
     if act.get('type') == '_loop':
         st['_said_n'], st['_said_last'], st['_resay_n'] = 0, None, 0
         act = loop_break(policy, st, today, cv)
@@ -1008,6 +1066,26 @@ def transfer(policy, st, key, cv):
     return call(st, 'transfer', 'transfer_to_agent', dict(st['_last_args']))
 
 
+AMT = r'\d[\d,]*\.\d\d'
+
+
+def no_restated_amount(st, act):
+    """Invariant 14: an amount once offered is never restated in a later offer line (re-asks, next attempts, date
+    shifts): 'Could you pay X for your ...' -> 'Could you make that payment for your ...', 'That is X for your ...' goes."""
+    said, spoken = list(st.get('_offered') or []), st.get('_spoken') or []
+    key = 'text' if act['type'] == 'say_exact' else 'hint'
+    t = act.get(key) or ''
+    for a in re.findall(AMT, t):
+        if a in said:
+            t = re.sub(r'pay ' + re.escape(a) + r' for', 'make that payment for', t)
+        if a in said or (a in spoken and (st.get('offer') or dict()).get('kind') == 'customer'):   # PUB-07 / PUB-04
+            t = re.sub(r'\s*That is ' + re.escape(a) + r' for your [^.?]*\.', '', t)
+    new = [a for a in re.findall(r'(?:pay|That is) (' + AMT + r') for', t) if a not in said]
+    if new:
+        st['_offered'] = said + new
+    return dict(act, **dict([(key, t.strip())]))
+
+
 def loop_break(policy, st, today, cv):
     """The on-cap action of every open question (contract default; never free talk, never a tts loop).
     Before verification: a permitted transfer for a help-first loop, else a safe close on the stage's slot.
@@ -1053,16 +1131,23 @@ def topic_event(policy, st, ev, today, cv):
         row = event_row(policy, 'human')
         st['_q_prev'], st['_ask_prev'] = st['q'], st.get('_last_ask') or ''
         return ask(st, (row or dict()).get('say') or D_HELP_FIRST, 'help_first')
-    if t in ('scam', 'robot', 'unknown_info'):
-        row = event_row(policy, t)
+    if t in TOPIC_INFO:
+        if t == 'terms':     # the no-other-terms line at most once, never "I am sorry" unless the brief says it
+            st['_terms_n'] = st.get('_terms_n', 0) + 1
+            line = brief_sentence(policy, 'no_other_terms', D_NO_TERMS) if st['_terms_n'] == 1 else ''
+        else:
+            line = (event_row(policy, t) or dict()).get('say') or ''
         if st['phase'] == 'opening':
-            return reask_name(policy, st, cv, (row or dict()).get('say') or '')
-        return resay(st, (row or dict()).get('say') or '')
+            return reask_name(policy, st, cv, line)
+        if st.get('verified') == 'yes' and ev.get('also') in SUBSTANTIVE:
+            act = on_user(policy, st, dict(ev, kind=ev['also'], also='none'), today, cv)
+            if line and act.get('type') == 'say_exact':
+                act = dict(act, text=line + ' ' + act['text'])
+            return act
+        return resay(st, line)
     if t == 'change_promise':
         row = event_row(policy, 'change_promise')
         return dict(type='say_exact', text=(row or dict()).get('say') or D_CHANGE)
-    if t == 'terms':
-        return resay(st, sentence(policy, 'no_other_terms', D_NO_TERMS))
     if t in ('decline', 'purpose') and st['phase'] == 'opening':
         return reask_name(policy, st, cv)        # rule 3: a question first, the ask that follows is counted
     if t in ('decline', 'purpose'):
@@ -1102,8 +1187,8 @@ def topic_event(policy, st, ev, today, cv):
         p = st['products'][i]
         if p['status'] == 'proposed':
             p['status'], p['offer'] = 'open', None
-        return ask(st, (row or dict()).get('say') or 'I am sorry to hear that. Would you like me to connect you with our customer support team?',
-                   'support_offer')
+        row = row or next((e for e in policy.get('events') or [] if e.get('topic') == 'hardship'), None)
+        return ask(st, (row or dict()).get('say') or D_SUPPORT.replace('<DESK>', desk_name(row)), 'support_offer')
     if t == 'restructure':
         return transfer(policy, st, 'restructuring', cv)
     if t == 'dispute' and st['q'] in ('readback', 'what_to_change') and st.get('_rb_dispute', 0) < 1:
@@ -1171,7 +1256,7 @@ def on_user(policy, st, ev, today, cv):
         return date_event(policy, st, ev, today, cv)
     if k == 'amount':
         return amount_event(policy, st, ev, today, cv)
-    return dict(type='speak_free', node=_talk_node(st), hint=st.get('_last_ask') or '')
+    return dict(type='speak_free', node=_talk_node(st), hint=reask_line(st) if st.get('_last_ask') else '')
 
 
 def opening(policy, st, ev, today, cv):
@@ -1187,7 +1272,15 @@ def opening(policy, st, ev, today, cv):
     party = ev.get('party') or ''
     if who == 'self':
         st['who'], st['phase'] = 'self', 'identity'
-        qs = (policy.get('identity') or dict()).get('questions') or []
+        idp = policy.get('identity') or dict()
+        qs = idp.get('questions') or []
+        blk = idp.get('blocked') if isinstance(idp.get('blocked'), dict) else dict()
+        if blk.get('fields') or any(q.get('blocked') for q in qs):
+            # §14.3: a required identity field the API cannot verify; identity cannot pass, so close on the fail slot
+            # before any blocked question and before any account fact
+            c = blk.get('close') or idp.get('on_fail') or dict()
+            o, r = (_none(c.get('outcome')), _none(c.get('reason'))) if c.get('outcome') else V(policy)['id_failed']
+            return do_close(policy, st, o, r, (id_fail_line(policy) + ' ' + D_FAREWELL).strip())
         if not qs:
             o, r = slot(policy, 'declined')
             return do_close(policy, st, o, r, D_FAREWELL)
@@ -1314,8 +1407,7 @@ def parse_event(raw, st, topics=()):
 
 
 # ---------------------------------------------------------------- code-node wrapper (runs inside Freya)
-CONTRACT_TOPICS = ['injection', 'hardship', 'dispute', 'paid', 'restructure', 'human', 'stop', 'decline', 'purpose',
-                   'change_promise', 'terms', 'scam', 'robot', 'unknown_info', 'other']
+CONTRACT_TOPICS = TOPIC_RANK
 
 
 def _int(x):
@@ -1385,8 +1477,8 @@ def _token(runs):
     return out
 
 
-def _dump(st):
-    s = json.dumps(st)
+def _dump(st, sep=None):
+    s = json.dumps(st, separators=sep)
     two_c, two_o = '}' * 2, '{' * 2      # built, so this source never contains the pair itself
     while two_c in s or two_o in s:
         s = s.replace(two_c, '} }').replace(two_o, '{ {')
@@ -1438,20 +1530,62 @@ def hub_main(vars, policy):
     vars['st'] = _dump(st2)
 
 
+def minify(src):
+    """The shipped string (code_exec limit: code + data <= 131072 bytes): no docstrings or comments, no local-only
+    import, and only the top-level names reachable from hub_main."""
+    import ast
+    tree = ast.parse(src)
+    for n in ast.walk(tree):
+        b = getattr(n, 'body', None)
+        if isinstance(n, (ast.Module, ast.FunctionDef, ast.ClassDef)) and b and isinstance(b[0], ast.Expr) \
+                and isinstance(b[0].value, ast.Constant) and isinstance(b[0].value.value, str):
+            n.body = b[1:] or [ast.Pass()]
+    body = [n for n in tree.body if not isinstance(n, ast.Try)]   # the local 'from builder.engine.dates import'
+    defs = dict()
+    for n in body:
+        for t in ([n.name] if isinstance(n, (ast.FunctionDef, ast.ClassDef)) else
+                  [x.id for x in getattr(n, 'targets', []) if isinstance(x, ast.Name)]):
+            defs[t] = n
+    keep, todo = set(), ['hub_main']
+    while todo:
+        k = todo.pop()
+        if k in keep or k not in defs:
+            continue
+        keep.add(k)
+        todo += [x.id for x in ast.walk(defs[k]) if isinstance(x, ast.Name)]
+    named = lambda n: isinstance(n, (ast.FunctionDef, ast.ClassDef, ast.Assign))
+    tree.body = [n for n in body if not named(n) or any(defs.get(k) is n for k in keep)]   # a redefined name: the last
+    out = []
+    for line in ast.unparse(tree).split('\n'):   # unparse indents by 4 and puts no newline inside a literal
+        body = line.lstrip(' ')
+        out.append(' ' * ((len(line) - len(body)) // 4) + body)
+    return '\n'.join(out)
+
+
 def hub_source(policy):
     """The full code-node string: date core + reducer + policy literal + call. No double braces."""
     import os
     here = os.path.dirname(os.path.abspath(__file__))
-    dates_src = open(os.path.join(here, 'dates.py')).read()
-    red_src = open(os.path.join(here, 'reducer.py')).read()
+    with open(os.path.join(here, 'dates.py')) as f:
+        dates_src = f.read()
+    with open(os.path.join(here, 'reducer.py')) as f:
+        red_src = f.read()
     def strip(x):   # source quotes are for the trace, not the runtime (keeps the node small)
         if isinstance(x, dict):
             return dict((k, strip(v)) for k, v in x.items() if k not in ('source', 'superseded'))
         if isinstance(x, list):
             return [strip(v) for v in x]
         return x
-    lit = json.dumps(_dump(strip(policy)))
-    code = dates_src + '\n\n' + red_src + '\n\nPOLICY = json.loads(' + lit + ')\nhub_main(vars, POLICY)\n'
+    pol = strip(policy)
+    for k, v in (policy.get('sentences') or dict()).items():   # brief_sentence needs to know a bridge default
+        if isinstance(v, dict) and brief_sentence(policy, k, None) is None and v.get('text'):
+            pol['sentences'][k]['default'] = True
+    for r in pol.get('events') or []:          # the desk name is read from source quotes: keep it, not the quotes
+        if r.get('topic') == 'hardship':
+            r['desk'] = desk_name(next((x for x in policy.get('events') or [] if x.get('topic') == 'hardship'
+                                        and x.get('effect') == r.get('effect')), r))
+    lit = repr(_dump(pol, (',', ':')))
+    code = minify(dates_src + '\n\n' + red_src) + '\nPOLICY = json.loads(' + lit + ')\nhub_main(vars, POLICY)\n'
     if '{' * 2 in code or '}' * 2 in code:
         raise ValueError('hub source contains double braces')
     compile(code, 'hub', 'exec')

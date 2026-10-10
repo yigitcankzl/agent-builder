@@ -174,7 +174,7 @@ CONTRACT_DATE_SAY = {("on_non_business_day", "say"): "<NAMED> is not a business 
                      ("on_vague", "say_final"): "Then I can offer <DEADLINE>, the latest date I can record. Could you pay on <DEADLINE>?",
                      ("on_before_earliest", "say"): "That date has already passed. Which day from today on would work for you?",
                      ("on_invalid", "say"): "Sorry, which exact date do you mean?"}
-CONTRACT_SENTENCES = {"no_other_terms": "I am sorry, there are no other terms.", "change_in_app": "You can change it in the mobile app.",
+CONTRACT_SENTENCES = {"change_in_app": "You can change it in the mobile app.",   # no_other_terms: brief wording only (else "")
                       "farewell": "Thank you, goodbye.", "recorded": "Your promise is recorded."}
 # Generic instruction forms of a brief ("Say that you are ...", "Tell the customer to ...") -> the sentence they ask
 # for, by a fixed grammatical rewrite of the brief's own words (no new wording).
