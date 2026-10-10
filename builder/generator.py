@@ -410,9 +410,8 @@ def generate(rp, oas_path):
         {"variable": "hub_status_code", "operator": "greater_than", "operand": 200},
         {"variable": "hub_response.status", "operator": "equals", "operand": "error"},
         {"variable": "hub_response.status_code", "operator": "greater_than", "operand": 200}]}})
-    hub_edges.append({"target_node": "talk_post", "description": "free talk after verification",
-                      "condition": _cond(("route", "talk_post"), ("route_ok", "yes"))})
-    hub_edges.append({"target_node": "talk_post", "description": "unmatched route after verification",
+    # ONE talk_post edge (free talk, stale or unmatched route after verification): route=talk_post is a subset of it
+    hub_edges.append({"target_node": "talk_post", "description": "free talk / unmatched route after verification",
                       "condition": _cond(("route_ok", "yes"))})
     hub_edges.append(_always("talk_pre"))
     hub = _code_action("hub", hub_src, "talk_pre")

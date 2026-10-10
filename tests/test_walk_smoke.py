@@ -38,12 +38,12 @@ if __name__ == "__main__":
     w = copy.deepcopy(wf0)
     w["nodes"]["hub"]["transitions"] = [t for t in w["nodes"]["hub"]["transitions"] if t["target_node"] != "close_say"]
     check(walk_smoke(rp, w, OAS)["errors"], "hub edge to close_say removed caught")
-    # the hub's last edges, freshly generated: say before one route_ok talk_post edge, then talk_pre
+    # the hub's last edges, freshly generated: say, the hub-failed close, one route_ok talk_post edge, then talk_pre
     from builder.generator import generate
     hub = generate(rp, OAS)["nodes"]["hub"]["transitions"]
     tg = [t["target_node"] for t in hub]
-    check(tg[-3:] == ["exact_say", "talk_post", "talk_pre"] and tg.count("talk_post") == 1
+    check(tg[-4:] == ["exact_say", "close_say", "talk_post", "talk_pre"] and tg.count("talk_post") == 1
           and hub[-2]["condition"]["conditions"][0] == {"variable": "route_ok", "operator": "equals", "operand": "yes"},
-          f"hub last edges: an unmatched route after verification goes to talk_post, never talk_pre ({tg[-3:]})")
+          f"hub last edges: an unmatched route after verification goes to talk_post, never talk_pre ({tg[-4:]})")
     print("RESULT:", "PASS" if not fails else f"FAIL ({len(fails)})")
     sys.exit(1 if fails else 0)
