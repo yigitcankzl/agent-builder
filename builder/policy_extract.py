@@ -42,7 +42,7 @@ Use {"file": "default", "quote": ""} ONLY when the material says nothing at all 
  "products": {"fields": {"id": str, "type": str, "past_due": str, "days_late": str},
               "floor_by_type": {"<product type, or * for every type>":
                                 {"kind": "field", "field": "<account field>"} |
-                                {"kind": "percent", "percent": number, "round": "up" | "down" | "nearest", "to": "cent" | "unit"} |
+                                {"kind": "percent", "percent": number, "round": "up" | "down" | "nearest", "to": "cent" | "unit" | <increment number, e.g. 0.05>} |
                                 {"kind": "fixed", "amount": number} |
                                 {"kind": "max_fixed_percent", "amount": number, "percent": number, "round": .., "to": ..}},
               "naming_by_type": {"<product type>": "<how to name it>"}, "order": str, "source": Q},

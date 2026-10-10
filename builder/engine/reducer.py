@@ -192,6 +192,8 @@ def vocab(policy):
 
     table = (policy.get('closing') or dict()).get('table') or []
 
+    xfer_out = set(pair(r)[0] for r in rows('restructure') + rows('human') if pair(r)[0])
+
     def pick(label, value, key=None):
         if value and value[0]:
             return value
@@ -200,7 +202,8 @@ def vocab(policy):
             log.append(label + ' missing: closing row ' + key + ' used')
             return pair(row)
         rx = WHEN_RX.get(key)
-        row = next((r for r in table if rx and _none(r.get('reason')) and re.search(rx, str(r.get('when') or ''), re.I)), None)
+        row = next((r for r in table if rx and _none(r.get('reason')) and re.search(rx, str(r.get('when') or ''), re.I)
+                    and not (key == 'hardship' and _none(r.get('outcome')) in xfer_out)), None)
         if row:   # a renamed code (refused -> no_commitment): the closing row whose 'when' describes the situation
             log.append(label + ' missing: closing row by its when (' + str(row.get('reason')) + ') used')
             return pair(row)
@@ -209,7 +212,11 @@ def vocab(policy):
     hard = [r for r in rows('hardship') if _none(r.get('outcome'))]
     # accepted = the transfer to the hardship queue (its closing reason is the queue name); declined = any other row
     hq = queue_for(policy, 'hardship')
-    is_acc = lambda r: bool(hq) and _none(r.get('reason')) == hq
+    xfer_out = set(pair(r)[0] for r in rows('restructure') + rows('human') if pair(r)[0]) - set([pair(r)[0] for r in rows('paid')])
+    if tool_absent(policy, 'transfer_to_agent'):
+        xfer_out = set()
+    # accepted = the transfer to the hardship queue: its reason names the queue, or its outcome is the transfer outcome
+    is_acc = lambda r: bool(hq) and (_none(r.get('reason')) == hq or _none(r.get('outcome')) in xfer_out)
     acc_row = next((r for r in (policy.get('closing') or dict()).get('table') or [] if is_acc(r)), None)
     hard_accept = next((r for r in hard if is_acc(r)), acc_row)
     hard_decline = next((r for r in hard if not is_acc(r)), None)
@@ -305,7 +312,7 @@ def init_state(policy, call_vars=None):
 
 # ---------------------------------------------------------------- products
 def _round(v, how, to):
-    q = 1.0 if str(to or '').lower() in ('unit', 'units', 'whole', 'integer', '1') else 0.01
+    q = 1.0 if str(to or '').lower() in ('unit', 'units', 'whole', 'integer', '1') else (_num(to) or 0.01)
     x = v / q
     if abs(x - round(x)) <= 1e-6:
         x = round(x)                   # already whole (float noise)
@@ -336,7 +343,7 @@ def _floor(policy, row):
         return full
     kind = str(fb.get('kind') or ('account_field' if fb.get('field') else '')).lower()
     pct, fix = _num(fb.get('percent')), _num(fb.get('amount') if fb.get('amount') is not None else fb.get('fixed'))
-    how, to = str(fb.get('round') or fb.get('rounding') or 'nearest').lower(), fb.get('round_to') or fb.get('to')
+    how, to = str(fb.get('round') or fb.get('rounding') or 'nearest').lower(), fb.get('round_to') or fb.get('to') or fb.get('increment')
     if kind in ('field', 'account_field') and fb.get('field') and row.get(fb['field']) is not None:
         v = float(row.get(fb['field']))
     elif kind in ('percent', 'percent_of_past_due') and pct is not None:
@@ -1427,7 +1434,16 @@ def queue_for(policy, key):
     return None
 
 
+def tool_absent(policy, tool):
+    return str(((policy.get('tool_status') or dict()).get(tool) or dict()).get('status') or '') == 'absent'
+
+
 def transfer(policy, st, key, cv):
+    if tool_absent(policy, 'transfer_to_agent'):     # the API has no transfer: the situation closes with its own codes
+        o, r = (V(policy)['xfer'].get(key) or V(policy)['refused'])
+        if st['verified'] != 'yes':
+            o, r = V(policy)['declined'] if st['who'] == 'self' else V(policy)['unclear']
+        return do_close(policy, st, o, r, D_FAREWELL)
     queue = queue_for(policy, key)
     pre = (policy.get('transfer') or dict()).get('pre_verification_queues') or []
     if not queue:                      # the brief gives no queue for this transfer: say so once, keep the call going

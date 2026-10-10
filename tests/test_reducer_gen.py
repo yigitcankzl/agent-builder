@@ -541,7 +541,32 @@ def identity_gate():
     return True
 
 
+# ---------------------------------------------------------------- sample2: no transfer tool, renamed hardship codes, a 0.05 step
+def sample2_rules():
+    import json
+    # no transfer tool: restructure / human close with their own codes, nothing transferred
+    pol = copy.deepcopy(POL["A"])
+    pol["tool_status"] = dict(transfer_to_agent=dict(status="absent", why="not in the OAS"))
+    for e in pol["events"]:
+        if e["topic"] in ("restructure", "human"):
+            e["outcome"], e["reason"] = "no_promise", e["topic"] if e["topic"] == "human" else "restructuring"
+    R._VC.clear() if hasattr(R, "_VC") else None
+    st, a = to_statement(pol, EARLY)
+    st, a = say(pol, st, "kind=topic;also=none;st=complete;prod=;t=restructure")
+    check(a["type"] == "close" and (a["outcome"], a["reason"]) == ("no_promise", "restructuring"), f"no transfer tool: {a}")
+    # renamed hardship codes (gen-007): the accept row is the transfer outcome, the decline is found by its 'when'
+    g7 = json.load(open(os.path.join(ROOT, "tests/generated/synthetic/gen-007.reducer_policy.json"))) \
+        if os.path.exists(os.path.join(ROOT, "tests/generated/synthetic/gen-007.reducer_policy.json")) else None
+    if g7:
+        v = R.vocab(g7)
+        check(v["xfer"]["hardship"][0] == "specialist_handoff" and v["hardship"][0] == "no_arrangement", f"gen-007 hardship: {v['xfer']['hardship']} {v['hardship']}")
+    # a numeric rounding step
+    check(R._round(416.6250, "nearest", 0.05) == 416.65 and R._round(416.6, "nearest", 0.05) == 416.6, "0.05 step")
+    return True
+
+
 if __name__ == "__main__":
+    print("sample2 rules (no transfer tool, renamed hardship, 0.05 step):", sample2_rules())
     print("identity gate:", identity_gate())
     print("rehearsal rule types:", rehearsal_rules())
     print("flat renamed item paths:", flat_item_paths())

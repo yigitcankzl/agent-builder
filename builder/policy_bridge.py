@@ -528,7 +528,29 @@ def _num(x):
         return None
 
 
-def floor_spec(v, acct_fields):
+def _quoted_steps(quotes):
+    """Rounding increments a floor quote states: 'to the nearest 5 cents' -> 0.05, 'nearest to 0.05' -> 0.05."""
+    cents = [int(x) / 100.0 for x in re.findall(r"\b(\d+) cents?\b", quotes, re.I)]
+    plain = [float(x) for x in re.findall(r"\bto(?: the nearest)?\s+(\d+(?:\.\d+)?)\b(?! ?cents?)", quotes, re.I)]
+    return [n for n in cents + plain if n > 0]
+
+
+def round_step(to, source):
+    """The floor's rounding increment: 'cent' / 'unit', or a number (0.05) that a source quote of the floor states.
+    Without one from the extractor, the quotes are read. A number no quote states is dropped (the reducer then rounds
+    to the cent)."""
+    if to in ("cent", "unit"):
+        return to
+    steps = _quoted_steps(" ".join(str((q or {}).get("quote") or "") for q in (source or []) if isinstance(q, dict)))
+    n = _num(to)
+    if n is None or n <= 0:
+        n = steps[0] if steps else None
+    elif n not in steps + [0.01, 1.0]:
+        return None
+    return {0.01: "cent", 1.0: "unit"}.get(n, n) if n else None
+
+
+def floor_spec(v, acct_fields, products_source=None):
     """One floor_by_type entry (extractor, old or new shape) -> (Fork 3's flat rule, problem). Shapes:
     {kind: field, field} | {kind: percent, percent, round, to} | {kind: fixed, amount} |
     {kind: max_fixed_percent, amount, percent, round, to}. Old kinds account_field / percent_of_past_due are read."""
@@ -555,8 +577,9 @@ def floor_spec(v, acct_fields):
             out["percent"] = pct
             if rnd in ("up", "down", "nearest"):
                 out["round"] = rnd
-            if to in ("cent", "unit"):
-                out["to"] = to
+            step = round_step(to, (v.get("source") or []) + (products_source or []))  # quotes: the floor's, then the products block's
+            if step is not None:
+                out["to"] = step
         if kind != "percent":
             amt = _num(prm.get("amount"))
             if amt is None or amt <= 0:
@@ -1061,7 +1084,7 @@ def to_reducer(policy, oas_path, stable_unmapped=None, brief_text=None):
     acct_fields = response_fields(oas_path, "get_account")
     floors = {}
     for t, v in (prod.get("floor_by_type") or {}).items():
-        rule, problem = floor_spec(v, acct_fields)
+        rule, problem = floor_spec(v, acct_fields, prod.get("source"))
         if rule:
             floors[t] = rule
         else:

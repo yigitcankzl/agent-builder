@@ -399,6 +399,14 @@ def synthetic_fixes():
           "note reasons: the same OAS value or the codes row, else left out")
     check(B.default_ask({"field": "phone_last4"}) == "Could you confirm the last four digits of your phone number, please?",
           "an empty ask gets the contract default")
+    Q = [{"file": "b.md", "quote": "The floor is 33.33% of past_due, rounded nearest to 0.05."}]
+    check(B.floor_spec({"kind": "percent", "percent": 33.33, "round": "nearest", "to": "0.05"}, [], Q)[0].get("to") == 0.05,
+          "floor rounding increment 0.05 kept (quote on the products block)")
+    check(B.floor_spec({"kind": "percent", "percent": 33.33, "round": "nearest"}, [], Q)[0].get("to") == 0.05,
+          "a missing increment is read from the floor quote")
+    check("to" not in B.floor_spec({"kind": "percent", "percent": 33.33, "round": "nearest", "to": 0.25}, [], Q)[0],
+          "an increment no quote states is dropped")
+    check(B.round_step(None, [{"quote": "rounded up to the nearest 5 cents"}]) == 0.05, "'nearest 5 cents' -> 0.05")
     p = copy.deepcopy(BASE)
     p["identity"]["questions"][0]["ask"] = ""
     rp, _ = B.to_reducer(p, OAS, [])

@@ -58,6 +58,9 @@ class Persona:
                 int(dd), int(m), self.intent.get("callback_time", "12:00"))
         if str(q).startswith("id_"):
             f = q[3:]
+            if "name" in f:              # a full-name confirmation step (gen-008)
+                v = self.c["variables"]
+                return "kind=identity;also=none;st=complete;prod=;field=%s;ans=%s %s" % (f, v.get("first_name", ""), v.get("last_name", ""))
             if k == "identity_decline":
                 return "kind=topic;also=none;st=complete;prod=;t=decline"
             if k == "identity_fail":
@@ -124,7 +127,7 @@ class Persona:
         return st["_pd"][i]["floor"] if st.get("_pd") else 0.0
 
 
-def run_case(pol, case):
+def run_case(pol, case, oas=None):
     now = case["variables"]["now"]
     cv = dict(case["variables"], customer_id="c_" + case["id"].lower())
     rows = [dict(p, product_id=p.get("product_id", "p%d" % i)) for i, p in enumerate(case["products"], 1)]
@@ -134,9 +137,21 @@ def run_case(pol, case):
     ledger = dict(outcome=None, reason=None, promises=[], notes=[], callbacks=[], transfers=[])
     said = []
 
+    rev = dict((t, dict((v, k) for k, v in (m or dict()).items())) for t, m in (pol.get("tool_args") or dict()).items())
+    tools = set(p.strip("/").split("/")[-1] for p in (oas or dict()).get("paths", dict())) if oas else None
+
     def bank(tool, args):
+        if tools is not None and tool not in tools:
+            ledger.setdefault("errors", []).append("called a tool the OAS does not have: " + tool)
+            return dict(ok=False)
+        args = dict((rev.get(tool, dict()).get(k, k), v) for k, v in (args or dict()).items())   # OAS names -> roles
         if tool == "verify_identity":
-            ok = str(args.get("answer")) == str(idt.get(args.get("field")))
+            f = args.get("field")
+            if "name" in str(f):
+                v = case["variables"]
+                ok = str(args.get("answer")).strip().lower() == ("%s %s" % (v.get("first_name"), v.get("last_name"))).lower()
+                return dict(verified=ok, all_verified=False, wrong_answers_left=max(0, 3 - wrong[0]))
+            ok = str(args.get("answer")) == str(idt.get(f))
             (passed.add(args.get("field")) if ok else wrong.__setitem__(0, wrong[0] + 1))
             return dict(verified=ok, all_verified=set(idt) <= passed, wrong_answers_left=max(0, 3 - wrong[0]))
         if tool == "get_account":
@@ -185,7 +200,7 @@ def diff(exp, got):
         g = sorted(json.dumps(x, sort_keys=True) for x in got.get(k) or [])
         if e != g:
             out.append("%s %s != %s" % (k, g, e))
-    return out
+    return out + got.get("errors", [])
 
 
 if __name__ == "__main__":
@@ -196,10 +211,11 @@ if __name__ == "__main__":
     import oracle
     verbose = "-v" in sys.argv
     want = [a for a in sys.argv[1:] if a.startswith("gen-")]
-    man = json.load(open(os.path.join(GEN, "sample", "manifest.json")))
     total = ok = 0
-    for b in man["briefs"]:
+    sets = [x for x in ("sample", "sample2") if os.path.exists(os.path.join(GEN, x, "manifest.json"))]
+    for b in [dict(b, _set=x) for x in sets for b in json.load(open(os.path.join(GEN, x, "manifest.json")))["briefs"]]:
         d = b["directory"]
+        base = os.path.join(GEN, b["_set"], d)
         if want and d not in want:
             continue
         pf = os.path.join(PDIR, d + ".reducer_policy.json")
@@ -207,13 +223,14 @@ if __name__ == "__main__":
             print("== %s: no policy (%s)" % (d, pf))
             continue
         pol = json.load(open(pf))
-        truth = json.load(open(os.path.join(GEN, "sample", d, "expected_policy.json")))
-        cases = json.load(open(os.path.join(GEN, "sample", d, "cases.json")))
+        truth = json.load(open(os.path.join(base, "expected_policy.json")))
+        cases = json.load(open(os.path.join(base, "cases.json")))
+        oas = json.load(open(os.path.join(base, "openapi.json"))) if os.path.exists(os.path.join(base, "openapi.json")) else None
         n_ok = 0
         lines = []
         for c in cases:
             exp = oracle.expected_ledger(truth, c, c["intent"])
-            got, said = run_case(pol, c)
+            got, said = run_case(pol, c, oas)
             probs = diff(exp, got)
             if exp != c.get("expected"):
                 probs.append("(oracle and the case's expected ledger differ)")
