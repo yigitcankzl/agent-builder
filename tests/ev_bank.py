@@ -183,8 +183,21 @@ def live(limit=None, conc=3):
     report()
 
 
-def report():
-    path = os.path.join(D, "results.jsonl")
+def rescore(labels, src="results.jsonl", dst="results_rescored.jsonl"):
+    """Offline: the same model outputs against new labels (by row id). No calls."""
+    new = {json.loads(l)["id"]: json.loads(l) for l in open(labels)}
+    with open(os.path.join(D, dst), "w") as f:
+        for l in open(os.path.join(D, src)):
+            r = json.loads(l)
+            if r["id"] in new and not r.get("error"):
+                r["expect"] = new[r["id"]]["expect"]; r["trap"] = new[r["id"]]["trap"]
+                r["diff"] = compare(r["expect"], r["got"])
+            f.write(json.dumps(r) + "\n")
+    return report(dst, "report_rescored.md")
+
+
+def report(name="results.jsonl", md_name="report.md"):
+    path = os.path.join(D, name)
     res = [json.loads(l) for l in open(path)]
     by = collections.defaultdict(lambda: [0, 0, 0])
     lines = ["| id | trap | agent said | customer | expected | got | diff |", "|---|---|---|---|---|---|---|"]
@@ -201,7 +214,7 @@ def report():
     tot = [sum(x[i] for x in by.values()) for i in range(3)]
     acc.append(f"| **all** | {tot[0]} | {tot[1]} | {tot[2]} |")
     md = "\n".join(acc) + "\n\n" + "\n".join(lines) + "\n"
-    open(os.path.join(D, "report.md"), "w").write(md)
+    open(os.path.join(D, md_name), "w").write(md)
     print(md)
     print("results sha1:", hashlib.sha1(open(path, "rb").read()).hexdigest()[:12])
 
@@ -211,7 +224,8 @@ if __name__ == "__main__":
     if cmd == "select": select()
     elif cmd == "workflow": workflow()
     elif cmd == "selftest": selftest()
-    elif cmd == "report": report()
+    elif cmd == "report": report(*sys.argv[2:4])
+    elif cmd == "rescore": rescore(sys.argv[2])
     elif cmd == "live":
         a = sys.argv[2:]
         live(int(a[a.index("--limit") + 1]) if "--limit" in a else None, int(a[a.index("--conc") + 1]) if "--conc" in a else 3)

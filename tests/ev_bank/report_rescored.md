@@ -1,0 +1,49 @@
+| trap | correct | measured | unmeasured |
+|---|---|---|---|
+| callback_payload | 6 | 6 | 0 |
+| correction | 9 | 11 | 0 |
+| distractor_date | 6 | 11 | 0 |
+| flat_vs_too_much | 11 | 11 | 0 |
+| hedged_yes | 7 | 11 | 0 |
+| identity_format | 3 | 3 | 0 |
+| priority_combo | 6 | 11 | 0 |
+| question_back | 11 | 11 | 0 |
+| refusal_counteroffer | 4 | 11 | 0 |
+| spoken_number | 9 | 11 | 0 |
+| vague_date | 1 | 1 | 0 |
+| who_voicemail | 11 | 11 | 0 |
+| year_carry | 5 | 10 | 0 |
+| **all** | 89 | 119 | 0 |
+
+| id | trap | agent said | customer | expected | got | diff |
+|---|---|---|---|---|---|---|
+| utt-0142 | refusal_counteroffer | Can you make the payment on 30 December 2026? | Well, not today, but I can pay £250 on the 22nd. | kind=date_amount;also=reject;d=22;amt=250;vague=no;why=flat | n=kntotu;src=user;kind=date;also=amount;st=complete;prod=;rel=;d=22;m=;wd=;wk=none;vague=no;amt=250 | kind: 'date' != 'date_amount'; also: 'amount' != 'reject'; why: None != 'flat' |
+| utt-0122 | refusal_counteroffer | Can we agree the balance for tomorrow? | Well, not now—today at four thirty would be better. | kind=callback;also=reject;rel=today;tm=16:30;why=flat | n=kvqled;src=user;kind=date;also=none;st=complete;prod=;rel=today;d=;m=;wd=;wk=none;vague=no;tm=16:30 | kind: 'date' != 'callback'; also: 'none' != 'reject'; why: None != 'flat' |
+| utt-0169 | refusal_counteroffer | Would you be able to make the full payment of $95 today? | Honestly, no, but fifty dollars on Monday the 26th. | kind=date_amount;also=reject;d=26;m=10;wd=mon;amt=50;vague=no;why=flat | n=kotrng;src=user;kind=date;also=amount;st=complete;prod=;rel=;d=26;m=;wd=mon;wk=none;vague=no;amt=50 | kind: 'date' != 'date_amount'; also: 'amount' != 'reject'; m: '' != 10; why: None != 'flat' |
+| utt-0123 | refusal_counteroffer | Could you pay the minimum £126 on the 23rd? | Er, not now—today at four thirty would be better. | kind=callback;also=reject;rel=today;tm=16:30;why=flat | n=kkcoek;src=user;kind=date;also=callback;st=complete;prod=;rel=today;d=;m=;wd=;wk=none;vague=no;tm=16:30 | kind: 'date' != 'callback'; also: 'callback' != 'reject'; why: None != 'flat' |
+| utt-0143 | refusal_counteroffer | Can you commit to £400 next Friday? | Er, not today, but I can pay £250 on the 22nd. | kind=date_amount;also=reject;d=22;amt=250;vague=no;why=flat | n=ktkpsf;src=user;kind=date;also=amount;st=complete;prod=;rel=;d=22;m=;wd=;wk=none;vague=no;amt=250 | kind: 'date' != 'date_amount'; also: 'amount' != 'reject'; why: None != 'flat' |
+| utt-0212 | refusal_counteroffer | Would the floor amount of $103.50 be manageable today? | Well, not the full balance; I can do £250. | kind=amount;also=reject;amt=250;why=too_much | n=knszel;src=user;kind=amount;also=reject;st=complete;prod=;amt=250 | why: None != 'too_much' |
+| utt-0121 | refusal_counteroffer | Would you be able to make the full payment of $95 today? | Not now—today at four thirty would be better. | kind=callback;also=reject;rel=today;tm=16:30;why=flat | n=klrbds;src=user;kind=date;also=callback;st=complete;prod=;rel=today;d=;m=;wd=;wk=none;vague=no;tm=16:30 | kind: 'date' != 'callback'; also: 'callback' != 'reject'; why: None != 'flat' |
+| utt-0138 | correction | You are agreeing to £400 on 5 January 2027, correct? | Er, tomorrow at two—sorry, two thirty. | kind=callback;rel=tomorrow;tm=14:30 | n=khhstu;src=user;kind=date;also=none;st=complete;prod=;rel=tomorrow;d=;m=;wd=;wk=none;vague=no;tm=14:30 | kind: 'date' != 'callback' |
+| utt-0153 | correction | Could you make the minimum payment on 5 January? | Er, £100 on the 20th—sorry, £150 on the 22nd. | kind=date_amount;d=22;amt=150;vague=no | n=kjhrvb;src=user;kind=date;also=amount;st=complete;prod=;rel=;d=22;m=;wd=;wk=none;vague=no;amt=150 | kind: 'date' != 'date_amount' |
+| utt-0160 | distractor_date | Would Monday the 26th work for the full amount? | Sorry, I got paid on the 5th; I can do £75 on the 23rd. | kind=date_amount;d=23;amt=75;vague=no | n=kielpg;src=user;kind=date;also=amount;st=complete;prod=;rel=;d=23;m=;wd=;wk=none;vague=no;amt=75 | kind: 'date' != 'date_amount' |
+| utt-0410 | distractor_date | Would you be able to make the full payment of $95 today? | Sorry, I was paid on the fifth. | kind=other | n=kyfeyi;src=user;kind=date;also=none;st=complete;prod=;rel=;d=5;m=;wd=;wk=none;vague=no | kind: 'date' != 'other' |
+| utt-0409 | distractor_date | Have I got that right: £95 on Friday the 23rd? | Honestly, I was paid on the fifth. | kind=other | n=kymaoa;src=user;kind=topic;also=none;st=complete;prod=;t=paid;rel=;d=5;m=;wd=;wk=none;vague=no | kind: 'topic' != 'other' |
+| utt-0156 | distractor_date | Would you be able to make the full payment of $95 today? | I got paid on the 5th; I can do £75 on the 23rd. | kind=date_amount;d=23;amt=75;vague=no | n=kvprjl;src=user;kind=date;also=amount;st=complete;prod=;rel=;d=23;m=;wd=;wk=none;vague=no;amt=75 | kind: 'date' != 'date_amount' |
+| utt-0408 | distractor_date | Would the floor amount of $103.50 be manageable today? | Er, I was paid on the fifth. | kind=other | n=keygxj;src=user;kind=date;also=none;st=complete;prod=;rel=;d=5;m=;wd=;wk=none;vague=no | kind: 'date' != 'other' |
+| utt-0147 | spoken_number | Would Monday the 26th work for the full amount? | Well, I can do two hundred and fifty next Friday. | kind=date_amount;amt=250;wd=fri;wk=next;vague=no | n=kdlcaa;src=user;kind=date;also=amount;st=complete;prod=;rel=;d=;m=;wd=fri;wk=next;vague=no;amt=250 | kind: 'date' != 'date_amount' |
+| utt-0150 | spoken_number | Can you pay the full £420 today? | Sorry, I can do two hundred and fifty next Friday. | kind=date_amount;amt=250;wd=fri;wk=next;vague=no | n=kcqgeq;src=user;kind=date;also=amount;st=complete;prod=;rel=;d=;m=;wd=fri;wk=next;vague=no;amt=250 | kind: 'date' != 'date_amount' |
+| utt-0378 | hedged_yes | Have I reached Priya Nair? | Er, I don't think so. | kind=no | n=kwormu;src=user;kind=who;also=none;st=complete;prod=;who=other;party=wrong_number | kind: 'who' != 'no' |
+| utt-0304 | hedged_yes | Have I got that right: £95 on Friday the 23rd? | Honestly, I guess that's right. | kind=yes | n=krrppl;src=user;kind=accept;also=none;st=complete;prod= | kind: 'accept' != 'yes' |
+| utt-0302 | hedged_yes | To confirm, you will pay £250 on 22 October. Is that right? | Well, I guess that's right. | kind=yes | n=klolvz;src=user;kind=accept;also=none;st=complete;prod= | kind: 'accept' != 'yes' |
+| utt-0380 | hedged_yes | Can I confirm I am speaking with Alex Morgan? | Sorry, I don't think so. | kind=no | n=keppii;src=user;kind=who;also=none;st=complete;prod=;who=other;party=wrong_number | kind: 'who' != 'no' |
+| utt-0173 | year_carry | You are agreeing to £400 on 5 January 2027, correct? | Er, on January fifth I can pay four hundred. | kind=date_amount;d=5;m=1;amt=400;vague=no | n=kerexd;src=user;kind=date;also=amount;st=complete;prod=;rel=;d=5;m=1;wd=;wk=none;vague=no;amt=400 | kind: 'date' != 'date_amount' |
+| utt-0172 | year_carry | Can you commit to £400 next Friday? | Well, on January fifth I can pay four hundred. | kind=date_amount;d=5;m=1;amt=400;vague=no | n=kojenw;src=user;kind=date;also=amount;st=complete;prod=;rel=;d=5;m=1;wd=;wk=none;vague=no;amt=400 | kind: 'date' != 'date_amount' |
+| utt-0174 | year_carry | Can we agree the balance for tomorrow? | Honestly, on January fifth I can pay four hundred. | kind=date_amount;d=5;m=1;amt=400;vague=no | n=kanasj;src=user;kind=date;also=amount;st=complete;prod=;rel=;d=5;m=1;wd=;wk=none;vague=no;amt=400 | kind: 'date' != 'date_amount' |
+| utt-0171 | year_carry | Can you make the payment on 30 December 2026? | On January fifth I can pay four hundred. | kind=date_amount;d=5;m=1;amt=400;vague=no | n=khzfuy;src=user;kind=date;also=amount;st=complete;prod=;rel=;d=5;m=1;wd=;wk=none;vague=no;amt=400 | kind: 'date' != 'date_amount' |
+| utt-0175 | year_carry | Could you pay the minimum £126 on the 23rd? | Sorry, on January fifth I can pay four hundred. | kind=date_amount;d=5;m=1;amt=400;vague=no | n=kjwbdp;src=user;kind=date;also=amount;st=complete;prod=;rel=;d=5;m=1;wd=;wk=none;vague=no;amt=400 | kind: 'date' != 'date_amount' |
+| utt-0347 | priority_combo | Would Monday the 26th work for the full amount? | Well, no, and I mean no. | kind=reject;why=flat | n=koduqo;src=user;kind=no;also=none;st=complete;prod= | kind: 'no' != 'reject'; why: None != 'flat' |
+| utt-0008 | priority_combo | Could you pay £365 next Wednesday? | Er, I've lost my job, but I can pay two hundred on Friday. | kind=topic;also=date_amount;t=hardship;amt=200;wd=fri;wk=this;vague=no | n=kiyssr;src=user;kind=topic;also=date;st=complete;prod=;t=hardship;rel=;d=;m=;wd=fri;wk=this;vague=no;amt=200 | also: 'date' != 'date_amount' |
+| utt-0346 | priority_combo | Are you able to pay the full balance of $310.50 today? | No, and I mean no. | kind=reject;why=flat | n=kutokr;src=user;kind=no;also=none;st=complete;prod= | kind: 'no' != 'reject'; why: None != 'flat' |
+| utt-0091 | priority_combo | Can I confirm I am speaking with Alex Morgan? | She's not here; call tomorrow at three. | kind=callback;also=who;who=other;rel=tomorrow;tm=15:00 | n=knkoaq;src=user;kind=callback;also=none;st=complete;prod=;rel=tomorrow;d=;m=;wd=;wk=none;vague=no;tm=15:00 | also: 'none' != 'who'; who: None != 'other' |
+| utt-0350 | priority_combo | Could you pay the full balance on Friday the 23rd? | Sorry, no, and I mean no. | kind=reject;why=flat | n=krjlvh;src=user;kind=no;also=none;st=complete;prod= | kind: 'no' != 'reject'; why: None != 'flat' |
