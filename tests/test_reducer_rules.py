@@ -104,7 +104,49 @@ def blocked_identity():
     return True
 
 
+def to_statement(pol, acc=ACC):
+    st = R.init_state(pol, CV)
+    st, a = say(pol, st, "kind=who;also=none;st=complete;prod=;who=self;party=")
+    st, a = say(pol, st, "kind=identity;also=none;st=complete;prod=;field=date_of_birth;ans=1990-01-01")
+    st, a = tool(pol, st, dict(verified=True, all_verified=False, wrong_answers_left=3))
+    st, a = say(pol, st, "kind=identity;also=none;st=complete;prod=;field=phone_last4;ans=1234")
+    st, a = tool(pol, st, dict(verified=True, all_verified=True, wrong_answers_left=3))
+    st, a = tool(pol, st, dict(products=acc))
+    check(st["q"] == "pay_today", f"statement: {a}")
+    return st, a
+
+
+def live_fixes(pol, name):
+    """fullA2 (PUB-05 967125c1, PUB-04 f3d4c3bc): topic precedence through also=, the open question re-asked without
+    the statement, the no-other-terms line once, an answer topic that carries a date still records the date."""
+    v = R.V(pol)
+    st0, intro = to_statement(pol)
+    # PUB-05: 'I lost my job, can I get a discount?' labelled t=terms;also=hardship -> hardship (support offer)
+    for body in ("kind=topic;also=hardship;st=complete;prod=;t=terms", "kind=reject;also=hardship;st=complete;prod=;why=flat",
+                 "kind=topic;also=terms;st=complete;prod=;t=hardship"):
+        st, a = say(pol, R.json.loads(R.json.dumps(st0)), body)
+        check(st["q"] == "support_offer", f"{name}: hardship must win over terms/reject ({body}): {a}")
+    # stale / unparseable turn: the open question, never the debt intro again
+    st, a = R.step(pol, R.json.loads(R.json.dumps(st0)), None, None, NOW, CV)
+    st2, a2 = R.step(pol, st, None, None, NOW, CV)
+    for x in (a, a2):
+        check(x["type"] == "say_exact" and x["text"] != intro["text"] and "past due" not in x["text"], f"{name}: stale re-said the intro: {x}")
+    # terms: the line once, never 'I am sorry' from a bridge default, never prefixed again
+    st, a = say(pol, R.json.loads(R.json.dumps(st0)), "kind=topic;also=none;st=complete;prod=;t=terms")
+    line = a["text"]
+    check(not line.startswith("I am sorry") or not R.brief_sentence(pol, "no_other_terms", "") == "", f"{name}: terms line: {line}")
+    st, a = say(pol, st, "kind=topic;also=none;st=complete;prod=;t=terms")
+    first = line.split(".")[0]
+    check(first not in a["text"], f"{name}: terms line said twice: {a}")
+    # robot + a date: the date is not lost
+    st, a = say(pol, R.json.loads(R.json.dumps(st0)), "kind=topic;also=date;st=complete;prod=;t=robot;rel=;d=16;m=10;wd=;wk=none;vague=no")
+    check(st["products"][0]["status"] in ("agreed", "proposed") or st["q"] == "readback", f"{name}: robot+date lost the date: {a}")
+    return True
+
+
 if __name__ == "__main__":
+    for name, pol in POL.items():
+        print("live fixes (PUB-05 precedence, stale, terms once, robot+date):", name, live_fixes(pol, name))
     print("blocked identity (mut-04):", blocked_identity())
     print("floor once (PUB-06):", floor_once())
     for name, pol in POL.items():

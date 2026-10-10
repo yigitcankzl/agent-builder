@@ -26,7 +26,7 @@ D_FAREWELL = 'Thank you, goodbye.'
 D_RECORDED = 'Your promise is recorded.'
 D_SAFE = 'Sorry, could you say that again?'
 D_CONTINUE = 'Go on, please.'
-D_NO_TERMS = 'I am sorry, there are no other terms.'
+D_NO_TERMS = 'There are no other terms.'
 D_CHANGE = 'You can change it in the mobile app.'
 D_WHAT_CHANGE = 'What would you like to change?'
 D_CLARIFY = 'Sorry, which exact date do you mean?'
@@ -83,6 +83,15 @@ def sentence(policy, key, default=''):
     if isinstance(s, dict):
         return s.get('text') or default
     return s or default
+
+
+def brief_sentence(policy, key, default=''):
+    """A sentence only when the brief words it (the bridge's own defaults, source file 'default', do not count)."""
+    s = (policy.get('sentences') or dict()).get(key)
+    if isinstance(s, dict) and (s.get('default') or (s.get('source') and all(
+            isinstance(q, dict) and q.get('file') == 'default' for q in s.get('source')))):
+        return default
+    return sentence(policy, key, default)
 
 
 def fill_names(text, vars_):
@@ -422,8 +431,20 @@ def resay(st, prefix=''):
     if st['_resay_n'] > RESAY_CAP:
         st['_resay_n'] = 0
         return dict(type='_loop')         # step() turns it into the stage's on-cap action (loop_break)
-    text = ((prefix + ' ') if prefix else '') + (st.get('_last_ask') or D_SAFE)
+    text = ((prefix + ' ') if prefix else '') + reask_line(st)
     return dict(type='say_exact', text=text.strip())
+
+
+def reask_line(st):
+    """The open question again, without the statement before it (a debt intro is never re-said as if new); the
+    read-back is re-said whole."""
+    last = st.get('_last_ask') or D_SAFE
+    if st.get('q') == 'readback':
+        return last
+    parts = re.split(r'(?<=[.?!])\s+', last.strip())
+    if len(parts) > 1 and parts[-1].endswith('?'):
+        return parts[-1]
+    return last
 
 
 # ---------------------------------------------------------------- closing
@@ -509,7 +530,20 @@ def normalise(ev, st):
         e['kind'] = 'callback'
     if e.get('kind') == 'other' and st['q'] == 'confirm_name':
         e['kind'], e['who'] = 'who', 'unclear'
+    a = e.get('also')
+    if a in TOPIC_RANK and a != 'other' and (st.get('verified') == 'yes' or a == 'injection'):
+        if e.get('kind') == 'topic' and TOPIC_RANK.index(a) < TOPIC_RANK.index(e.get('t') if e.get('t') in TOPIC_RANK else 'other'):
+            e['t'], e['also'] = a, 'none'     # §1.5: the higher topic is primary (hardship before terms)
+        elif e.get('kind') != 'topic' and a in TOPIC_FIRST:
+            e['kind'], e['t'], e['also'] = 'topic', a, e.get('kind')
     return e
+
+
+TOPIC_RANK = ['injection', 'hardship', 'dispute', 'paid', 'restructure', 'human', 'stop', 'decline', 'purpose',
+              'change_promise', 'terms', 'scam', 'robot', 'unknown_info', 'other']   # contract §1.5 precedence
+TOPIC_FIRST = TOPIC_RANK[:7]       # these outrank any non-topic kind
+TOPIC_INFO = ('scam', 'robot', 'unknown_info', 'terms')   # an answer line; a substantive also= is still handled
+SUBSTANTIVE = ('date_amount', 'date', 'amount', 'accept', 'yes', 'reject', 'no', 'callback')
 
 
 # ---------------------------------------------------------------- the step
@@ -1097,16 +1131,23 @@ def topic_event(policy, st, ev, today, cv):
         row = event_row(policy, 'human')
         st['_q_prev'], st['_ask_prev'] = st['q'], st.get('_last_ask') or ''
         return ask(st, (row or dict()).get('say') or D_HELP_FIRST, 'help_first')
-    if t in ('scam', 'robot', 'unknown_info'):
-        row = event_row(policy, t)
+    if t in TOPIC_INFO:
+        if t == 'terms':     # the no-other-terms line at most once, never "I am sorry" unless the brief says it
+            st['_terms_n'] = st.get('_terms_n', 0) + 1
+            line = brief_sentence(policy, 'no_other_terms', D_NO_TERMS) if st['_terms_n'] == 1 else ''
+        else:
+            line = (event_row(policy, t) or dict()).get('say') or ''
         if st['phase'] == 'opening':
-            return reask_name(policy, st, cv, (row or dict()).get('say') or '')
-        return resay(st, (row or dict()).get('say') or '')
+            return reask_name(policy, st, cv, line)
+        if st.get('verified') == 'yes' and ev.get('also') in SUBSTANTIVE:
+            act = on_user(policy, st, dict(ev, kind=ev['also'], also='none'), today, cv)
+            if line and act.get('type') == 'say_exact':
+                act = dict(act, text=line + ' ' + act['text'])
+            return act
+        return resay(st, line)
     if t == 'change_promise':
         row = event_row(policy, 'change_promise')
         return dict(type='say_exact', text=(row or dict()).get('say') or D_CHANGE)
-    if t == 'terms':
-        return resay(st, sentence(policy, 'no_other_terms', D_NO_TERMS))
     if t in ('decline', 'purpose') and st['phase'] == 'opening':
         return reask_name(policy, st, cv)        # rule 3: a question first, the ask that follows is counted
     if t in ('decline', 'purpose'):
@@ -1215,7 +1256,7 @@ def on_user(policy, st, ev, today, cv):
         return date_event(policy, st, ev, today, cv)
     if k == 'amount':
         return amount_event(policy, st, ev, today, cv)
-    return dict(type='speak_free', node=_talk_node(st), hint=st.get('_last_ask') or '')
+    return dict(type='speak_free', node=_talk_node(st), hint=reask_line(st) if st.get('_last_ask') else '')
 
 
 def opening(policy, st, ev, today, cv):
@@ -1366,8 +1407,7 @@ def parse_event(raw, st, topics=()):
 
 
 # ---------------------------------------------------------------- code-node wrapper (runs inside Freya)
-CONTRACT_TOPICS = ['injection', 'hardship', 'dispute', 'paid', 'restructure', 'human', 'stop', 'decline', 'purpose',
-                   'change_promise', 'terms', 'scam', 'robot', 'unknown_info', 'other']
+CONTRACT_TOPICS = TOPIC_RANK
 
 
 def _int(x):
@@ -1537,6 +1577,9 @@ def hub_source(policy):
             return [strip(v) for v in x]
         return x
     pol = strip(policy)
+    for k, v in (policy.get('sentences') or dict()).items():   # brief_sentence needs to know a bridge default
+        if isinstance(v, dict) and brief_sentence(policy, k, None) is None and v.get('text'):
+            pol['sentences'][k]['default'] = True
     for r in pol.get('events') or []:          # the desk name is read from source quotes: keep it, not the quotes
         if r.get('topic') == 'hardship':
             r['desk'] = desk_name(next((x for x in policy.get('events') or [] if x.get('topic') == 'hardship'
