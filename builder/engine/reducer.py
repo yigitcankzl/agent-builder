@@ -1693,6 +1693,11 @@ def topic_event(policy, st, ev, today, cv):
 # ---------------------------------------------------------------- per-phase user handling
 def on_user(policy, st, ev, today, cv):
     if ev.get('st') == 'partial':
+        if st['phase'] == 'identity' and ev.get('kind') == 'identity' and str(st.get('q') or '').startswith('id_'):
+            idt, qs = st['identity'], (policy.get('identity') or dict()).get('questions') or []
+            fmt = str(qs[idt['idx']].get('format') or '') if idt['idx'] < len(qs) else ''
+            if answer_format(fmt)[0] in ('date', 'digits'):
+                assemble_answer(st, idt['order'][idt['idx']], fmt, dict(ev, st='complete'))
         return dict(type='say_exact', text=sentence(policy, 'continue_line', D_CONTINUE))
     k = ev.get('kind')
     ph = st['phase']
@@ -1914,6 +1919,52 @@ def norm_answer(fmt, ans):
     return a
 
 
+D_ASK_YEAR = 'And the year, please?'
+D_ASK_DAY = 'And the day and the month, please?'
+
+
+def assemble_answer(st, field, fmt, ev):
+    """An identity answer over several turns (clean-1 surface PUB-06: 'May seventeenth.' then 'nineteen eighty six.').
+    Pieces are kept per field until the answer is complete; a new piece replaces the old one (a correction); they are
+    dropped once an answer is sent, so a later answer never inherits a piece of an earlier one (PUB-03).
+    -> (answer, '') when complete, ('', question) when a piece is missing, ('', '') when nothing usable came."""
+    kind, n = answer_format(fmt)
+    pcs = dict((st.get('_idp') or dict()).get(field) or dict())
+    raw = str(ev.get('ans') or '').strip()
+    if kind == 'date':
+        m = re.match(r'^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})$', raw)
+        if m:
+            pcs['d'], pcs['m'] = int(m.group(3)), int(m.group(2))
+            if 'y' not in ev:            # older prompt: the year in ans is taken as said
+                pcs['y'] = int(m.group(1))
+        for key in ('d', 'm'):
+            v = re.sub(r'\D', '', str(ev.get(key) or ''))
+            if v:
+                pcs[key] = int(v)
+        y = re.sub(r'\D', '', str(ev.get('y') or ''))
+        if len(y) == 4:                  # only a year said in these words (PUB-03)
+            pcs['y'] = int(y)
+        if not pcs:
+            return '', ''
+        if all(k in pcs for k in ('d', 'm', 'y')):
+            st.setdefault('_idp', dict()).pop(field, None)
+            return norm_answer('date', '%04d-%02d-%02d' % (pcs['y'], pcs['m'], pcs['d'])), ''
+        st.setdefault('_idp', dict())[field] = pcs
+        return '', (D_ASK_YEAR if 'y' not in pcs else D_ASK_DAY)
+    if kind == 'digits' and n:
+        got = re.sub(r'\D', '', raw)
+        if not got:
+            return '', ''
+        digits = got if len(got) >= n else (pcs.get('digits', '') + got)
+        if len(digits) >= n:
+            st.setdefault('_idp', dict()).pop(field, None)
+            return norm_answer(fmt, digits[-n:] if len(got) < n else got), ''
+        st.setdefault('_idp', dict())[field] = dict(digits=digits)
+        return '', D_CONTINUE
+    st.setdefault('_idp', dict()).pop(field, None)
+    return norm_answer(fmt, raw), ''
+
+
 def identity(policy, st, ev, today, cv):
     k = ev.get('kind')
     idt = st['identity']
@@ -1923,16 +1974,11 @@ def identity(policy, st, ev, today, cv):
     if k == 'identity':
         field = idt['order'][idt['idx']]
         fmt = str(qs[idt['idx']].get('format') or '') if idt['idx'] < len(qs) else ''
-        ans = norm_answer(fmt, ev.get('ans'))
+        ans, missing = assemble_answer(st, field, fmt, ev)
+        if missing:          # a piece of the answer is still to come: ask for it, not a wrong answer or a refusal
+            return ask(st, missing, st['q'])
         if not ans:          # not in the field's format: ask again, not a wrong answer
             return resay(st)
-        if answer_format(fmt)[0] == 'date' and 'y' in ev:
-            y = re.sub(r'\D', '', str(ev.get('y') or ''))
-            if len(y) != 4 or not ans.startswith(y):
-                # PUB-03 live (48a9827a): 'It is the twenty-first of July' came as ans=1992-07-21, the year taken from
-                # the previous wrong answer. A year the customer did not say in these words is never sent: the
-                # customer goes on (not a wrong answer)
-                return dict(type='say_exact', text=sentence(policy, 'continue_line', D_CONTINUE))
         st['_last_args'] = dict(customer_id=cid(cv), field=field, answer=ans)
         return call(st, 'verify', 'verify_identity', dict(st['_last_args']))
     if k == 'topic':

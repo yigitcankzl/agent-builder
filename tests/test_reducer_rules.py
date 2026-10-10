@@ -253,17 +253,18 @@ def pub03_live():
             sent.append(a["args"]["answer"])
             st, a = tool(pol, st, dict(verified=False, all_verified=False, wrong_answers_left=left))
         st, a = say(pol, st, "kind=identity;also=none;st=complete;prod=;field=date_of_birth;ans=1992-07-21;y=")
-        check(a["type"] == "say_exact" and a["text"] == R.sentence(pol, "continue_line", R.D_CONTINUE) and st["identity"]["wrong"] == 2,
-              f"{name}: a year not said must not be sent: {a}")
-        st, a = say(pol, st, "kind=identity;also=none;st=complete;prod=;field=date_of_birth;ans=1990-07-21;y=1990")
-        check(a["type"] == "call_tool" and a["args"]["answer"] == "1990-07-21", f"{name}: the said year: {a}")
+        check(a["type"] == "say_exact" and a["text"] == R.D_ASK_YEAR and st["identity"]["wrong"] == 2,
+              f"{name}: a year not said must not be sent (the year is asked): {a}")
+        st, a = say(pol, st, "kind=identity;also=none;st=complete;prod=;field=date_of_birth;ans=;y=1990")
+        check(a["type"] == "call_tool" and a["args"]["answer"] == "1990-07-21", f"{name}: the said year completes 21 July: {a}")
         st, a = tool(pol, st, dict(verified=False, all_verified=False, wrong_answers_left=0))
         check(a["type"] == "close" and (a["outcome"], a["reason"]) == tuple(v["id_failed"]), f"{name}: third wrong -> failed: {a}")
         # a y= that disagrees with ans is not sent either; an event without y= (older prompt) keeps the old behaviour
         st = R.init_state(pol, cv)
         st, a = say(pol, st, "kind=who;also=none;st=complete;prod=;who=self;party=")
         st, a = say(pol, st, "kind=identity;also=none;st=complete;prod=;field=date_of_birth;ans=1992-07-21;y=1990")
-        check(a["type"] == "say_exact", f"{name}: y disagrees with ans: {a}")
+        check(a["type"] == "call_tool" and a["args"]["answer"] == "1990-07-21", f"{name}: only the year said is used: {a}")
+        st, a = tool(pol, st, dict(verified=False, all_verified=False, wrong_answers_left=2))
         st, a = say(pol, st, "kind=identity;also=none;st=complete;prod=;field=date_of_birth;ans=1992-07-21")
         check(a["type"] == "call_tool", f"{name}: no y= key: unchanged: {a}")
     return True
@@ -330,7 +331,37 @@ def clean1_pub07():
     return True
 
 
+def split_answers():
+    """clean-1 surface PUB-06 live (e6d1cc28): 'May seventeenth.' -> d=17;m=5, then 'nineteen eighty six.' -> y=1986:
+    merged and verified once. Also: a cut-off part kept, a correction replaces a piece, last4 in two digit groups,
+    pieces never count as refusals and never outlive a sent answer."""
+    for name, pol in POL.items():
+        st = R.init_state(pol, CV)
+        st, a = say(pol, st, "kind=who;also=none;st=complete;prod=;who=self;party=")
+        st, a = say(pol, st, "kind=identity;also=none;st=complete;prod=;field=date_of_birth;ans=;y=;d=17;m=5")
+        check(a["text"] == R.D_ASK_YEAR and st["identity"]["refusals"] == 0, f"{name}: the year asked: {a}")
+        st, a = say(pol, st, "kind=identity;also=none;st=complete;prod=;field=date_of_birth;ans=;y=1986")
+        check(a["type"] == "call_tool" and a["args"]["answer"] == "1986-05-17", f"{name}: merged: {a}")
+        st, a = tool(pol, st, dict(verified=True, all_verified=False, wrong_answers_left=3))
+        st, a = say(pol, st, "kind=identity;also=none;st=partial;prod=;field=phone_last4;ans=44")
+        check(a["text"] == R.sentence(pol, "continue_line", R.D_CONTINUE), f"{name}: cut-off digits: {a}")
+        st, a = say(pol, st, "kind=identity;also=none;st=complete;prod=;field=phone_last4;ans=01")
+        check(a["type"] == "call_tool" and a["args"]["answer"] == "4401", f"{name}: last4 in two groups: {a}")
+        # a correction replaces the day; the pieces go once an answer is sent
+        st = R.init_state(pol, CV)
+        st, a = say(pol, st, "kind=who;also=none;st=complete;prod=;who=self;party=")
+        st, a = say(pol, st, "kind=identity;also=none;st=complete;prod=;field=date_of_birth;ans=;y=;d=17;m=5")
+        st, a = say(pol, st, "kind=identity;also=none;st=complete;prod=;field=date_of_birth;ans=;y=;d=18;m=")
+        st, a = say(pol, st, "kind=identity;also=none;st=complete;prod=;field=date_of_birth;ans=;y=1986")
+        check(a["args"]["answer"] == "1986-05-18", f"{name}: correction: {a}")
+        st, a = tool(pol, st, dict(verified=False, all_verified=False, wrong_answers_left=2))
+        st, a = say(pol, st, "kind=identity;also=none;st=complete;prod=;field=date_of_birth;ans=;y=;d=17;m=5")
+        check(a["text"] == R.D_ASK_YEAR, f"{name}: no year inherited after a sent answer: {a}")
+    return True
+
+
 if __name__ == "__main__":
+    print("split identity answers (clean-1 surface PUB-06):", split_answers())
     print("rehearsal clean-1 PUB-07:", clean1_pub07())
     print("PUB-06 rep 3: no second floor offer:", pub06_rep3())
     print("PUB-03 live: no inherited year:", pub03_live())
