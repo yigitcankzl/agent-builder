@@ -42,7 +42,7 @@ TOPIC_CUES = {"change_promise": ("change (the )?(recorded )?promise", "change re
                           "why (are you )?calling", "asks why"),
               "injection": ("injection", "ignore instructions")}
 WHO_CUES = {"handoff": ("hand", "handoff", "passes the phone", "gets the customer"),
-            "wrong_number": ("wrong number",), "deceased": ("deceased", "died", "death of the customer"),
+            "misdialled": ("wrong number",), "deceased": ("deceased", "died", "death of the customer"),
             "other": ("someone else", "third party", "relative"), "unclear": ("unclear", "ambiguous"),
             "busy": ("busy", "voicemail", "answering machine"),   # v3.1: callback or t=stop, closing slot `busy`
             "callback": ("callback",)}
@@ -50,10 +50,10 @@ V3_ALWAYS = ("decline", "purpose")          # §11.6: always present in the gene
 DEFAULT_SENTENCES = {"continue_line": "Go on, please.", "safe_repeat": "Sorry, could you say that again?"}
 DEFAULT_HONESTY = ["recorded", "scheduled", "transferred", "booked", "confirmed"]
 # §11.5 defaults (source=default); a brief value overrides where it states one
-TOOL_DEFAULTS = {"verify_identity": {"retries": 1, "on_fail": "close(unclear)"},
-                 "get_account": {"retries": 1, "on_fail": "close(unclear)"},
-                 "create_promise": {"retries": 1, "on_fail": "close(service_error)"},
-                 "schedule_callback": {"retries": 1, "on_fail": "close(no_callback)"},
+TOOL_DEFAULTS = {"verify_identity": {"retries": 1, "on_fail": "close(slot:unclear)"},
+                 "get_account": {"retries": 1, "on_fail": "close(slot:unclear)"},
+                 "create_promise": {"retries": 1, "on_fail": "close(slot:write_failed)"},
+                 "schedule_callback": {"retries": 1, "on_fail": "close(slot:callback_failed)"},
                  "transfer_to_agent": {"retries": 1, "on_fail": "continue"},
                  "add_note": {"retries": 1, "on_fail": "skip"},
                  "close_call": {"retries": 0, "on_fail": "continue"}}
@@ -62,6 +62,25 @@ TOOL_DEFAULTS = {"verify_identity": {"retries": 1, "on_fail": "close(unclear)"},
 def _enum(oas, tool, field, response=False):
     e = oas.get(tool + (" (response)" if response else ""), {}).get(field)
     return e if isinstance(e, list) else None
+
+
+def response_fields(oas_path, tool):
+    """All property names in a tool's 200 response schema (nested), e.g. the account fields of each product."""
+    d = json.load(open(oas_path)) if oas_path and os.path.exists(oas_path) else {}
+    out = []
+
+    def walk(s):
+        if isinstance(s, dict):
+            for k, v in (s.get("properties") or {}).items():
+                out.append(k)
+                walk(v)
+            walk(s.get("items"))
+    for path, ops in (d.get("paths") or {}).items():
+        if path.strip("/").split("/")[-1] == tool:
+            for op in ops.values():
+                for resp in (op.get("responses") or {}).values():
+                    walk(((resp.get("content") or {}).get("application/json") or {}).get("schema"))
+    return out
 
 
 def _ptype(t):
@@ -157,10 +176,14 @@ def to_reducer(policy, oas_path, stable_unmapped=None):
                 m[nt] = v
         if k in prod:
             prod[k] = m
+    acct_fields = response_fields(oas_path, "get_account")
     for t, tpl in (prod.get("naming_by_type") or {}).items():
         def repl(mo):
             words = mo.group(1).lower()
-            return "{card_last4}" if "last" in words else "{" + re.sub(r"\W+", "_", words).strip("_") + "}"
+            # the account field the placeholder names: an OAS response field sharing its key words, else a slug
+            keys = [k for k in re.findall(r"[a-z0-9]+", words) if len(k) > 2]
+            hit = [f for f in acct_fields if any(k in f.lower() for k in keys)]
+            return "{" + (hit[0] if hit else re.sub(r"\W+", "_", words).strip("_")) + "}"
         prod["naming_by_type"][t] = re.sub(r"<([^>]+)>", repl, str(tpl))
     # ---- closing: rows whose outcome is outside the enum (and has no sourced alias) are BLOCKED, never re-labelled
     cl = p.setdefault("closing", {})
@@ -181,7 +204,8 @@ def to_reducer(policy, oas_path, stable_unmapped=None):
     row = lambda *cues: next((r for r in live if r["reason"] and _match(re.sub(r"_", " ", r["reason"]), cues)), None)
     # closing slots the reducer refers to (v3.1 §13.1); a slot may be empty -> noted
     slots = {"unclear": row(*WHO_CUES["unclear"]), "declined": row("declin\\w*"), "id_failed": row("fail\\w*"),
-             "busy": row("busy", "voicemail"), "no_callback": row("no callback")}
+             "busy": row("busy", "voicemail"), "callback_failed": row("no callback"),
+             "write_failed": row("service\\w*", "error")}
     cl["slots"] = {k: ({"outcome": v["outcome"], "reason": v["reason"]} if v else None) for k, v in slots.items()}
     # ---- identity: a required field outside the enum is BLOCKED; it is never skipped silently (safety rule 2)
     idn = p.setdefault("identity", {})
@@ -203,7 +227,7 @@ def to_reducer(policy, oas_path, stable_unmapped=None):
     # ---- hang-up defaults (§11.3); before_who falls back to a defined row when the brief has no 'unclear' row
     before_who, src = slots["unclear"], DEFAULT
     if not before_who:
-        before_who = slots["no_callback"] or row("callback") or slots["busy"]
+        before_who = slots["callback_failed"] or row("callback") or slots["busy"]
         notes.append("no 'unclear' row: hangup_default.before_who = " + (f"{before_who['outcome']}/{before_who['reason']}" if before_who else "NONE (reducer must end without close_call)"))
     declined = idn.get("on_decline") if (idn.get("on_decline") or {}).get("outcome") in (e_out or [(idn.get("on_decline") or {}).get("outcome")]) else slots["declined"]
     p["hangup_default"] = {
@@ -244,7 +268,7 @@ def to_reducer(policy, oas_path, stable_unmapped=None):
     if isinstance(pr.get("retries"), int):
         tools["create_promise"].update(retries=pr["retries"], fail_say=pr.get("fail_say", ""), source=w.get("source") or DEFAULT)
     if (p.get("multi_product") or {}).get("applies"):
-        tools["create_promise"]["on_fail"] = "continue"   # B11: product failed, note service_error, continue
+        tools["create_promise"]["on_fail"] = "continue"   # multi-product: that product fails with a note, the call continues
     p["tools"] = tools
     # ---- events onto the contract topics, brief order = precedence
     evs, who, unknown = [], [], []
