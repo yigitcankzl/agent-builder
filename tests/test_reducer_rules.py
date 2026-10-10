@@ -144,7 +144,52 @@ def live_fixes(pol, name):
     return True
 
 
+def pub06_and_malformed():
+    """retest56 PUB-06: 'You tell me. Can I pay the minimum this Friday?' -> kind=date;also=restructure must take the
+    promise path (only hardship and injection win from also=). PUB-05 967125c1: the platform regex threw away
+    'n=<5 letters>;...;also=topic;...;t=hardship;also=terms'; the permissive platform pattern lets it through and
+    parse_event repairs it (token within one edit, first key wins, a topic in a second also= -> also_t)."""
+    from builder.engine import event_field as E
+    c = [c for c in FIX["cases"] if c["id"] == "PUB-06"][0]
+    pol, cv = POL[c["policy"]], c["call_variables"]
+    st = R.init_state(pol, cv)
+    for s in c["steps"][:7]:
+        if s["source"] == "user":
+            st["tok"] = s["event_fields"]["n"]
+            st, a = R.step(pol, st, R.parse_event(s["event"], st, TOPICS), None, c["now"], cv)
+            st["last_tok"] = st["tok"]
+        else:
+            st, a = R.step(pol, st, None, s["tool_event"], c["now"], cv)
+    st["tok"] = "kmfqzr"
+    raw = "n=kmfqzr;src=user;kind=date;also=restructure;st=complete;prod=;rel=;d=;m=;wd=fri;wk=this;vague=no"
+    x, a = R.step(pol, R.json.loads(R.json.dumps(st)), R.parse_event(raw, st, TOPICS), None, c["now"], cv)
+    check(a["type"] == "say_exact" and x["q"] == "readback" and "637.50" in a["text"] and "16 October" in a["text"],
+          f"PUB-06 'minimum this Friday' must read back 637.50 on 16 October: {a}")
+    # malformed strings from the platform
+    st0, _ = to_statement(POL["A"])
+    tok = st0["tok"] = "kydgdq"
+    st0["last_tok"] = "kzzzzz"
+    bad = "n=kydgd;src=user;kind=topic;also=topic;st=complete;prod=;t=hardship;also=terms"
+    check(R.re.match(E.platform_pattern(), bad), "platform pattern must let the malformed event through")
+    e = R.parse_event(bad, st0, TOPICS)
+    check(e and e["t"] == "hardship" and e["also_t"] == "terms" and e["n"] == tok, f"repair: {e}")
+    x, a = R.step(POL["A"], st0, e, None, NOW, CV)
+    check(x["q"] == "support_offer", f"the repaired PUB-05 turn offers support: {a}")
+    for raw, ok in (("n=kydgdqx;src=user;kind=yes;also=none;st=complete;prod=", True),    # one inserted letter
+                    ("n=kydgzq;src=user;kind=yes;also=none;st=complete;prod=", True),     # one changed letter
+                    ("n=kydzzq;src=user;kind=yes;also=none;st=complete;prod=", False),    # two edits
+                    ("n=kzzzzz;src=user;kind=yes;also=none;st=complete;prod=", False),    # the last token: stale
+                    ("n=kydgdq;src=user;kind=date;also=none;also=amount;st=complete;prod=;wd=fri;wd=mon", True)):
+        e = R.parse_event(raw, st0, TOPICS)
+        check(bool(e) == ok, f"{raw}: parsed={e}")
+        check(bool(R.re.match(E.platform_pattern(), raw)), f"platform pattern rejects {raw}")
+    e = R.parse_event("n=kydgdq;src=user;kind=date;also=none;also=amount;st=complete;prod=;wd=fri;wd=mon", st0, TOPICS)
+    check(e["also"] == "none" and e["wd"] == "fri", f"first key wins: {e}")
+    return True
+
+
 if __name__ == "__main__":
+    print("PUB-06 minimum-this-Friday + malformed events:", pub06_and_malformed())
     for name, pol in POL.items():
         print("live fixes (PUB-05 precedence, stale, terms once, robot+date):", name, live_fixes(pol, name))
     print("blocked identity (mut-04):", blocked_identity())
