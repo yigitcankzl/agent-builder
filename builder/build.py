@@ -17,7 +17,7 @@ stays the submission.
 L3 fallback (builder/fallback_llm.py, Fork 5): the direct LLM workflow writer starts in its own thread as soon as the
 sources are readable (not on S0, not when nothing is readable; --no-l3 turns it off). The main path is capped at
 MAIN_CAP_S (15 min + 90 s) or --budget-min - 90 s, whichever is earlier. If the main path passes, L3 is cancelled
-before the save. If it ends on EXTRACT, S2 or S5, build waits for L3 until budget - 150 s and, when L3's static
+before the save. If it ends on EXTRACT, S2, S3 or S5, build waits for L3 until budget - 150 s and, when L3's static
 check passed, saves THAT workflow once and exports it (exit 0, fallback_used=L3, a fallback_selection trace event).
 There is exactly one save per slot per build.
 
@@ -29,6 +29,7 @@ Exit codes (also `exit_code` in the JSON result; the trace has a `signal` event 
      clone. Nothing is saved, there is no LLM fallback (a dead stub agent must never be saved).
 Signals (FINAL-PLAN section 2): S0 engine not loaded, S1 unreadable source / too little text (warning; abort only
 when nothing is readable), S2 core sections missing after the targeted re-extraction,
+S3 a core response fact (verified flag, products, id, past due, days late) unbound even after the binding assist,
 S5 validator still failing after the repair pass, EXTRACT every extraction run failed, GUARD time guard.
 """
 import argparse, concurrent.futures as cf, hashlib, json, os, sys, time
@@ -104,7 +105,7 @@ def _rules_summary(policy):
 
 
 MAIN_CAP_S = 15 * 60 + 90       # the main path's own cap; the rest of --budget-min is for the L3 candidate + one save
-L3_SIGNALS = {"EXTRACT", "S2", "S5"}     # main-path failures the L3 writer may cover (never S0, S1 abort or GUARD: a late main build is never replaced)
+L3_SIGNALS = {"EXTRACT", "S2", "S3", "S5"}     # main-path failures the L3 writer may cover (never S0, S1 abort or GUARD: a late main build is never replaced)
 
 
 def _repro():
@@ -304,6 +305,20 @@ def build(briefs, openapi, slot=None, freya_client=None, out_dir="submission", t
                 state.update(rp=rp, brep=brep)
                 trace.log("bridge", attempt="1-reextracted", api_mismatch=brep["api_mismatch"], notes=brep["notes"],
                           identity_blocked=(rp.get("identity") or {}).get("blocked"))
+        # S3: a core response fact the shape rules could not bind -> one build-time binding assist (accepted only
+        # when the path exists in the OAS with the right shape); still missing -> L3 (it reads results through the LLM)
+        from builder.binding_assist import assist, core_missing as core_unbound
+        if core_unbound(rp):
+            if time.time() < deadline - 60:
+                try:
+                    rp, arep = assist(rp, openapi, brief_text, trace, deadline)
+                except Exception as e:
+                    arep = {"error": str(e)[:300], "still_missing": [f"{t}.{f}" for t, f in core_unbound(rp)]}
+                trace.log("binding_assist", **arep)
+                state.update(rp=rp)
+            still = [f"{t}.{f}" for t, f in core_unbound(rp)]
+            if still:
+                return finish(f"core response facts not bound in the OAS: {still}", 2, "S3", next="L3", core_unbound=still)
         try:
             wf = generate(rp, openapi)
         except EngineNotLoaded as e:
