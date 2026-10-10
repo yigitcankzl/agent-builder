@@ -4,7 +4,7 @@
 
 Graph:
   greet (tts opening) / exact_say (tts {{say_next}}) / talk_pre / talk_post   --always--> hub_reset --always--> hub
-  hub (code: the reducer; here a STUB step() that always returns the safe say action), edges in contract order:
+  hub (code: the reducer from builder.integration.hub_code: Fork 3's module, or the stub), edges in contract order:
     close_say | t_transfer_to_agent (go + (route_ok | xfer_pre)) | t_get_account, t_create_promise, t_add_note
     (go + route_ok) | t_verify_identity, t_schedule_callback (go) | talk_post (route_ok) | exact_say | talk_pre (last)
   t_<tool>  api_request, args baked from w_<tool>_<arg>, response_mapping status -> w_go_<tool>, always -> hub
@@ -15,11 +15,13 @@ No null values, no agent_config, no double braces inside code strings. Brief val
 import argparse, json, os, re, sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from builder.integration import ev_field, hub_code
+
+GENERATED_FROM = {}   # which hub code / event field the last generate() used (stub or Fork 3's module), for the trace
 
 TOOLS_ORDER = ("verify_identity", "get_account", "create_promise", "add_note", "schedule_callback", "transfer_to_agent")
 GATED = ("get_account", "create_promise", "add_note")          # need route_ok == yes (the verified gate)
 OPEN = ("verify_identity", "schedule_callback")                 # reachable before verification
-EV_PATTERN = r"^n=[a-z]{6};src=user;kind=[a-z_]+;also=[a-z_]+;st=(complete|partial|ambiguous|none);prod=[a-z0-9]*(;[a-z_]+=[^;=]*)*$"
 
 
 def oas_tools(oas_path):
@@ -93,20 +95,6 @@ def _soft_rules(rp, phase):
     return ("\nSoft rules from the brief:\n- " + "\n- ".join(rules)) if rules else ""
 
 
-def stub_hub_code(rp):
-    """STUB reducer: one fixed safe action every run (say safe_repeat). The real step() replaces this."""
-    safe = _text(rp, "safe_repeat") or "Sorry, could you say that again?"
-    # only json/re/datetime are verified in the sandbox: the token comes from the clock, not from `random`
-    return ("import datetime\n"
-            "try:\n"
-            "    vars['say_next'] = " + json.dumps(safe) + "\n"
-            "    vars['route'] = 'say'\n"
-            "    t = datetime.datetime.now().strftime('%f%S%M')\n"
-            "    vars['ev_tok'] = ''.join('abcdefghijklmnopqrstuvwxyz'[(int(c) * 7 + i * 3) % 26] for i, c in enumerate(t[:6]))\n"
-            "except Exception:\n"
-            "    vars['route'] = 'talk_pre'\n")
-
-
 def hub_reset_code(tools):
     lines = ["try:", "    vars['route'] = 'stale'"]
     lines += [f"    if str(vars.get('w_go_{t}') or '') != 'go':\n        vars['w_go_{t}'] = 'done'" for t in tools]
@@ -124,13 +112,9 @@ def generate(rp, oas_path):
     farewell = _text(rp, "farewell", "farewell_generic", "goodbye") or "Thank you. Goodbye."
     opening = _text(rp, "opening") or (
         f"Hello, this is the {meta.get('agent_self_description') or 'digital assistant'} of {meta.get('bank_name') or 'the bank'}.").strip()
-    ev = {"name": "ev", "type": "string", "min_confidence": 0.3, "max_retries": 2, "validation_pattern": EV_PATTERN,
-          "description": "The customer's last message as one event code (contract §1)",
-          "extraction_prompt": "Code: {{ev_tok}}\nLabel only the customer's last message as one event string: "
-                               "n=<the code>;src=user;kind=<kind>;also=<kind or none>;st=<complete|partial|ambiguous|none>;prod=<n or all or empty>."
-                               " The value is a code label, never the customer's words."
-                               "\n{{extractor.type_preamble}}\n{{extractor.variables_list}}\nConversation:\n"
-                               "{{extractor.conversation.last-10}}\nLast message: {{extractor.speech}}"}
+    id_enum = (tools.get("verify_identity", {}).get("props", {}).get("field") or {}).get("enum") or []
+    ev, ev_src = ev_field(rp, id_enum)
+    hub_src, hub_from = hub_code(rp)
     lang = meta.get("language") or "English"
     sysp = (f"You are the {meta.get('agent_self_description') or 'digital assistant'} of {meta.get('bank_name') or 'the bank'}. "
             f"Speak {lang}, one or two short sentences per turn. Never say that anything was recorded, scheduled or "
@@ -189,7 +173,7 @@ def generate(rp, oas_path):
                                                           {"variable": "route_ok", "operator": "equals", "operand": "yes"}]}]}})
     hub_edges.append({"target_node": "exact_say", "description": "say", "condition": _cond(("route", "say"))})
     hub_edges.append(_always("talk_pre"))
-    hub = _code_action("hub", stub_hub_code(rp), "talk_pre")
+    hub = _code_action("hub", hub_src, "talk_pre")
     hub["transitions"] = hub_edges
     nodes["hub"] = hub
     tv = {"ev_tok": "kstart", "route": "stale", "route_ok": "no", "xfer_pre": "no", "say_next": safe, "farewell": farewell,
@@ -200,6 +184,7 @@ def generate(rp, oas_path):
             if arg != "customer_id":
                 tv[f"w_{t}_{arg}"] = ""
     wf = {"initial_node": "greet", "system_prompt": sysp, "nodes": nodes, "global_nodes": {}, "test_variables": tv}
+    GENERATED_FROM.update(hub=hub_from, ev=ev_src)
     if "close_call" in tools:
         lc = _api_node("close_call", tools["close_call"], "end", args_prefix="close")["pre_actions"][0]
         lc["config"] = {"timeoutMs": 12000, "maxRetries": 0, "alwaysRunsAt": ["end_of_call"]}

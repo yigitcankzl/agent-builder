@@ -164,7 +164,8 @@ def call_claude(prompt, purpose, trace):
     if MODEL:
         cmd += ["--model", MODEL]
     t0 = time.time()
-    r = subprocess.run(cmd, input=prompt, capture_output=True, text=True, timeout=1500)
+    limit = 1500 if getattr(trace, "deadline", None) is None else max(30, int(trace.deadline - time.time()))
+    r = subprocess.run(cmd, input=prompt, capture_output=True, text=True, timeout=limit)
     dt = round(time.time() - t0, 1)
     try:
         out = json.loads(r.stdout)
@@ -195,11 +196,21 @@ def material_block(files, oas):
     return "TOOL API (tool -> field -> enum or type):\n" + json.dumps(oas, indent=1) + "\n\n" + "\n\n".join(parts)
 
 
-def extract(paths, openapi=None, trace_path=None, repair=True):
+class _Forward:
+    """Forwards model-call records into a caller's trace (e.g. the builder trace) and carries a deadline."""
+    def __init__(self, sink, deadline=None):
+        self.sink, self.deadline, self.calls = sink, deadline, []
+
+    def log(self, **kw):
+        self.calls.append(kw)
+        self.sink.model_call(**kw)
+
+
+def extract(paths, openapi=None, trace_path=None, repair=True, sink=None, deadline=None):
     """-> (policy, report). report: quotes_rejected, quotes_repaired, unmapped, superseded, oas_warnings, errors,
     fallback_required, seconds, model_calls."""
     t0 = time.time()
-    trace = Trace(trace_path)
+    trace = _Forward(sink, deadline) if sink is not None else Trace(trace_path)
     files, oas = read_files(paths), oas_summary(openapi)
     block = material_block(files, oas)
     instr = INSTRUCTIONS.replace("DATE_RULES_LIST", " | ".join(DATE_RULES)).replace("AMOUNT_RULES_LIST", " | ".join(AMOUNT_RULES))
