@@ -724,6 +724,7 @@ def normalise(ev, st):
 
 TOPIC_RANK = ['injection', 'hardship', 'dispute', 'paid', 'restructure', 'human', 'stop', 'decline', 'purpose',
               'change_promise', 'terms', 'scam', 'robot', 'unknown_info', 'other']   # contract §1.5 precedence
+SELF_TOPICS = ('dispute', 'paid', 'hardship', 'restructure', 'change_promise', 'terms')   # imply the speaker is the customer
 TOPIC_OVERRIDE = ('injection', 'hardship')   # the only topics that win from also=
 TOPIC_INFO = ('scam', 'robot', 'unknown_info', 'terms')   # an answer line; a substantive also= is still handled
 SUBSTANTIVE = ('date_amount', 'date', 'amount', 'accept', 'yes', 'reject', 'no', 'callback')
@@ -1790,7 +1791,9 @@ def opening(policy, st, ev, today, cv):
         who = 'self'
     if k == 'no':
         who = 'other'
-    if k == 'topic':
+    if k == 'topic' and ev.get('t') in SELF_TOPICS:
+        who = 'self'     # only the account holder raises the account (nightmare-1 PUB-09 live: the 'yes, it's me' was lost)
+    elif k == 'topic':
         return topic_event(policy, st, ev, today, cv)
     if k != 'who' and who is None:
         return reask_name(policy, st, cv)    # an identity answer or anything else never confirms the name (rule 3)
