@@ -329,7 +329,47 @@ def nested_paths():
     return True
 
 
+# ---------------------------------------------------------------- verified_value and amount_scale (tool_results)
+def status_and_scale():
+    """verify_identity reporting a string status (verified_value) and get_account amounts in cents (amount_scale)."""
+    pol = copy.deepcopy(POL["A"])
+    pol["tool_results"] = dict(pol.get("tool_results") or {})
+    pol["tool_results"]["verify_identity"] = dict(verified_this="data.status", verified_all="data.overall",
+                                                   wrong_left="data.left", verified_value="verified")
+    pol["tool_results"]["get_account"] = dict((pol["tool_results"].get("get_account") or {}), amount_scale=0.01)
+    st = R.init_state(pol, CV)
+    st, a = say(pol, st, "kind=who;also=none;st=complete;prod=;who=self;party=")
+    st, a = say(pol, st, "kind=identity;also=none;st=complete;prod=;field=date_of_birth;ans=1990-01-01")
+    st, a = tool(pol, st, dict(status="failed", overall="failed", left=2))
+    check(st["identity"]["wrong"] == 1 and a["type"] == "say_exact", f"'failed' is not verified: {a}")
+    st, a = say(pol, st, "kind=identity;also=none;st=complete;prod=;field=date_of_birth;ans=1990-01-02")
+    st, a = tool(pol, st, dict(status="verified", overall="pending", left=2))
+    check(a["type"] == "say_exact" and st["identity"]["idx"] == 1, f"'verified' moves to question 2: {a}")
+    st, a = say(pol, st, "kind=identity;also=none;st=complete;prod=;field=phone_last4;ans=1234")
+    st, a = tool(pol, st, dict(status="verified", overall="verified", left=2))
+    check(a["type"] == "call_tool" and a["tool"] == "get_account", f"all verified: {a}")
+    st, a = tool(pol, st, dict(products=[dict(product_id="p1", type="personal_loan", past_due=54000, days_late=5,
+                                              instalment_amount=18000)]))
+    check("540.00 past due" in a["text"] and st["_pd"][0]["floor"] == 180.0, f"cents to major units: {a} {st['_pd']}")
+    st, a = say(pol, st, "kind=yes;also=none;st=complete;prod=")
+    check("540.00" in a["text"], f"read-back in major units: {a}")
+    st, a = say(pol, st, "kind=yes;also=none;st=complete;prod=")
+    check(a["type"] == "call_tool" and a["args"]["amount"] == 54000 and isinstance(a["args"]["amount"], int), f"promise in cents: {a}")
+    # policy amounts are major units and are not scaled: min_x 40 accepts 50.00 on a cents account
+    mx = copy.deepcopy(POL["A"]); mx["amounts"] = dict(acceptance=dict(kind="min_x", min=40))
+    mx["tool_results"] = dict(mx.get("tool_results") or {})
+    mx["tool_results"]["get_account"] = dict((mx["tool_results"].get("get_account") or {}), amount_scale=0.01)
+    st, a = to_statement(mx, [dict(product_id="p1", type="personal_loan", past_due=54000, days_late=5, instalment_amount=18000)])
+    st, a = say(mx, st, "kind=no;also=none;st=complete;prod=")
+    st, a = say(mx, st, "kind=amount;also=none;st=complete;prod=;amt=50")
+    check(st["offer"]["amount"] == 50.0 and "cannot" not in a["text"], f"min_x 40 (major) on a cents account: {a}")
+    # absent fields: unchanged
+    check(R.amount_scale(POL["A"]) == 1.0 and R.api_amount(POL["A"], 540.0) == 540.0, "absent scale")
+    return True
+
+
 if __name__ == "__main__":
+    print("verified_value + amount_scale:", status_and_scale())
     print("nested response paths:", nested_paths())
     print("gap 4 date refusal:", date_refusal())
     print("gap 3 floor and acceptance:", floor_acceptance())

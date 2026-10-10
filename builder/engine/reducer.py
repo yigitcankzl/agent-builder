@@ -410,7 +410,7 @@ def _account_rows(tool_event, policy=None):
             data = None
     path = tr_path(policy or dict(), 'get_account', 'products')
     if path and isinstance(data, dict) and isinstance(get_path(data, path), list):
-        return [_row_paths(policy, r) for r in get_path(data, path) if isinstance(r, dict)]
+        return [_scale_row(policy, _row_paths(policy, r)) for r in get_path(data, path) if isinstance(r, dict)]
     if isinstance(data, str):
         try:
             data = json.loads(data)
@@ -427,7 +427,37 @@ def _account_rows(tool_event, policy=None):
     if isinstance(data, dict):
         lists = [v for v in data.values() if isinstance(v, list)]
         data = data.get('products') or (lists[0] if lists else None)
-    return [_row_paths(policy or dict(), r) for r in (data or []) if isinstance(r, dict)]
+    return [_scale_row(policy or dict(), _row_paths(policy or dict(), r)) for r in (data or []) if isinstance(r, dict)]
+
+
+def amount_scale(policy):
+    """tool_results.get_account.amount_scale: account amounts in minor units (e.g. 0.01 for cents); absent -> 1."""
+    v = _num(((policy.get('tool_results') or dict()).get('get_account') or dict()).get('amount_scale'))
+    return v if v and v > 0 else 1.0
+
+
+def _scale_row(policy, r0):
+    """Row amounts (past_due, the floor field of its type) to major units; policy amounts (fixed, min_x) are already
+    major units and are never scaled."""
+    k = amount_scale(policy)
+    if k == 1.0:
+        return r0
+    r = dict(r0)
+    fb = ((policy.get('products') or dict()).get('floor_by_type') or dict()).get(str(r.get(pfield(policy, 'type'))))
+    names = [pfield(policy, 'past_due'), 'past_due'] + ([fb['field']] if isinstance(fb, dict) and fb.get('field') else [])
+    for name in set(names):
+        if _num(r.get(name)) is not None:
+            r[name] = round(float(r[name]) * k, 2)
+    return r
+
+
+def api_amount(policy, amount):
+    """A promise amount in the bank's unit: divided by the scale, a whole number for minor units."""
+    k = amount_scale(policy)
+    if k == 1.0:
+        return amount
+    v = float(amount) / k
+    return int(round(v)) if k < 1 else round(v, 2)
 
 
 def _row_paths(policy, r0):
@@ -827,6 +857,9 @@ def verify_result(policy, st, data, cv):
     if str(data.get('hint') or '') == 'day_month_swapped' and st['_id_hint'] < 1:
         st['_id_hint'] += 1
         return ask(st, D_HINT_MONTH, 'id_' + idt['order'][idt['idx']])
+    vv = tr_path(policy, 'verify_identity', 'verified_value')
+    if vv is not None:      # a string status (e.g. 'verified' | 'failed') instead of a boolean
+        data = dict(data, verified=str(data.get('verified')) == str(vv), all_verified=str(data.get('all_verified')) == str(vv))
     verified = str(data.get('verified')).lower() == 'true'
     if verified:
         if str(data.get('all_verified')).lower() == 'true' or idt['idx'] + 1 >= len(idt['order']):
@@ -869,7 +902,8 @@ def next_write(policy, st, cv):
         i = _index(st, pid)
         p = st['products'][i]
         if p['status'] == 'confirmed':
-            st['_last_args'] = dict(customer_id=cid(cv), product_id=pid, amount=p['offer']['amount'], date=p['offer']['date'])
+            st['_last_args'] = dict(customer_id=cid(cv), product_id=pid, amount=api_amount(policy, p['offer']['amount']),
+                                    date=p['offer']['date'])
             return call(st, 'promise', 'create_promise', dict(st['_last_args']), product_id=pid)
     st['phase'] = 'wrapup'
     notes = (policy.get('writes') or dict()).get('notes') or dict()
