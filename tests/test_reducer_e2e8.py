@@ -113,6 +113,8 @@ def kestrel():
         a = c.say(b)
     check(a["type"] == "say_exact" and "not making a payment promise today" in a["text"], f"the brief's no-promise question first: {a}")
     a = c.say("kind=yes;also=none;st=complete;prod=")
+    while a["type"] == "call_tool":
+        a = c.tool(dict(ok=True))
     check(a["type"] == "close" and "Kestrel Savings" in a["farewell"] and "recoveries" not in a["farewell"], f"standard band close: {a}")
     c = Call(pol, "2026-10-14T11:00", card(400.0, 45, mp=40.0), ["ahmet", "sw1a 1aa"])
     for b in ("kind=no;also=none;st=complete;prod=", "kind=reject;also=none;st=complete;prod=;why=flat"):
@@ -120,6 +122,8 @@ def kestrel():
     check("not making a payment promise today" in a.get("text", ""), f"serious band: the question: {a}")
     q = a["text"]
     a = c.say("kind=yes;also=none;st=complete;prod=")
+    while a["type"] == "call_tool":
+        a = c.tool(dict(ok=True))
     check(a["type"] == "close" and (q + a["farewell"]).count("recoveries team") == 1, f"serious band: the warning once: {q} / {a}")
     return "hooks at their points once; the on_no_promise question asked before the close; band condition; Ahmet / SW1A 1AA"
 

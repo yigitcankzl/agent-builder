@@ -385,13 +385,35 @@ def assistant_disclosure():
     check(g.count("assistant") == 1, f"an opening that already says it is not changed: {g!r}")
 
 
+def synthetic_fixes():
+    print("== queues, notes and asks as the brief states them (synthetic briefs)")
+    t = ("Restructuring transfers to general and closes transferred / restructuring. Ask an insistent human requester once "
+         "whether you can help, then transfer to restructuring and close transferred / human.")
+    check(B.explicit_queues(t, {"restructure", "human", "hardship"}, ["general", "restructuring", "support"])
+          == {"restructure": "general", "human": "restructuring"}, "queue_map follows the brief's literal transfer targets")
+    check(not B.notes_asked('Before ending a call without a promise, ask "Can I note that you are not making a payment promise today?"'),
+          "a 'Can I note ...?' question does not enable notes")
+    check(not B.notes_asked("Do not use add_note. Any transfer suppresses all notes."), "'Do not use add_note' disables notes")
+    check(B.notes_asked("For paid or dispute on one product, add the matching note and continue."), "'add the matching note' enables notes")
+    check(B.note_reasons(["refused", "dispute_x"], "note_reason,dispute,DISPUTE_NOTE,dispute_x\n") == {"refused": "refused", "dispute": "dispute_x"},
+          "note reasons: the same OAS value or the codes row, else left out")
+    check(B.default_ask({"field": "phone_last4"}) == "Could you confirm the last four digits of your phone number, please?",
+          "an empty ask gets the contract default")
+    p = copy.deepcopy(BASE)
+    p["identity"]["questions"][0]["ask"] = ""
+    rp, _ = B.to_reducer(p, OAS, [])
+    check(all(q["ask"].strip() for q in rp["identity"]["questions"]), "no empty identity ask leaves the bridge")
+    rp["identity"]["questions"][0]["ask"] = ""
+    check(any("empty ask" in e for e in validate(generate(rp, OAS), rp, OAS)), "validator 3 catches an empty identity ask")
+
+
 def gap2_exact():
     q = {"field": "postcode", "format": "postcode", "format_evidence": {"source": src("Send the postcode exactly as said, letters and digits.")}}
     check(B.answer_format(q)[0] == "free", "'exactly as said' wins over the postcode format -> free")
 
 
 if __name__ == "__main__":
-    for g in (gap1, gap2, gap2_exact, gap3, gap4, regressions, derive_fixes, integration_fixes, honesty, bank_names, placeholders, too_much, rehearsal, assistant_disclosure):
+    for g in (gap1, gap2, gap2_exact, gap3, gap4, regressions, derive_fixes, integration_fixes, honesty, bank_names, placeholders, too_much, rehearsal, assistant_disclosure, synthetic_fixes):
         g()
     print("RESULT:", "PASS" if not fails else f"FAIL ({len(fails)})")
     sys.exit(1 if fails else 0)

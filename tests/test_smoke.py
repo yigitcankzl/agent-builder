@@ -10,9 +10,12 @@ WF = WF.get("workflow", WF)
 L3 = json.load(open(os.path.join(ROOT, "tests", "fallback", "brief-a.l3.workflow.json")))
 
 
+CALL_VARS = ["customer_id", "first_name", "last_name", "title", "now"]     # the practice session's variables
+
+
 def go(wf=WF, mutate=None, **kw):
     rec = smoke.Recorded(REC, mutate)
-    return smoke.run(rec.api, rec.get_call, "wf", wf, **kw)
+    return smoke.run(rec.api, rec.get_call, "wf", wf, call_vars=CALL_VARS, **kw)
 
 
 def strip_hub_complete(kind, x):
@@ -78,6 +81,8 @@ CASES = [
     ("API key validation 503: platform, skipped", dict(mutate=key_503), "skip"),
     ("a timeout: platform, skipped", dict(mutate=timeout), "skip"),
     ("HTTP 422 on the workflow: S7", dict(mutate=http_422), "s7"),
+    ("{{bogus}} in the greet (static, before any chat turn)", dict(wf=dict(WF, nodes=dict(WF["nodes"], greet=dict(
+        WF["nodes"]["greet"], on_enter={"type": "tts", "text": "Hello {{bogus}}, am I speaking with {{title}} {{last_name}}?"})))), "s7"),
     ("simulation running: skipped, not failed", dict(sims_running=["sim1"]), "skip"),
 ]
 

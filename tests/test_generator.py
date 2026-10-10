@@ -52,7 +52,9 @@ def public_constants():
     fixed_schema |= {"postcode"}
     # the reducer's call-variable roles (contract interface, every brief's call variables are bound to them)
     fixed_schema |= {"first_name", "last_name"}
-    fixed = fixed_schema | {"verify_identity", "get_account", "create_promise", "add_note", "schedule_callback", "transfer_to_agent", "close_call"}
+    # the contract's note keys (writes.notes.reasons: refused, dispute, hardship, paid, service_error)
+    fixed_schema |= {"service_error"}
+    fixed =fixed_schema | {"verify_identity", "get_account", "create_promise", "add_note", "schedule_callback", "transfer_to_agent", "close_call"}
     return {c for c in consts if len(c) >= 4} - fixed
 
 

@@ -408,7 +408,38 @@ def opening_self_topics():
     return True
 
 
+def ev_bank_shapes():
+    """Fork 5's real-extractor bank (fallback c1123cd): date+amount always comes as kind=date;also=amount;amt=n (same
+    result as date_amount); 'no' to the pay-today ask and to an offer is a flat refusal; a day with a time in the
+    opening is a callback; t=paid with a quoted amt is not a proposal."""
+    for name, pol in POL.items():
+        st0 = to_readback(pol) if False else None
+        st0 = R.init_state(pol, CV)
+        for b in ("kind=who;also=none;st=complete;prod=;who=self;party=",):
+            st0, a = say(pol, st0, b)
+        st0, a = say(pol, st0, "kind=identity;also=none;st=complete;prod=;field=date_of_birth;ans=1990-01-01")
+        st0, a = tool(pol, st0, dict(verified=True, all_verified=False, wrong_answers_left=3))
+        st0, a = say(pol, st0, "kind=identity;also=none;st=complete;prod=;field=phone_last4;ans=1234")
+        st0, a = tool(pol, st0, dict(verified=True, all_verified=True, wrong_answers_left=3))
+        st0, a = tool(pol, st0, dict(products=ACC))
+        cp = lambda: R.json.loads(R.json.dumps(st0))
+        x1, a1 = say(pol, cp(), "kind=date_amount;also=none;st=complete;prod=;rel=;d=16;m=10;wd=;wk=none;vague=no;amt=300")
+        x2, a2 = say(pol, cp(), "kind=date;also=amount;st=complete;prod=;rel=;d=16;m=10;wd=;wk=none;vague=no;amt=300")
+        check(a1 == a2 and x1["products"] == x2["products"] and x1["q"] == x2["q"] == "readback", f"{name}: date;also=amount == date_amount: {a1} / {a2}")
+        x, a = say(pol, cp(), "kind=no;also=none;st=complete;prod=")
+        check(x["products"][0]["attempts"] == 1 and x["q"] == "offer", f"{name}: no to pay today -> attempt 1: {a}")
+        x, a = say(pol, x, "kind=no;also=none;st=complete;prod=")
+        check(x["products"][0]["attempts"] >= 1 and (x["phase"] == "closed" or x["products"][0]["status"] in ("refused", "proposed")), f"{name}: no to an offer is a flat refusal: {a}")
+        x, a = say(pol, cp(), "kind=topic;also=amount;st=complete;prod=;t=paid;amt=420")
+        check(a["type"] in ("close", "call_tool") and (x.get("offer") or {}).get("amount") != 420.0, f"{name}: paid with a quoted amount: {a}")
+        st = R.init_state(pol, CV)
+        st, a = say(pol, st, "kind=date;also=none;st=complete;prod=;rel=today;d=;m=;wd=;wk=none;vague=no;tm=16:30")
+        check(a["type"] == "call_tool" and a["tool"] == "schedule_callback" and a["args"]["time"] == "16:30", f"{name}: a time in the opening is a callback: {a}")
+    return True
+
+
 if __name__ == "__main__":
+    print("ev bank shapes (date+amount, no, call time, quoted amount):", ev_bank_shapes())
     print("opening: account topics imply the customer (nightmare PUB-09 live):", opening_self_topics())
     print("identity chatter is not a refusal (clean-1 surface PUB-07):", identity_chatter())
     print("split identity answers (clean-1 surface PUB-06):", split_answers())
@@ -457,5 +488,7 @@ if __name__ == "__main__":
         st = to_readback(pol)
         st["q"], st["phase"] = "pay_today", "negotiation"
         st, a = say(pol, st, "kind=topic;also=none;st=complete;prod=;t=dispute")
+        while a["type"] == "call_tool" and a["tool"] == "add_note":        # notes enabled (A+B): the note, then the close
+            st, a = tool(pol, st, dict(ok=True))
         check(a["type"] == "close" and (a["outcome"], a["reason"]) == v["dispute"], f"{name}: dispute closes outside read-back: {a}")
         print(name, "rules ok; vocab log:", v["log"])

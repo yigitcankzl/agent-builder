@@ -130,6 +130,9 @@ def validate(wf, rp, oas_path, unstable_quotes=()):
         errs.append(f"3: identity field {f!r} is neither an OAS value nor blocked with a close/transfer action (silently skipped)")
     if not idn.get("questions"):
         errs.append("3: the policy has no identity questions")
+    for q in idn.get("questions") or []:
+        if not str(q.get("ask") or "").strip() and not q.get("blocked"):
+            errs.append(f"3: identity question {q.get('field')!r} has an empty ask")
     # 4 tools vs OAS
     for k, n in nodes.items():
         for a in n.get("pre_actions") or []:

@@ -959,6 +959,67 @@ def _date_templates(p):
     return notes
 
 
+_XFER = re.compile(r"\btransfer\w*\s+(?:\w+\s+){0,2}?to\s+(?:the\s+)?([A-Za-z_]+)", re.I)
+
+
+def explicit_queues(brief_text, topics, e_q):
+    """{topic: queue} for each clause of the brief that says '<topic> ... transfer(s) to <queue>' with <queue> an OAS
+    value and exactly one topic named before it. Literal only: no semantic matching of queue names."""
+    out = {}
+    if not brief_text or not e_q:
+        return out
+    for clause in re.split(r"(?<=[.;])\s+|\n", brief_text):
+        m = _XFER.search(clause)
+        if not m or m.group(1) not in e_q:
+            continue
+        head = clause[:m.start()].lower()
+        hit = [t for t in topics if t[:6].lower() in head]
+        if len(hit) == 1:
+            out[hit[0]] = m.group(1)
+    return out
+
+
+_NOTE_NO = re.compile(r"\b(do not|don't|never)\s+(use|call|write|add)\s+(add_note|a note|notes)\b|\bno notes\b", re.I)
+_NOTE_DO = re.compile(r"\b(add|write|log|leave|record)\b(?:\s+\w+){0,2}\s+notes?\b|\bcall add_note\b", re.I)
+
+
+def notes_asked(brief_text):
+    """True when the brief tells the agent to write notes (add_note), not when it only asks the customer a 'Can I note
+    ...?' question or lists add_note among the tools."""
+    if _NOTE_NO.search(brief_text):
+        return False
+    return any(_NOTE_DO.search(c) and not re.search(r"\b(do not|don't|never|no)\b", c, re.I)
+               for c in re.split(r"(?<=[.;])\s+|\n", brief_text))
+
+
+NOTE_KEYS = ("refused", "dispute", "hardship", "paid", "service_error")
+
+
+def note_reasons(e_n, brief_text):
+    """{contract note key: add_note.reason value}: the same OAS value, else the brief's codes table row
+    'note_reason,<key>,<alias>,<value>'. A key with neither is left out (the reducer's own rules apply)."""
+    out = {}
+    for k in NOTE_KEYS:
+        m = re.search(rf"^note_reason,{k},[^,\n]*,([^,\s]+)\s*$", brief_text or "", re.M)
+        v = m.group(1) if m else k
+        if not e_n or v in e_n:
+            out[k] = v
+    return out
+
+
+def default_ask(q):
+    """Contract default wording for an identity question whose ask the brief does not give: 'Could you confirm your
+    <field words>, please?'; a <x>_last<n> field asks for 'the last <n> digits of your <x> number'."""
+    name = str(q.get("brief_name") or q.get("field") or "answer").lower()
+    m = re.match(r"(.*?)_?last_?(\d)$", name)
+    words = {"2": "two", "3": "three", "4": "four", "5": "five", "6": "six"}
+    if m:
+        what = f"the last {words.get(m.group(2), m.group(2))} digits of your {(m.group(1).replace('_', ' ') + ' number').replace('number number', 'number').strip()}"
+    else:
+        what = "your " + name.replace("_", " ")
+    return f"Could you confirm {what}, please?"
+
+
 def to_reducer(policy, oas_path, stable_unmapped=None, brief_text=None):
     oas = oas_summary(oas_path)
     p = copy.deepcopy(policy)
@@ -1077,6 +1138,9 @@ def to_reducer(policy, oas_path, stable_unmapped=None, brief_text=None):
                 blocked.append(q.get("field"))
     oas_txt = re.split(r"(?<=[.;])\s+", _oas_answer_text(oas_path))
     for q in idn.get("questions") or []:
+        if not str(q.get("ask") or "").strip():     # an empty ask never reaches the workflow: contract default
+            q["ask"] = default_ask(q)
+            notes.append(f"ASSUMPTION identity ask for {q.get('field')!r} not in the brief: {q['ask']!r}")
         words = [w for w in re.findall(r"[a-z]+", str(q.get("field") or "").lower()) if len(w) > 2]
         own = " ".join(s_ for s_ in oas_txt if words and any(w in s_.lower() for w in words))
         q["format_brief"], (q["format"], how) = q.get("format"), answer_format(q, own)
@@ -1125,13 +1189,23 @@ def to_reducer(policy, oas_path, stable_unmapped=None, brief_text=None):
         v = resolve("human_request.queue", hr["queue"], "transfer_to_agent.queue", e_q)
         if v:
             qtopic["human"] = v
+    for t, q in explicit_queues(brief_text, set(qtopic) | {"restructure", "human", "hardship"}, e_q).items():
+        if qtopic.get(t) != q:      # the brief's literal "<topic> ... transfer to <queue>" wins over the extractor
+            notes.append(f"transfer.queue_map.{t}: {qtopic.get(t)!r} -> {q!r} (the brief names the queue)")
+            qtopic[t] = q
     p["transfer"] = {"queue_map": qtopic, "pre_verification_queues": pre,
                      "source": (hr.get("source") or []) + (w.get("source") or []) or DEFAULT}
     if not tr.get("pre_verification_queues"):
         notes.append("transfer.pre_verification_queues not stated by the brief: empty (no transfer before verification)")
     nt = w.setdefault("notes", {})
     nt["enabled"] = bool(nt.get("enabled", str(nt.get("when", "")).strip().lower() not in ("", "never", "none")))
+    if brief_text is not None:
+        asked = notes_asked(brief_text)
+        if nt["enabled"] and not asked:
+            notes.append("writes.notes.enabled -> false: the brief never asks the agent to write a note")
+        nt["enabled"] = nt["enabled"] and asked
     e_n = _enum(oas, "add_note", "reason")
+    nt["reasons"] = note_reasons(e_n, brief_text)
     for i, ev in enumerate(p.get("events") or []):
         nr = str(ev.get("note_reason") or "").strip().lower()
         if nr in ("none", "null", "n/a", "-"):
