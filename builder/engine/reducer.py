@@ -51,6 +51,7 @@ def desk_name(row):
 D_PROTECT = 'These questions protect your account.'
 D_REACH = 'Could you tell me when I can reach {title} {last_name}?'   # the kit (PUB-02) checks 'when'
 D_OVERDUE = 'The rest stays overdue.'
+D_WHICH_DAY = 'Which day would suit you?'
 COUNTERS = ['confirm_name', 'clarify', 'vague', 'stop_talking', 'human_asks', 'decline_explain', 'support_offered']
 TOOL_NODE = dict(verify_identity='t_verify_identity', get_account='t_get_account', create_promise='t_create_promise',
                  add_note='t_add_note', schedule_callback='t_schedule_callback',
@@ -423,10 +424,13 @@ def ask(st, text, q):
     return dict(type='say_exact', text=text)
 
 
+OUR_OFFERS = ('floor', 'attempt_n')   # offers the agent proposed (PUB-06); a read-back of the customer's own date is re-said
 RESAY_CAP = 3   # DEFAULT cap for every q: the same open question re-said this many times in a row, then loop_break()
 
 
 def resay(st, prefix=''):
+    if st.get('q') == 'offer' and (st.get('offer') or dict()).get('kind') in OUR_OFFERS:   # heard, not answered: only the day
+        return ask(st, ((prefix + ' ') if prefix else '') + D_WHICH_DAY, 'exact_day')
     st['_resay_n'] = st.get('_resay_n', 0) + 1
     if st['_resay_n'] > RESAY_CAP:
         st['_resay_n'] = 0
@@ -1133,6 +1137,17 @@ def topic_event(policy, st, ev, today, cv):
         row = event_row(policy, 'human')
         st['_q_prev'], st['_ask_prev'] = st['q'], st.get('_last_ask') or ''
         return ask(st, (row or dict()).get('say') or D_HELP_FIRST, 'help_first')
+    if st['q'] == 'support_offer' and t in TOPIC_INFO + ('decline', 'purpose', 'hardship'):
+        line = ''        # PUB-05: "no, can I get a discount?" declines the support offer; it is never offered again
+        if t == 'terms' and st.get('_terms_n', 0) < 1:
+            st['_terms_n'] = 1
+            line = brief_sentence(policy, 'no_other_terms', D_NO_TERMS)
+        elif t in TOPIC_INFO and t != 'terms':
+            line = (event_row(policy, t) or dict()).get('say') or ''
+        act = no_event(policy, st, ev, today, cv)
+        if line and act.get('type') == 'close':
+            act = dict(act, farewell=line + ' ' + act['farewell'])
+        return act
     if t in TOPIC_INFO:
         if t == 'terms':     # the no-other-terms line at most once, never "I am sorry" unless the brief says it
             st['_terms_n'] = st.get('_terms_n', 0) + 1
@@ -1152,6 +1167,8 @@ def topic_event(policy, st, ev, today, cv):
         return dict(type='say_exact', text=(row or dict()).get('say') or D_CHANGE)
     if t in ('decline', 'purpose') and st['phase'] == 'opening':
         return reask_name(policy, st, cv)        # rule 3: a question first, the ask that follows is counted
+    if t in ('decline', 'purpose') and st['q'] == 'offer' and (st.get('offer') or dict()).get('kind') in OUR_OFFERS:
+        return resay(st, (event_row(policy, t) or dict()).get('say') or '')   # answer briefly, then only the day
     if t in ('decline', 'purpose'):
         if st['phase'] == 'identity':
             st['identity']['refusals'] += 1
@@ -1182,6 +1199,9 @@ def topic_event(policy, st, ev, today, cv):
     i = st['cur'] if st['cur'] is not None else 0
     if ev.get('prod') and str(ev.get('prod')).isdigit():
         i = _valid_prod(st, ev, i)
+    if t == 'hardship' and st['counters']['support_offered'] >= 1:   # offered once: a second hardship is the decline path
+        st['q'] = 'support_offer'
+        return no_event(policy, st, ev, today, cv)
     if t == 'hardship':
         row = next((e for e in policy.get('events') or [] if e.get('topic') == 'hardship' and not _none(e.get('note_reason'))), None)
         st['counters']['support_offered'] += 1
@@ -1258,6 +1278,8 @@ def on_user(policy, st, ev, today, cv):
         return date_event(policy, st, ev, today, cv)
     if k == 'amount':
         return amount_event(policy, st, ev, today, cv)
+    if st['q'] == 'offer' and (st.get('offer') or dict()).get('kind') in OUR_OFFERS:
+        st['q'], st['_last_ask'] = 'exact_day', D_WHICH_DAY    # the free reply never re-proposes the heard offer
     return dict(type='speak_free', node=_talk_node(st), hint=reask_line(st) if st.get('_last_ask') else '')
 
 
