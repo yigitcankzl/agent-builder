@@ -201,8 +201,15 @@ if __name__ == "__main__":
             r14 = build([os.path.join(ROOT, "briefs", "brief-a.md")], OAS, "smoke-bad", fr5, os.path.join(tmp, "s14"), os.path.join(tmp, "tr"),
                         2, 1500, saved_extractor("brief-a"), fallback=FakeL3)
             saves = lambda r: [json.loads(l)["candidate"] for l in open(r["trace"]) if json.loads(l)["event"] == "save"]
-            check(r14["exit_code"] == 2 and r14["signal"] == "S7" and r14.get("fallback_used") == "L3" and saves(r14) == ["main", "llm"], r14)
-            print("ok S7: main smoke failed -> L3 saved to the slot and smoked; both failed -> exit 2 S7")
+            check(r14["exit_code"] == 0 and r14.get("fallback_used") == "L3" and saves(r14) == ["main", "llm"] and "S7" in r14.get("warning", ""), r14)
+            print("ok S7: main and L3 smoke both fail on workflow evidence -> L3 kept in the slot, exit 0 with a warning")
+            SM.run = lambda *a, **k: {"ok": False, "skipped": True, "signal": None, "reason": "platform: HTTP error on turn 0: 503"}
+            FakeL3.made.clear()
+            fr8 = SmokeFreya()
+            r17 = build([os.path.join(ROOT, "briefs", "brief-a.md")], OAS, "smoke-503", fr8, os.path.join(tmp, "s17"), os.path.join(tmp, "tr"),
+                        2, 1500, saved_extractor("brief-a"), fallback=FakeL3)
+            check(r17["exit_code"] == 0 and not r17.get("fallback_used") and saves(r17) == ["main"] and FakeL3.made[0].cancelled, r17)
+            print("ok S7: a platform failure (503) in the smoke -> skipped, the main workflow kept, L3 cancelled")
             calls = iter([{"ok": False, "skipped": False, "signal": "S7", "reason": "no reply"}, {"ok": True, "skipped": False, "signal": None, "reason": ""}])
             SM.run = lambda *a, **k: next(calls)
             fr6 = SmokeFreya()

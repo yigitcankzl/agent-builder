@@ -48,22 +48,45 @@ def http_error(kind, x):
     return x
 
 
+def timeout(kind, x):
+    if kind == "reply":
+        raise TimeoutError("The read operation timed out")
+    return x
+
+
+def http_422(kind, x):
+    if kind == "reply":
+        raise RuntimeError("POST /api/v2/chat/message -> 422: workflow node 'hub' has no transitions")
+    return x
+
+
+def key_503(kind, x):
+    if kind == "reply":
+        raise RuntimeError("POST /api/v2/chat/message -> 503: API key validation temporarily unavailable")
+    return x
+
+
+# expected: "pass" (ok), "s7" (workflow-side failure), "skip" (platform-side: skipped, the saved workflow kept)
 CASES = [
-    ("recorded main call passes", dict(), True),
-    ("L3 workflow (no hub): reply checks only", dict(wf=L3), True),
-    ("hub code_exec never completed", dict(mutate=strip_hub_complete), False),
-    ("route still at its initial value", dict(mutate=vars_unchanged), False),
-    ("hub_error set", dict(mutate=hub_error), False),
-    ("{{bogus}} in a reply", dict(mutate=placeholder), False),
-    ("HTTP 503 on turn 0", dict(mutate=http_error), False),
-    ("simulation running: skipped, not failed", dict(sims_running=["sim1"]), True),
+    ("recorded main call passes", dict(), "pass"),
+    ("L3 workflow (no hub): reply checks only", dict(wf=L3), "pass"),
+    ("hub code_exec never completed", dict(mutate=strip_hub_complete), "s7"),
+    ("route still at its initial value", dict(mutate=vars_unchanged), "s7"),
+    ("hub_error set", dict(mutate=hub_error), "s7"),
+    ("{{bogus}} in a reply", dict(mutate=placeholder), "s7"),
+    ("HTTP 503 on turn 0: platform, skipped, main kept", dict(mutate=http_error), "skip"),
+    ("API key validation 503: platform, skipped", dict(mutate=key_503), "skip"),
+    ("a timeout: platform, skipped", dict(mutate=timeout), "skip"),
+    ("HTTP 422 on the workflow: S7", dict(mutate=http_422), "s7"),
+    ("simulation running: skipped, not failed", dict(sims_running=["sim1"]), "skip"),
 ]
 
 if __name__ == "__main__":
     bad = 0
     for name, kw, want in CASES:
         r = go(**kw)
-        ok = r["ok"] == want and (r["signal"] == ("S7" if not want else None))
+        got = "s7" if r["signal"] == "S7" else ("skip" if r["skipped"] else ("pass" if r["ok"] else "fail"))
+        ok = got == want
         bad += not ok
         print(("ok  " if ok else "FAIL"), name, "->", r["ok"], r["signal"], r["reason"][:120] or ("skipped" if r["skipped"] else ""))
     print("PASS" if not bad else "FAIL")

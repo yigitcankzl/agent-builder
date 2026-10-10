@@ -15,8 +15,10 @@ workflow stays invalid after the repair pass, or the guard fires before saving, 
 stays the submission.
 
 Smoke (S7, builder/smoke.py, Fork 5; only with BUILDER_SMOKE=1 and a real Freya client): after the save, two chat
-turns check the agent answers. With the smoke on, L3 stays alive until the smoke passes; a failed smoke replaces the
-slot with a valid L3 workflow (smoked again), else exit 2 with signal S7. With the smoke off nothing changes.
+turns check the agent answers. Only workflow-side evidence is S7; a platform failure (5xx, 429, timeout, no call) is
+skipped and the main workflow kept. With the smoke on, L3 stays alive until the smoke passes; an S7 smoke replaces the
+slot with a valid L3 workflow (smoked again; if L3 fails too it stays, exit 0 with a warning), else exit 2 with S7.
+With the smoke off nothing changes.
 
 L3 fallback (builder/fallback_llm.py, Fork 5): the direct LLM workflow writer starts in its own thread as soon as the
 sources are readable (not on S0, not when nothing is readable; --no-l3 turns it off). The main path is capped at
@@ -396,8 +398,9 @@ def build(briefs, openapi, slot=None, freya_client=None, out_dir="submission", t
             trace.log("fallback_selection", candidate="llm", main_signal="S7", main_reason="smoke failed after the main save")
             result.update(fallback_used="L3", main_signal="S7")
             if not _smoke(freya_client, r3["workflow"], trace, result, "llm"):
-                fb[0] = None
-                return finish("smoke failed for the main and the L3 workflow", 2, "S7", next="a human checks the slot")
+                # both failed on workflow evidence: L3 stays in the slot (nothing better exists now), exit 0 + a warning
+                trace.log("signal", signal="S7", level="warning", problems=["smoke failed for the main and the L3 workflow; L3 kept"])
+                result["warning"] = "S7: smoke failed for the main and the L3 workflow; L3 kept in the slot"
             fb[0] = None
             return finish()
         fb[0] and fb[0].cancel()

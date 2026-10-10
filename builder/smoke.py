@@ -2,9 +2,11 @@
 
 Two chat turns to the saved workflow, then one read of the call:
   turn 0 "Hello?" (chat does not route the first turn), turn 1 a name confirmation (extraction -> routing -> engine).
-Fails (signal S7) on: an HTTP error, no reply, a reply containing "{{", both turns slower than SLOW_S, and, when the
-workflow has the engine hub: no successful code_exec in the hub node, a hub_error, or route/say_next still at their
-initial values after turn 1. An L3 workflow (no hub) gets the reply checks only.
+Fails (signal S7) only on workflow-side evidence: a reply containing "{{", a started call with no reply, an HTTP 4xx
+that points at the workflow (400/404/409/422), and, when the workflow has the engine hub: no successful code_exec in the
+hub node, a hub_error, or route/say_next still at their initial values after turn 1. Platform-side failures (HTTP
+5xx/429/401/403, connection errors, timeouts, a call that never started, every turn slow, get_call failing) give
+skipped=True with the reason: the saved workflow is kept. An L3 workflow (no hub) gets the reply checks only.
 Skipped (not a failure) while a simulation runs in the workspace: chat then times out and slows the simulation.
 
     from builder import smoke
@@ -73,12 +75,28 @@ def check_call(call, wf):
     return bad
 
 
+_PLATFORM_HTTP = re.compile(r"\b(5\d\d|429|401|403)\b")
+_PLATFORM_WORDS = re.compile(r"timed? ?out|timeout|connection|temporarily unavailable|unavailable|reset by peer|"
+                             r"name resolution|ssl|refused|api key validation", re.I)
+_WORKFLOW_HTTP = re.compile(r"\b(400|404|409|422)\b")
+
+
+def classify_error(text):
+    """An exception text from the chat API -> 'platform' (a transient or auth/infra failure: never S7) or 'workflow'
+    (a 4xx that points at the workflow). Unknown errors count as platform: a good main workflow is never replaced on
+    a guess."""
+    t = str(text or "")
+    if _WORKFLOW_HTTP.search(t) and not _PLATFORM_HTTP.search(t):
+        return "workflow"
+    return "platform"
+
+
 def run(api, get_call, workflow_id, wf, sims_running=None, end=True):
     res = {"ok": False, "skipped": False, "signal": None, "reason": "", "turns": []}
     if sims_running:
         res.update(ok=True, skipped=True, reason=f"simulation running ({','.join(sims_running)}): smoke skipped")
         return res
-    call, slow, problems = None, 0, []
+    call, slow, problems, platform = None, 0, [], []
     cv = {k: v for k, v in (wf.get("test_variables") or {}).items() if isinstance(v, str)}
     for msg in TURNS:
         body = {"workflowId": workflow_id, "message": msg, "customerVariables": cv}
@@ -89,28 +107,33 @@ def run(api, get_call, workflow_id, wf, sims_running=None, end=True):
             r = api("POST", "/api/v2/chat/message", body)
         except Exception as e:                          # no re-send on 503/504: one attempt, the error is the result
             res["turns"].append({"user": msg, "error": str(e)[:300], "s": round(time.time() - t, 1)})
-            problems.append(f"HTTP error on turn {len(res['turns']) - 1}: {str(e)[:200]}")
+            (problems if classify_error(e) == "workflow" else platform).append(f"HTTP error on turn {len(res['turns']) - 1}: {str(e)[:200]}")
             break
         dt = round(time.time() - t, 1)
         call = r.get("callId", call)
         reply = r.get("response")
         res["turns"].append({"user": msg, "agent": reply, "s": dt})
         slow += dt > SLOW_S
-        if not reply:
-            problems.append(f"no reply on turn {len(res['turns']) - 1}")
+        if not reply:     # no call id: the call never started (platform); a started call with no reply is the workflow's
+            (problems if call else platform).append(f"no reply on turn {len(res['turns']) - 1}")
         elif "{{" in reply:
             problems.append(f"unresolved placeholder in the reply: {reply[:120]!r}")
     if slow == len(TURNS):
-        problems.append(f"every turn slower than {SLOW_S} s")
+        platform.append(f"every turn slower than {SLOW_S} s")
     if call and not problems:
         try:
             problems += check_call(get_call(call), wf)
         except Exception as e:
-            problems.append(f"get_call failed: {str(e)[:200]}")
+            platform.append(f"get_call failed: {str(e)[:200]}")
     if call and end:
         try: api("POST", "/api/v2/chat/end", {"callId": call})
         except Exception: pass
-    res.update(ok=not problems, signal="S7" if problems else None, reason="; ".join(problems), call_id=call)
+    if problems:          # workflow-side evidence only: S7
+        res.update(ok=False, signal="S7", reason="; ".join(problems + platform), call_id=call)
+    elif platform:        # platform-side: skipped, the saved workflow is kept
+        res.update(ok=False, skipped=True, signal=None, reason="platform: " + "; ".join(platform), call_id=call)
+    else:
+        res.update(ok=True, signal=None, reason="", call_id=call)
     return res
 
 
