@@ -6,15 +6,20 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path[:0] = [ROOT, os.path.join(ROOT, "tools")]
 import tests._env  # noqa: F401
 import freya
+import run_cases
 from run_cases import persona_for
 from score import http, score_ledger
+_styles = os.path.join(ROOT, "tests", "styles", "styles.json")
+if os.path.exists(_styles):                      # the custom styles of run_cases_styles.py (persona keys need them)
+    run_cases.STYLES.update(json.load(open(_styles)))
 
 sim_id, cases_path, out = sys.argv[1:4]
+style = sys.argv[4] if len(sys.argv) > 4 else None   # the official style the sim ran with (persona key)
 cases = json.load(open(cases_path))
 store = json.load(open(os.path.join(ROOT, ".personas.json")))
 pid = {}
 for c in cases:
-    spec = persona_for(c, {"identity": c["identity"]}, None)
+    spec = persona_for(c, {"identity": c["identity"]}, style)
     pid[c["id"]] = store[c["id"] + ":" + hashlib.sha1(json.dumps(spec, sort_keys=True).encode()).hexdigest()[:10]]
 s = freya.api("GET", f"/api/v2/simulations/{sim_id}"); s = s.get("simulation") or s
 its = freya.api("GET", f"/api/v2/simulations/{sim_id}/iterations"); its = its.get("iterations") or its.get("items") or its
