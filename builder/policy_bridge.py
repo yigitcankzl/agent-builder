@@ -392,6 +392,26 @@ _REC_CLAUSE = re.compile(r"\b((?:the|this|all|our|every) (?:calls?|conversations
 _OPENING_CUE = re.compile(r"first (?:sentence|thing|words?|line)|opening|greet\w*|introduc\w*|start of (?:the |each |every )?call|at the start", re.I)
 
 
+HONESTY = re.compile(r"\b(recorded|scheduled|transferred|saved|booked)\b", re.I)
+RESULT_POINTS = ("on_promise_recorded",)            # the only hook point spoken after a successful write
+RESULT_SENTENCES = ("recorded", "text_message")     # sentences the reducer speaks only after a successful write
+_REC_SENTENCE = re.compile(r"\b(?:the|this|all|our|every|your) (?:calls?|conversations?) (?:is|are|will be|may be|is being)"
+                           r" (?:being )?recorded(?: for ([a-z ]+?))?(?=[.,;!?]|$)", re.I)
+
+
+def honest_line(text):
+    """A line spoken before any tool result must not carry an honesty word (a judge reads 'recorded' as a claim that
+    something was recorded). The recording notice is rewritten deterministically, keeping its meaning and purpose:
+    'The call is recorded for training.' -> 'Please note that we keep a recording of this call for training.'
+    -> (new text, None), or (None, why) when another honesty word remains (the line is then not spoken)."""
+    t = str(text or "")
+    t = _REC_SENTENCE.sub(lambda m: "Please note that we keep a recording of this call" + (" for " + m.group(1) if m.group(1) else ""), t)
+    t = re.sub(r"\bPlease note that we keep\b", "Please note that we keep", t)
+    t = re.sub(r"(^|[.!?]\s+)please note", lambda m: m.group(1) + "Please note", t)
+    m = HONESTY.search(t)
+    return (None, f"honesty word {m.group(1)!r} before any tool result") if m else (t, None)
+
+
 def recording_hook(p, stable, hooks, unplaced):
     """The opening must carry the recording clause when the brief requires it: if no opening hook says it, a quote that
     puts 'the call is recorded' into the opening gives it (only the recording clause of that quote). -> note or None."""
@@ -517,6 +537,22 @@ def floor_spec(v, acct_fields):
     return out, None
 
 
+def too_much_date(am):
+    """amounts.too_much_date: the day of the 'too much' floor offer (deadline | today | offer). The extractor's value
+    when one of the three with a verified quote; else a fixed reading of the brief's own too-much rule (its text and
+    quotes): 'on/at the deadline' -> deadline, 'today' -> today, else offer (the refused offer's day). -> (value, note)"""
+    v = str(am.get("too_much_date") or "").strip().lower()
+    ev = [q.get("quote") for q in ((am.get("too_much_date_evidence") or {}).get("source") or []) if isinstance(q, dict) and q.get("quote")]
+    if v in ("deadline", "today", "offer") and ev:
+        return v, f"amounts.too_much_date {v} (extractor, quoted)"
+    text = " ".join([str(am.get("too_much") or "")] + ev)
+    if re.search(r"\b(on|at|for) the deadline\b", text, re.I):
+        return "deadline", "amounts.too_much_date deadline (from the too-much rule's words)"
+    if re.search(r"\btoday\b", text, re.I) and not re.search(r"\b(not|cannot|can.t|never|no)\b[^.;]{0,40}\btoday\b", text, re.I):
+        return "today", "amounts.too_much_date today (from the too-much rule's words)"
+    return "offer", "amounts.too_much_date offer (no day named for the too-much floor offer: the refused offer's day)"
+
+
 def acceptance_rule(a):
     """amounts.acceptance -> Fork 3's value ('floor_to_full' | 'full_only' | 'above_full_allowed' | {kind: min_x, min})
     and a note, or (None, problem)."""
@@ -622,6 +658,86 @@ def callback_who_rules(p):
         if w.get("effect_kind") == "callback" and not w.get("reason") and cb:
             w.update(outcome=cb["outcome"], reason=cb["reason"])
     return notes
+
+
+_PH = re.compile(r"\{\{?\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}?\}")
+
+
+def drop_unknown_placeholders(text, allowed):
+    """A spoken line may only carry placeholders the call provides (declared call variables and roles). A clause with
+    an unknown placeholder is dropped (comma/semicolon clauses, then the whole sentence) - never spoken literally.
+    -> (text, [dropped names])."""
+    t = str(text or "")
+    bad = [m.group(1) for m in _PH.finditer(t) if m.group(1) not in allowed and not m.group(0).startswith("<")]
+    if not bad:
+        return t, []
+    out = []
+    for sent in re.split(r"(?<=[.!?])\s+", t):
+        if not any(re.search(r"\{\{?\s*" + re.escape(b_) + r"\s*\}?\}", sent) for b_ in bad):
+            out.append(sent)
+            continue
+        parts = re.split(r"(?<=[,;])\s+", sent)
+        keep = [x for x in parts if not any(re.search(r"\{\{?\s*" + re.escape(b_) + r"\s*\}?\}", x) for b_ in bad)]
+        if keep and len(keep) < len(parts):
+            s_ = " ".join(keep).rstrip(",; ")
+            out.append(s_ + ("" if s_.endswith((".", "?", "!")) else sent[-1] if sent[-1] in ".?!" else "."))
+    return " ".join(x for x in out if x.strip()), sorted(set(bad))
+
+
+def placeholder_lint(p):
+    """Every spoken line of the policy: unknown placeholders dropped (see drop_unknown_placeholders). -> notes"""
+    cv = (p.get("meta") or {}).get("call_vars") or {}
+    allowed = set(cv) | set(cv.values()) | set(CALL_ROLES)
+    notes = []
+
+    def fix(where, holder, key):
+        new, dropped = drop_unknown_placeholders(holder.get(key), allowed)
+        if dropped:
+            notes.append(f"{where}: unknown placeholder(s) {dropped} dropped from {str(holder.get(key))[:70]!r}")
+            holder[key] = new
+    for sid, v in (p.get("sentences") or {}).items():
+        if isinstance(v, dict) and v.get("text"):
+            fix(f"sentence {sid}", v, "text")
+    for h in p.get("hooks") or []:
+        fix(f"hook {h.get('id')}", h, "text")
+    for coll in ("events", "who_rules"):
+        for e in p.get(coll) or []:
+            if e.get("say"):
+                fix(f"{coll} {e.get('topic') or e.get('who')}", e, "say")
+    for k, r in (p.get("date_rules") or {}).items():
+        if r.get("say"):
+            fix(f"date_rules.{k}", r, "say")
+    return notes
+
+
+def tool_status(p, oas_path):
+    """{tool: {status: enabled|blocked|absent, why}}: a tool is blocked when the brief cannot call it with OAS values: identity
+    blocked (verify_identity), a canonical write role with no OAS property, no queue that binds (transfer), no outcome
+    that binds (close_call). One blocked value alone does not block a tool that can still send its other values."""
+    from builder.generator import CANONICAL, CALL_VARS, oas_tools
+    tools = oas_tools(oas_path)
+    ta = p.get("tool_args") or {}
+    out = {}
+    for t in CANONICAL:
+        if t not in tools:
+            out[t] = {"status": "absent", "why": "not in the OAS"}
+            continue
+        miss = [c for c in CANONICAL[t] if c not in CALL_VARS and c not in (ta.get(t) or {})]
+        why = None
+        if t == "verify_identity" and (p.get("identity") or {}).get("blocked"):
+            why = "identity blocked: " + ", ".join(map(str, (p["identity"]["blocked"] or {}).get("fields") or []))
+        elif miss and t != "close_call":
+            why = "no OAS property for role(s) " + ", ".join(miss)
+        elif t == "transfer_to_agent":
+            tr = p.get("transfer") or {}
+            if not (tr.get("queue_map") or tr.get("pre_verification_queues")):
+                why = "no brief queue binds to the OAS queue field"
+        elif t == "close_call":
+            live = [r for r in (p.get("closing") or {}).get("table") or [] if not r.get("blocked")]
+            if not live:
+                why = "no brief outcome binds to the OAS outcome field"
+        out[t] = {"status": "blocked" if why else "enabled", "why": why or ""}
+    return out
 
 
 def _map_sentence_keys(p):
@@ -744,6 +860,9 @@ def to_reducer(policy, oas_path, stable_unmapped=None, brief_text=None):
                          "action": f"block ({problem}; the floor is the full amount)"})
     prod["floor_by_type"] = floors
     am = p.setdefault("amounts", {})
+    tmd, tnote = too_much_date(am)
+    am["too_much_date"] = tmd
+    notes.append(tnote)
     acc, anote = acceptance_rule(am.get("acceptance"))
     am["acceptance"] = acc or "floor_to_full"
     if anote:
@@ -766,6 +885,13 @@ def to_reducer(policy, oas_path, stable_unmapped=None, brief_text=None):
             r["brief_outcome"] = r["outcome"]
             r["outcome"] = resolve(f"closing.table[{i}].outcome", r["outcome"], "close_call.outcome", e_out)
             r["blocked"] = r["outcome"] is None
+    e_rsn = _enum(oas, "close_call", "reason")
+    for i, r in enumerate(table):     # a reason the OAS reason enum lacks: exact or sourced alias, else the row is blocked
+        if e_rsn and r.get("reason") and r["reason"] not in e_rsn:
+            r["brief_reason"] = r["reason"]
+            r["reason"] = resolve(f"closing.table[{i}].reason", r["reason"], "close_call.reason", e_rsn)
+            if r["reason"] is None:
+                r["blocked"] = True
     by_outcome = {}
     for r in table:
         if not r.get("blocked"):
@@ -870,15 +996,21 @@ def to_reducer(policy, oas_path, stable_unmapped=None, brief_text=None):
     p["tools"] = tools
     # tool_args: the ONE table (computed by generator.arg_map) that both the generator (baked placeholders) and the
     # reducer (written w_<tool>_<OAS field> variables) read. customer_id is the call variable, not in the table.
-    from builder.generator import CALL_VARS, arg_map, oas_tools
-    ta = {}
+    from builder.generator import CALL_VARS, CANONICAL, arg_map, arg_roles, oas_tools
+    ta, composed = {}, {}
     for tool, spec in oas_tools(oas_path).items():
         amap, unmapped_req, _ = arg_map(tool, spec)
-        ta[tool] = {c: f for f, c in amap.items() if c not in CALL_VARS}
+        ta[tool], comp = arg_roles(tool, spec)
+        composed.update(comp or {})
         for f in unmapped_req:
             mism.append({"policy_path": f"tool_args.{tool}", "value": f, "field": f"{tool}.body", "oas_enum": None,
                          "action": "block (no canonical role for this required OAS field)"})
+        for role in [c for c in CANONICAL.get(tool, []) if c not in CALL_VARS and c not in ta[tool]]:
+            mism.append({"policy_path": f"tool_args.{tool}.{role}", "value": role, "field": f"{tool}.{role}", "oas_enum": None,
+                         "action": "block (the canonical role has no request property; no other property stands in)"})
     p["tool_args"] = ta
+    if composed:
+        p["composed_fields"] = composed
     # tool_results: where the reducer reads each fact in the tool responses (exact OAS response fields)
     from builder.oas_bindings import tool_results
     tr_, missing = tool_results(oas_path, p, brief_text)
@@ -1009,6 +1141,31 @@ def to_reducer(policy, oas_path, stable_unmapped=None, brief_text=None):
     hooks, unplaced, hnotes = build_hooks(p, types)
     rec = recording_hook(p, stable_unmapped or [], hooks, unplaced)
     hnotes += [rec] if rec else []
+    kept = []
+    for h in hooks:             # honesty: no 'recorded'/'scheduled'/... before a tool result (judge check)
+        if h["point"] in RESULT_POINTS:
+            kept.append(h)
+            continue
+        txt, why = honest_line(h["text"])
+        if txt is None:
+            unplaced.append(dict(h, why=why))
+            hnotes.append(f"hook {h['id']} UNPLACED: {why}")
+        else:
+            if txt != h["text"]:
+                hnotes.append(f"hook {h['id']}: honesty rewrite {h['text']!r} -> {txt!r}")
+                h = dict(h, text=txt, rewritten_from=h["text"])
+            kept.append(h)
+    hooks = kept
+    for sid, v in (p.get("sentences") or {}).items():
+        if sid in RESULT_SENTENCES or not isinstance(v, dict) or not v.get("text"):
+            continue
+        txt, why = honest_line(v["text"])
+        if txt is None:
+            hnotes.append(f"sentence {sid}: {why}; emptied (reducer default)")
+            v["dropped_text"], v["text"] = v["text"], ""
+        elif txt != v["text"]:
+            v["rewritten_from"], v["text"] = v["text"], txt
+            hnotes.append(f"sentence {sid}: honesty rewrite -> {txt!r}")
     p["hooks"], p["unplaced_hooks"] = hooks, unplaced
     notes += hnotes + [f"hook {u['id']} UNPLACED ({u['why']}): {u['quote'][:80]!r}" for u in unplaced]
     words =[x.lower() for x in (p.get("honesty_words") or {}).get("words") or []]
@@ -1023,6 +1180,9 @@ def to_reducer(policy, oas_path, stable_unmapped=None, brief_text=None):
     p["unmapped_rules"] = [{k: u.get(k) for k in ("rule_id", "quote", "file", "phase_guess", "kind_guess")} for u in (stable_unmapped or [])]
     p.pop("unmapped", None)
     p["api_mismatch"] = mism
+    p["tool_status"] = tool_status(p, oas_path)
+    notes += placeholder_lint(p)
+    notes += [f"tool {t} BLOCKED: {v['why']}" for t, v in p["tool_status"].items() if v["status"] == "blocked"]
     report = {"api_mismatch": mism, "notes": notes, "errors": validate(p),
               "events": [(e_["brief_topic"], e_["topic"]) for e_ in evs], "who": [(x["brief_topic"], x["who"]) for x in who]}
     return p, report

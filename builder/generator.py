@@ -97,7 +97,32 @@ def arg_map(tool, spec):
             m[cands[0]] = c
             left_c.remove(c)
             left_f.remove(cands[0])
+    # one date-time field for both a date and a time role (e.g. schedule_callback.when): bound to 'date' here;
+    # arg_roles() gives it both roles and the reducer composes the value (policy.composed_fields)
+    if "date" in left_c and "time" in left_c:
+        dt = [f for f in left_f if _is_datetime(f, props[f] or {})]
+        if len(dt) == 1:
+            m[dt[0]] = "date"
+            left_c = [c for c in left_c if c not in ("date", "time")]
+            left_f.remove(dt[0])
     return m, [f for f in left_f if f in req], left_c
+
+
+def _is_datetime(f, s):
+    return s.get("format") == "date-time" or bool(re.search(r"date.?time|timestamp", f + " " + str(s.get("description", "")), re.I))
+
+
+def arg_roles(tool, spec):
+    """-> ({canonical role: OAS field} without call variables, composed or None). composed = {field: {format, roles}}
+    when one date-time field carries both the date and the time role (contract: the reducer writes ONE
+    w_<tool>_<field> = 'YYYY-MM-DDTHH:MM:00')."""
+    amap, _, left_c = arg_map(tool, spec)
+    roles = {c: f for f, c in amap.items() if c not in CALL_VARS}
+    f = roles.get("date")
+    if f and "time" in CANONICAL.get(tool, []) and "time" not in roles and _is_datetime(f, spec["props"].get(f) or {}):
+        roles["time"] = f
+        return roles, {f"{tool}.{f}": {"format": "date-time", "roles": ["date", "time"]}}
+    return roles, None
 
 
 def _is_date(f, s):
@@ -190,17 +215,30 @@ def pack_hub(src, safe="Sorry, could you say that again?"):
     return loader if "{{" not in loader and "}}" not in loader else src
 
 
-def _compose_opening(meta):
-    """Self-introduction from the policy meta, without repeating the bank name if the description already has it."""
+def self_description(meta):
+    """'<description> of <bank>' with the bank named ONCE: a description that already names the bank ('digital
+    assistant calling from <bank>', "<bank>'s digital assistant") is kept as it is. Every composed line uses
+    this (greet, system prompt)."""
     desc = (meta.get("agent_self_description") or "digital assistant").strip().rstrip(".")
     bank = (meta.get("bank_name") or "").strip()
     who = desc if (not bank or bank.lower() in desc.lower()) else f"{desc} of {bank}"
-    return f"Hello, this is {who if who.lower().startswith(('a ', 'an ', 'the ')) or bank.lower() in who.lower() else 'the ' + who}."
+    return who if who.lower().startswith(("a ", "an ", "the ")) or (bank and who.lower().startswith(bank.lower())) else "the " + who
+
+
+def _compose_opening(meta):
+    """Self-introduction from the policy meta, without repeating the bank name if the description already has it."""
+    return f"Hello, this is {self_description(meta)}."
 
 
 def _call_var_placeholders(text, call_vars):
     """{name}-style placeholders in a brief sentence -> the call-variable placeholders the engine substitutes."""
     return re.sub(r"\{(\w+)\}", lambda m: "{{" + str(call_vars.get(m.group(1), m.group(1))) + "}}", text or "")
+
+
+# drop an empty or unresolved close reason (a promise/paid outcome sends none); no double braces in this code
+DROP_EMPTY_REASON = ("try:\n    b = config.get('body')\n    if isinstance(b, dict):\n"
+                     "        r = str(b.get('reason') or '')\n        if r == '' or chr(123) in r:\n"
+                     "            b.pop('reason', None)\nexcept Exception:\n    pass\n")
 
 
 def hub_reset_code(tools):
@@ -212,7 +250,8 @@ def hub_reset_code(tools):
 
 def generate(rp, oas_path):
     tools = oas_tools(oas_path)
-    used = [t for t in TOOLS_ORDER if t in tools and not (t == "add_note" and not (rp.get("writes") or {}).get("notes", {}).get("enabled"))]
+    used = [t for t in TOOLS_ORDER if t in tools and not (t == "add_note" and not (rp.get("writes") or {}).get("notes", {}).get("enabled"))
+            and t not in (rp.get("disabled_tools") or [])]       # L2: an optional tool the degraded build dropped
     meta = rp.get("meta") or {}
     hd = rp.get("hangup_default") or {}
     who0 = hd.get("before_who") or {}
@@ -236,6 +275,11 @@ def generate(rp, oas_path):
         else:
             extra.append(t)
     opening = " ".join([intro.rstrip()] + extra)
+    from builder.policy_bridge import CALL_ROLES, drop_unknown_placeholders, honest_line
+    cvm = meta.get("call_vars") or {}
+    opening, dropped = drop_unknown_placeholders(opening, set(cvm) | set(cvm.values()) | set(CALL_ROLES))
+    GENERATED_FROM["greet_dropped_placeholders"] = dropped        # the greet is spoken before any tool result
+    opening = honest_line(opening)[0] or re.sub(r"\s*[^.!?]*\b(recorded|scheduled|transferred|saved|booked)\b[^.!?]*[.!?]", "", opening, flags=re.I).strip()
     # the reducer counts the name question as already asked by greet (contract §12 choice 2): greet must say it
     who_q = _call_var_placeholders(_text(rp, "confirm_who"), meta.get("call_vars") or {})
     if who_q and who_q not in opening:
@@ -248,7 +292,8 @@ def generate(rp, oas_path):
     GENERATED_FROM.update(hub_plain_kb=round(plain_kb, 1), hub_kb=round(len(hub_src) / 1024, 1),
                           hub_packed=hub_src is not None and "zlib.decompress" in hub_src)
     lang = meta.get("language") or "English"
-    sysp = (f"You are the {meta.get('agent_self_description') or 'digital assistant'} of {meta.get('bank_name') or 'the bank'}. "
+    lang = {"en": "English", "tr": "Turkish", "de": "German", "fr": "French", "es": "Spanish"}.get(str(lang).strip().lower()[:2] if len(str(lang).strip()) <= 5 else "", lang)   # a language code -> its name
+    sysp = (f"You are {self_description(meta)}. "
             f"Speak {lang}, one or two short sentences per turn. Never say that anything was recorded, scheduled or "
             f"transferred. Never invent figures, dates or reasons.")
     nodes = {
@@ -279,6 +324,8 @@ def generate(rp, oas_path):
         nodes["t_" + t] = _api_node(t, tools[t], "hub")
     if "close_call" in tools:
         cc = _api_node("close_call", tools["close_call"], "end", args_prefix="close")
+        # the graph's close node too: a promise/paid close sends no reason ('' would break a reason enum)
+        cc["pre_actions"][0]["pre_process_code"] = DROP_EMPTY_REASON
         nodes["t_close_call"] = cc
     hub_edges = [{"target_node": "close_say", "description": "close", "condition": _cond(("route", "close"))}]
     if "transfer_to_agent" in used:
@@ -297,13 +344,12 @@ def generate(rp, oas_path):
     for t in used:
         if t in OPEN:
             hub_edges.append({"target_node": "t_" + t, "description": t, "condition": _cond(("route", "t_" + t), ("w_go_" + t, "go"))})
-    hub_edges.append({"target_node": "talk_post", "description": "free talk after verification",
-                      "condition": {"logic": "or", "conditions": [
-                          {"logic": "and", "conditions": [{"variable": "route", "operator": "equals", "operand": "talk_post"},
-                                                          {"variable": "route_ok", "operator": "equals", "operand": "yes"}]},
-                          {"logic": "and", "conditions": [{"variable": "route", "operator": "equals", "operand": "stale"},
-                                                          {"variable": "route_ok", "operator": "equals", "operand": "yes"}]}]}})
     hub_edges.append({"target_node": "exact_say", "description": "say", "condition": _cond(("route", "say"))})
+    # ONE talk_post edge after every specific route (same-target edges merge at the first position): after
+    # verification, free talk, a stale turn and any unmatched route (a gated tool whose w_go is not 'go', an unknown
+    # route) stay in the verified free talk; talk_pre (the unverified prompt) is reached only before verification
+    hub_edges.append({"target_node": "talk_post", "description": "free talk / stale / unmatched route after verification",
+                      "condition": _cond(("route_ok", "yes"))})
     hub_edges.append(_always("talk_pre"))
     hub = _code_action("hub", hub_src, "talk_pre")
     hub["transitions"] = hub_edges
@@ -320,9 +366,7 @@ def generate(rp, oas_path):
         lc = _api_node("close_call", tools["close_call"], "end", args_prefix="close")["pre_actions"][0]
         lc["config"] = {"timeoutMs": 12000, "maxRetries": 0, "alwaysRunsAt": ["end_of_call"]}
         # drop an empty or unresolved reason (a promise/paid outcome sends none); no double braces in this code
-        lc["pre_process_code"] = ("try:\n    b = config.get('body')\n    if isinstance(b, dict):\n"
-                                  "        r = str(b.get('reason') or '')\n        if r == '' or chr(123) in r:\n"
-                                  "            b.pop('reason', None)\nexcept Exception:\n    pass\n")
+        lc["pre_process_code"] = DROP_EMPTY_REASON
         wf["tools"] = [lc]
     return wf
 

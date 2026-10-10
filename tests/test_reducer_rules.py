@@ -253,23 +253,117 @@ def pub03_live():
             sent.append(a["args"]["answer"])
             st, a = tool(pol, st, dict(verified=False, all_verified=False, wrong_answers_left=left))
         st, a = say(pol, st, "kind=identity;also=none;st=complete;prod=;field=date_of_birth;ans=1992-07-21;y=")
-        check(a["type"] == "say_exact" and a["text"] == R.sentence(pol, "continue_line", R.D_CONTINUE) and st["identity"]["wrong"] == 2,
-              f"{name}: a year not said must not be sent: {a}")
-        st, a = say(pol, st, "kind=identity;also=none;st=complete;prod=;field=date_of_birth;ans=1990-07-21;y=1990")
-        check(a["type"] == "call_tool" and a["args"]["answer"] == "1990-07-21", f"{name}: the said year: {a}")
+        check(a["type"] == "say_exact" and a["text"] == R.D_ASK_YEAR and st["identity"]["wrong"] == 2,
+              f"{name}: a year not said must not be sent (the year is asked): {a}")
+        st, a = say(pol, st, "kind=identity;also=none;st=complete;prod=;field=date_of_birth;ans=;y=1990")
+        check(a["type"] == "call_tool" and a["args"]["answer"] == "1990-07-21", f"{name}: the said year completes 21 July: {a}")
         st, a = tool(pol, st, dict(verified=False, all_verified=False, wrong_answers_left=0))
         check(a["type"] == "close" and (a["outcome"], a["reason"]) == tuple(v["id_failed"]), f"{name}: third wrong -> failed: {a}")
         # a y= that disagrees with ans is not sent either; an event without y= (older prompt) keeps the old behaviour
         st = R.init_state(pol, cv)
         st, a = say(pol, st, "kind=who;also=none;st=complete;prod=;who=self;party=")
         st, a = say(pol, st, "kind=identity;also=none;st=complete;prod=;field=date_of_birth;ans=1992-07-21;y=1990")
-        check(a["type"] == "say_exact", f"{name}: y disagrees with ans: {a}")
+        check(a["type"] == "call_tool" and a["args"]["answer"] == "1990-07-21", f"{name}: only the year said is used: {a}")
+        st, a = tool(pol, st, dict(verified=False, all_verified=False, wrong_answers_left=2))
         st, a = say(pol, st, "kind=identity;also=none;st=complete;prod=;field=date_of_birth;ans=1992-07-21")
         check(a["type"] == "call_tool", f"{name}: no y= key: unchanged: {a}")
     return True
 
 
+def pub06_rep3():
+    """PUB-06 live (90c8e096, intA3 rep 3): after the floor offer, 'I can't do that, what is the minimum payment' came as
+    reject;why=too_much; attempt 1 (the floor again, plan) was spoken as 'Could you make that payment ... The rest stays
+    overdue.' and the judge counted a second floor offer. Now: only the new day, after 'That was the lowest amount I can
+    offer.'; no amount, no overdue clause, no 'that payment'; the read-back names 637.50."""
+    c = [c for c in FIX["cases"] if c["id"] == "PUB-06"][0]
+    pol, cv = POL[c["policy"]], c["call_variables"]
+    st = R.init_state(pol, cv)
+    for s in c["steps"][:7]:
+        if s["source"] == "user":
+            st["tok"] = s["event_fields"]["n"]
+            st, a = R.step(pol, st, R.parse_event(s["event"], st, TOPICS), None, c["now"], cv)
+            st["last_tok"] = st["tok"]
+        else:
+            st, a = R.step(pol, st, None, s["tool_event"], c["now"], cv)
+    check("637.50" in a["text"] and "overdue" in a["text"], f"the floor offer: {a}")
+    for body, pre in (("kind=reject;also=none;st=complete;prod=;why=too_much", "That was the lowest amount I can offer. "),
+                      ("kind=no;also=none;st=complete;prod=", "")):
+        x = R.json.loads(R.json.dumps(st))
+        x, a = say(pol, x, body)
+        check(a["text"] == pre + "Could you pay on Friday 16 October instead?", f"{body}: {a}")
+        for w in ("637", "overdue", "that payment"):
+            check(w not in a["text"], f"{body}: '{w}' restated: {a}")
+        x, a = say(pol, x, "kind=date;also=accept;st=complete;prod=1;rel=;d=;m=;wd=fri;wk=this;vague=no")
+        check(x["q"] == "readback" and "637.50" in a["text"] and "16 October" in a["text"], f"read-back: {a}")
+    return True
+
+
+def clean1_pub07():
+    """Rehearsal clean-1 (Northline, rh-clean-1, call c1297bc6). 'I cannot pay that today.' was extracted as
+    why=too_much (the prompt now says flat); with flat, attempt 1 is the full 540 on the deadline, Thursday 22 October.
+    With the mis-extraction replayed: the brief's 'too much' floor offer goes on the deadline (rule 15), and an attempt
+    equal to the offer just refused (the floor on the same day) is used up, never proposed again."""
+    import json
+    pol = json.load(open(os.path.join(ROOT, "tests/generated/rehearsal/rh-clean-1.reducer_policy.json")))
+    cv = dict(customer_id="c_c107", first_name="Samuel", last_name="Ortiz", title="Mr", now=NOW)
+    acc = [dict(product_id="p1", type="personal_loan", past_due=540.0, days_late=5, instalment_amount=180.0)]
+
+    def statement():
+        st = R.init_state(pol, cv)
+        st, a = say(pol, st, "kind=who;also=none;st=complete;prod=;who=self;party=")
+        st, a = say(pol, st, "kind=identity;also=none;st=complete;prod=;field=date_of_birth;ans=1975-12-05;y=1975")
+        st, a = tool(pol, st, dict(verified=True, all_verified=False, wrong_answers_left=3))
+        st, a = say(pol, st, "kind=identity;also=none;st=complete;prod=;field=phone_last4;ans=7093")
+        st, a = tool(pol, st, dict(verified=True, all_verified=True, wrong_answers_left=3))
+        st, a = tool(pol, st, dict(products=acc))
+        check("full balance today" in a["text"], f"clean-1 first ask: {a}")
+        return st
+    st = statement()
+    st, a = say(pol, st, "kind=reject;also=none;st=complete;prod=;why=flat")
+    check("540.00" in a["text"] and "22 October" in a["text"] and "overdue" not in a["text"], f"flat -> attempt 1 full on the deadline: {a}")
+    st, a = say(pol, st, "kind=yes;also=none;st=complete;prod=")
+    check(st["q"] == "readback" and "540.00" in a["text"] and "22 October" in a["text"], f"read-back: {a}")
+    st = statement()
+    st, a = say(pol, st, "kind=reject;also=none;st=complete;prod=;why=too_much")
+    check("216.00" in a["text"] and "22 October" in a["text"] and st["products"][0]["attempts"] == 0, f"too much -> floor on the deadline, no attempt: {a}")
+    st, a = say(pol, st, "kind=reject;also=none;st=complete;prod=1;why=flat")
+    check(a["type"] == "close" or "216" not in a.get("text", ""), f"the refused floor on the same day is not offered again: {a}")
+    return True
+
+
+def split_answers():
+    """clean-1 surface PUB-06 live (e6d1cc28): 'May seventeenth.' -> d=17;m=5, then 'nineteen eighty six.' -> y=1986:
+    merged and verified once. Also: a cut-off part kept, a correction replaces a piece, last4 in two digit groups,
+    pieces never count as refusals and never outlive a sent answer."""
+    for name, pol in POL.items():
+        st = R.init_state(pol, CV)
+        st, a = say(pol, st, "kind=who;also=none;st=complete;prod=;who=self;party=")
+        st, a = say(pol, st, "kind=identity;also=none;st=complete;prod=;field=date_of_birth;ans=;y=;d=17;m=5")
+        check(a["text"] == R.D_ASK_YEAR and st["identity"]["refusals"] == 0, f"{name}: the year asked: {a}")
+        st, a = say(pol, st, "kind=identity;also=none;st=complete;prod=;field=date_of_birth;ans=;y=1986")
+        check(a["type"] == "call_tool" and a["args"]["answer"] == "1986-05-17", f"{name}: merged: {a}")
+        st, a = tool(pol, st, dict(verified=True, all_verified=False, wrong_answers_left=3))
+        st, a = say(pol, st, "kind=identity;also=none;st=partial;prod=;field=phone_last4;ans=44")
+        check(a["text"] == R.sentence(pol, "continue_line", R.D_CONTINUE), f"{name}: cut-off digits: {a}")
+        st, a = say(pol, st, "kind=identity;also=none;st=complete;prod=;field=phone_last4;ans=01")
+        check(a["type"] == "call_tool" and a["args"]["answer"] == "4401", f"{name}: last4 in two groups: {a}")
+        # a correction replaces the day; the pieces go once an answer is sent
+        st = R.init_state(pol, CV)
+        st, a = say(pol, st, "kind=who;also=none;st=complete;prod=;who=self;party=")
+        st, a = say(pol, st, "kind=identity;also=none;st=complete;prod=;field=date_of_birth;ans=;y=;d=17;m=5")
+        st, a = say(pol, st, "kind=identity;also=none;st=complete;prod=;field=date_of_birth;ans=;y=;d=18;m=")
+        st, a = say(pol, st, "kind=identity;also=none;st=complete;prod=;field=date_of_birth;ans=;y=1986")
+        check(a["args"]["answer"] == "1986-05-18", f"{name}: correction: {a}")
+        st, a = tool(pol, st, dict(verified=False, all_verified=False, wrong_answers_left=2))
+        st, a = say(pol, st, "kind=identity;also=none;st=complete;prod=;field=date_of_birth;ans=;y=;d=17;m=5")
+        check(a["text"] == R.D_ASK_YEAR, f"{name}: no year inherited after a sent answer: {a}")
+    return True
+
+
 if __name__ == "__main__":
+    print("split identity answers (clean-1 surface PUB-06):", split_answers())
+    print("rehearsal clean-1 PUB-07:", clean1_pub07())
+    print("PUB-06 rep 3: no second floor offer:", pub06_rep3())
     print("PUB-03 live: no inherited year:", pub03_live())
     print("PUB-02 live: speaker first in the opening:", pub02_live())
     print("answer topic + event, both orders (PUB-04):", answer_and_event())

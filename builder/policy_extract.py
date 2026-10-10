@@ -14,7 +14,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from builder.engine.date_policy import AMOUNT_RULES, DATE_RULES, bad_quotes, core_missing, validate
 from builder.oas import load_oas
 
-MODEL = os.environ.get("POLICY_MODEL", "")          # empty: the CLI's default model
+MODEL = os.environ.get("POLICY_MODEL", "claude-opus-5-5")   # pinned for reproducibility; POLICY_MODEL overrides
 TEXT_EXT = (".md", ".txt", ".eml", ".csv", ".json", ".yaml", ".yml")
 
 SCHEMA = r"""
@@ -53,7 +53,11 @@ Use {"file": "default", "quote": ""} ONLY when the material says nothing at all 
               "stop_when_exhausted": {"value": bool, "source": Q}},
  "amounts": {"first_ask": str, "too_much": str, "accept_range": str, "below_floor": str,
              "acceptance": "floor_to_full" | "full_only" | "above_full_allowed" | {"kind": "min_x", "min": number},
-             "acceptance_evidence": {"source": Q}, "source": Q},
+             "acceptance_evidence": {"source": Q},
+             "too_much_date": "deadline" | "today" | "offer",
+             "too_much_date_evidence": {"source": Q}, "source": Q},
+     <- too_much_date: on which day the floor is offered when the customer says the full amount is too much: on the
+        deadline, today, or the day of the offer that was refused (the usual case when the material names no day).
  "date_rules": {"<situation>": {"action": "shift_next_business_day" | "shift_previous_business_day" | "offer_deadline" | "refuse",
                                 "say": "<the material's exact words for that case, may use <NAMED> <DATE> <DEADLINE>, or ''>",
                                 "source": Q}}

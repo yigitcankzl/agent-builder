@@ -26,11 +26,14 @@ validate(wf, rp, oas_path, unstable_quotes=()) -> list of problems (empty = pass
 17 hooks: known points, closed-set conditions, speakable text with its quote; the greet says every opening hook
 18 identity answer formats are in the closed set
 19 floor rules, amounts.acceptance and date_rules use the closed shapes (gaps 3-4)
+20 honesty: no recorded/scheduled/transferred/saved/booked in the greet or any line spoken before a write succeeds
+21 the bank name appears once per sentence in composed self-descriptions (greet, system prompt, task messages)
+22 every {{x}} in a spoken tts text is a workflow variable or a declared call variable
 """
 import argparse, json, os, re, sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from builder.generator import CALL_VARS, GATED, arg_map, oas_tools
+from builder.generator import CALL_VARS, GATED, arg_map, arg_roles, oas_tools
 from builder.oas import load_oas
 
 
@@ -239,7 +242,7 @@ def validate(wf, rp, oas_path, unstable_quotes=()):
         errs.append("11: the policy has no tool_args table")
     else:
         for name, spec in tools.items():
-            expect = {c: f for f, c in arg_map(name, spec)[0].items() if c not in CALL_VARS}
+            expect = arg_roles(name, spec)[0]
             if name != "close_call" and ta.get(name, {}) != expect:
                 errs.append(f"11: tool_args[{name}] {ta.get(name)} != arg_map {expect}")
             node = nodes.get("t_" + name)
@@ -263,7 +266,10 @@ def validate(wf, rp, oas_path, unstable_quotes=()):
                 continue
             if not path_exists(oas_path, tool, path):
                 errs.append(f"13: tool_results.{tool}.{fact} = {path!r} is not in the OAS response schema")
-    for tool, fact in (("verify_identity", "verified_all"), ("get_account", "products"), ("get_account", "id"),
+    vi = (rp.get("tool_results") or {}).get("verify_identity") or {}
+    if "t_verify_identity" in nodes and not (vi.get("verified_all") or vi.get("verified_this")):
+        errs.append("13: tool_results.verify_identity has neither verified_all nor verified_this")
+    for tool, fact in (("get_account", "products"), ("get_account", "id"),
                        ("get_account", "past_due"), ("get_account", "days_late")):
         if "t_" + tool in nodes and fact not in (rp.get("tool_results") or {}).get(tool, {}):
             errs.append(f"13: tool_results.{tool}.{fact} is missing")
@@ -353,6 +359,36 @@ def validate(wf, rp, oas_path, unstable_quotes=()):
             errs.append(f"19: date_rules.{sit} {r!r} is outside the closed sets")
         elif r.get("say") and (INSTRUCTION.search(r["say"]) or set(re.findall(r"<[A-Z_]+>", r["say"])) - {"<NAMED>", "<DATE>", "<DEADLINE>"}):
             errs.append(f"19: date_rules.{sit}.say is not a speakable line: {r['say'][:60]!r}")
+    # 20 honesty: no 'recorded'/'scheduled'/'transferred'/'saved'/'booked' in any line spoken before a write succeeds
+    #    (greet, hooks other than on_promise_recorded, sentences other than recorded/text_message, event/who lines)
+    from builder.policy_bridge import HONESTY, RESULT_POINTS, RESULT_SENTENCES
+    lines = [("greet", greet)]
+    lines += [(f"hook {h.get('id')} ({h.get('point')})", h.get("text")) for h in rp.get("hooks") or [] if h.get("point") not in RESULT_POINTS]
+    lines += [(f"sentence {k}", (v or {}).get("text")) for k, v in (rp.get("sentences") or {}).items()
+              if k not in RESULT_SENTENCES and isinstance(v, dict)]
+    lines += [(f"{c} {e.get('topic') or e.get('who')}", e.get("say")) for c in ("events", "who_rules") for e in rp.get(c) or []]
+    for where, t in lines:
+        m = HONESTY.search(str(t or ""))
+        if m:
+            errs.append(f"20: {where} says {m.group(1)!r} before any tool result: {str(t)[:70]!r}")
+    # 21 the bank is named once in a composed self-description (greet, system prompt, free-talk prompts)
+    bank = str((rp.get("meta") or {}).get("bank_name") or "").strip()
+    if bank:
+        texts = [("system_prompt", wf.get("system_prompt", "")), ("greet", greet)]
+        texts += [(k, n.get("task_message", "")) for k, n in nodes.items() if n.get("task_message")]
+        for where, t in texts:
+            for sent in re.split(r"(?<=[.!?])\s+", str(t)):
+                if len(re.findall(re.escape(bank), sent, re.I)) > 1:
+                    errs.append(f"21: {where} names the bank twice in one sentence: {sent[:80]!r}")
+    # 22 every {{x}} in a spoken tts text is a variable the workflow defines (test_variables) or a declared call variable
+    cvars = set(((rp.get("meta") or {}).get("call_vars") or {}).values())
+    tv = set((wf.get("test_variables") or {}).keys()) | cvars
+    for k, n in nodes.items():
+        oe = n.get("on_enter") or {}
+        if oe.get("type") == "tts":
+            for name in re.findall(r"\{\{\s*([A-Za-z0-9_.\-]+)\s*\}\}", str(oe.get("text", ""))):
+                if name not in tv:
+                    errs.append(f"22: {k} speaks {{{{{name}}}}}, which is neither a workflow variable nor a declared call variable")
     # 9 unstable unmapped
     # only where unmapped rules are compiled: the policy's unmapped_rules (reducer input) and the free-talk prompts.
     # (A short generic phrase like "Ask once more." can legitimately appear elsewhere, e.g. a fixed sentence.)

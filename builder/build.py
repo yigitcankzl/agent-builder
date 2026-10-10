@@ -17,7 +17,7 @@ stays the submission.
 L3 fallback (builder/fallback_llm.py, Fork 5): the direct LLM workflow writer starts in its own thread as soon as the
 sources are readable (not on S0, not when nothing is readable; --no-l3 turns it off). The main path is capped at
 MAIN_CAP_S (15 min + 90 s) or --budget-min - 90 s, whichever is earlier. If the main path passes, L3 is cancelled
-before the save. If it ends on EXTRACT, S2, S5 or GUARD, build waits for L3 until budget - 150 s and, when L3's static
+before the save. If it ends on EXTRACT, S2, S3 or S5, build waits for L3 until budget - 150 s and, when L3's static
 check passed, saves THAT workflow once and exports it (exit 0, fallback_used=L3, a fallback_selection trace event).
 There is exactly one save per slot per build.
 
@@ -29,7 +29,9 @@ Exit codes (also `exit_code` in the JSON result; the trace has a `signal` event 
      clone. Nothing is saved, there is no LLM fallback (a dead stub agent must never be saved).
 Signals (FINAL-PLAN section 2): S0 engine not loaded, S1 unreadable source / too little text (warning; abort only
 when nothing is readable), S2 core sections missing after the targeted re-extraction,
-S5 validator still failing after the repair pass, EXTRACT every extraction run failed, GUARD time guard.
+S3 a core response fact (verified flag, products, id, past due, days late) unbound even after the binding assist,
+S5 validator still failing after the repair pass and the L2 degraded build (optional features stripped and
+regenerated when every error is on one; result['degraded'] lists them), EXTRACT every extraction run failed, GUARD time guard.
 """
 import argparse, concurrent.futures as cf, hashlib, json, os, sys, time
 
@@ -42,7 +44,7 @@ from builder.ingest import ingest, s1
 from builder.integration import EngineNotLoaded, _load
 from builder.engine.date_policy import core_missing
 from builder.policy_extract import apply_reextraction, extract, read_files, reextract_core, reextract_fields
-from builder.selftest import run_selftest
+from builder.selftest import run_selftest, walk_smoke
 from builder.trace import BuildTrace
 from builder.validate_workflow import validate
 
@@ -104,7 +106,37 @@ def _rules_summary(policy):
 
 
 MAIN_CAP_S = 15 * 60 + 90       # the main path's own cap; the rest of --budget-min is for the L3 candidate + one save
-L3_SIGNALS = {"EXTRACT", "S2", "S5", "GUARD"}     # main-path failures the L3 writer may cover (never S0, never S1 abort)
+L3_SIGNALS = {"EXTRACT", "S2", "S3", "S5"}     # main-path failures the L3 writer may cover (never S0, S1 abort or GUARD: a late main build is never replaced)
+
+
+def _repro():
+    """What a re-run needs to reproduce this build: the code commit, the pinned model, the runtime."""
+    import platform, subprocess
+    from builder.policy_extract import MODEL
+
+    def git(*a):
+        try:
+            return subprocess.run(["git", "-C", ROOT, *a], capture_output=True, text=True, timeout=10).stdout.strip()
+        except Exception:
+            return ""
+    return {"commit": git("rev-parse", "HEAD") or "unknown", "branch": git("rev-parse", "--abbrev-ref", "HEAD"),
+            "dirty": bool(git("status", "--porcelain", "--untracked-files=no")), "model": MODEL,
+            "python": platform.python_version(), "argv": sys.argv[1:]}
+
+
+def _assumptions(rp, brep, result):
+    """The defaults the build used, what it could not place, and every open question - the trace's first block."""
+    rp, brep = rp or {}, brep or {}
+    notes = brep.get("notes") or []
+    return {"contract_defaults_used": [n for n in notes if "default" in n.lower()][:40],
+            "not_implemented_unplaced_hooks": [f"{u.get('why')}: {u.get('quote')}" for u in rp.get("unplaced_hooks") or []],
+            "not_implemented_unmapped_rules": [u.get("quote") for u in rp.get("unmapped_rules") or []],
+            "not_implemented_unmapped_topics": [f"{u.get('topic')}: {u.get('quote')}" for u in rp.get("unmapped_topics") or []],
+            "api_mismatch": [f"{m.get('field')} {m.get('value')!r}: {m.get('action')}" for m in brep.get("api_mismatch") or []],
+            "tools_blocked": [f"{t}: {v.get('why')}" for t, v in (rp.get("tool_status") or {}).items() if v.get("status") == "blocked"],
+            "examiner": (result or {}).get("examiner"),
+            "signals": [(result or {}).get("signal")] if (result or {}).get("signal") else [],
+            "s1_sources": (result or {}).get("s1") or []}
 
 
 def _save(freya_client, slot, wf, out_dir, trace, result, candidate):
@@ -120,7 +152,7 @@ def _save(freya_client, slot, wf, out_dir, trace, result, candidate):
 
 
 def build(briefs, openapi, slot=None, freya_client=None, out_dir="submission", trace_dir="traces", runs=2,
-          budget_s=25 * 60, extractor=extract, fallback=None):
+          budget_s=25 * 60, extractor=extract, fallback=None, examiner=None):
     """fallback: None, or a factory (briefs, openapi, log) -> an object with start/cancel/wait (fallback_llm.Fallback).
     It starts as soon as the sources are readable and is used only when the main path ends on an L3 signal."""
     t0 = time.time()
@@ -132,7 +164,10 @@ def build(briefs, openapi, slot=None, freya_client=None, out_dir="submission", t
     result = {"slot": slot, "trace": trace.path, "fallback_required": False}
     fb = [None]
 
+    state = {}      # the latest bridged policy and bridge report, for the assumptions block
+
     def finish(reason=None, code=0, signal=None, **extra):
+        trace.log("assumptions", **_assumptions(state.get("rp"), state.get("brep"), result))
         if not reason and fb[0]:
             fb[0].cancel()
             trace.log("fallback_selection", candidate="main", l3="cancelled")
@@ -168,6 +203,7 @@ def build(briefs, openapi, slot=None, freya_client=None, out_dir="submission", t
         return finish(f"engine not loaded: {e}", 3, "S0", next="fix the clone (no fallback)")
 
     trace.log("start", slot=slot, briefs=[os.path.basename(b.rstrip("/")) for b in briefs], runs=runs, budget_s=budget_s)
+    trace.log("reproducibility", **_repro())
     try:     # S0 before any model call: a clone without a loadable engine stops in seconds, not after extraction
         for mod, name in (("builder.engine.reducer", "hub_source"), ("builder.engine.event_field", "ev_field")):
             if not _load(mod, name):
@@ -187,7 +223,9 @@ def build(briefs, openapi, slot=None, freya_client=None, out_dir="submission", t
         trace.log("fallback_started", candidate="llm")
     # 1. extraction runs, in parallel
     policies = []
-    with cf.ThreadPoolExecutor(runs) as ex:
+    with cf.ThreadPoolExecutor(runs + 1) as ex:
+        # the independent examiner (sees only the sources and the OAS) runs in parallel with the extractions
+        exam_f = ex.submit(examiner, briefs, openapi, trace, deadline) if examiner else None
         futs = [ex.submit(extractor, briefs, openapi, None, True, trace, deadline) for _ in range(runs)]
         for i, f in enumerate(futs, 1):
             try:
@@ -217,6 +255,20 @@ def build(briefs, openapi, slot=None, freya_client=None, out_dir="submission", t
         if still:
             lvl = "L3" if any(m.split(".")[0] in ("identity", "closing") for m in still) else "L2"
             return finish(f"core sections missing after re-extraction: {still}", 2, "S2", core_missing=still, next=lvl)
+    if exam_f is not None:     # Q1: compare with the examiner; each disagreement re-checked once (quotes, memo order)
+        try:
+            answers = exam_f.result()
+            trace.log("examiner", answered=sorted(answers))
+            if time.time() < deadline - 120:
+                from builder.examiner import reconcile
+                policies[0], erep = reconcile(policies[0], briefs, openapi, answers, trace, deadline, log=trace.log)
+            else:
+                from builder.examiner import disagreements
+                erep = {"disagreements": len(disagreements(policies[0], answers)), "skipped": "no time for the re-check"}
+            trace.log("examiner_result", **erep)
+            result["examiner"] = erep
+        except Exception as e:
+            trace.log("examiner", error=str(e)[:300])
     sigs = [core_signature(p) for p in policies]
     agree = len(set(sigs)) == 1
     trace.log("core_agreement", runs=len(policies), agree=agree,
@@ -232,6 +284,7 @@ def build(briefs, openapi, slot=None, freya_client=None, out_dir="submission", t
     wf = rp = None
     for k, pol in enumerate(attempt_order[:2]):
         rp, brep = to_reducer(pol, openapi, stable, brief_text)
+        state.update(rp=rp, brep=brep)
         trace.log("bridge", attempt=k + 1, api_mismatch=brep["api_mismatch"], notes=brep["notes"], schema_errors=brep["errors"],
                   topics=brep["events"], identity_blocked=(rp.get("identity") or {}).get("blocked"), hangup_default=rp.get("hangup_default"))
         mism = brep["api_mismatch"]
@@ -250,8 +303,23 @@ def build(briefs, openapi, slot=None, freya_client=None, out_dir="submission", t
             if any(r.get("accepted") for r in res.values()):
                 pol = apply_reextraction(pol, mism, res)
                 rp, brep = to_reducer(pol, openapi, stable, brief_text)
+                state.update(rp=rp, brep=brep)
                 trace.log("bridge", attempt="1-reextracted", api_mismatch=brep["api_mismatch"], notes=brep["notes"],
                           identity_blocked=(rp.get("identity") or {}).get("blocked"))
+        # S3: a core response fact the shape rules could not bind -> one build-time binding assist (accepted only
+        # when the path exists in the OAS with the right shape); still missing -> L3 (it reads results through the LLM)
+        from builder.binding_assist import assist, core_missing as core_unbound
+        if core_unbound(rp):
+            if time.time() < deadline - 60:
+                try:
+                    rp, arep = assist(rp, openapi, brief_text, trace, deadline)
+                except Exception as e:
+                    arep = {"error": str(e)[:300], "still_missing": [f"{t}.{f}" for t, f in core_unbound(rp)]}
+                trace.log("binding_assist", **arep)
+                state.update(rp=rp)
+            still = [f"{t}.{f}" for t, f in core_unbound(rp)]
+            if still:
+                return finish(f"core response facts not bound in the OAS: {still}", 2, "S3", next="L3", core_unbound=still)
         try:
             wf = generate(rp, openapi)
         except EngineNotLoaded as e:
@@ -260,13 +328,25 @@ def build(briefs, openapi, slot=None, freya_client=None, out_dir="submission", t
             return engine_failed("the generator used a stub hub or event field")
         errs = validate(wf, rp, openapi, [u["quote"] for u in unstable])
         trace.log("validator", attempt=k + 1, passed=not errs, errors=errs, hub_code=generator.GENERATED_FROM.get("hub"),
-                  ev_field=generator.GENERATED_FROM.get("ev"))
+                  ev_field=generator.GENERATED_FROM.get("ev"), greet_dropped_placeholders=generator.GENERATED_FROM.get("greet_dropped_placeholders"))
         if not errs:
             break
         if k == 0 and len(attempt_order) == 1:
             trace.log("repair", note="no second extraction run to repair from")
     else:
-        return finish("workflow still invalid after the repair pass", 2, "S5", next="L2", validator_errors=errs[:10])
+        # L2: every remaining error on an optional feature -> strip those features and regenerate (core never stripped)
+        from builder.degrade import degrade
+        rp2, info = degrade(rp, errs)
+        if rp2 is None:
+            return finish("workflow still invalid after the repair pass (core errors)", 2, "S5", next="L3", validator_errors=errs[:10])
+        wf = generate(rp2, openapi)
+        errs2 = validate(wf, rp2, openapi, [u["quote"] for u in unstable])
+        trace.log("degraded_build", stripped=info, passed=not errs2, errors=errs2[:10])
+        if errs2:
+            return finish("degraded build still invalid", 2, "S5", next="L3", validator_errors=errs2[:10])
+        rp, errs = rp2, []
+        state.update(rp=rp)
+        result["degraded"] = info
     if errs:
         return finish("workflow invalid", 2, "S5", next="L2", validator_errors=errs[:10])
     tool_nodes = [k for k, n in wf["nodes"].items() if n["node_type"] == "api_request"]
@@ -283,6 +363,15 @@ def build(briefs, openapi, slot=None, freya_client=None, out_dir="submission", t
     if fb[0]:
         fb[0].cancel()      # before the save: one save per slot, the main candidate
     _save(freya_client, slot, wf, out_dir, trace, result, "main")
+    # a generic call through the compiled graph (Fork 3's walker): wiring bugs only; a warning signal, never blocking
+    try:
+        wk = walk_smoke(rp, wf, openapi)
+    except Exception as e:
+        wk = {"run": False, "errors": [f"walk_smoke raised {type(e).__name__}: {str(e)[:200]}"]}
+    trace.log("graph_walk", **wk)
+    result["graph_walk"] = {"run": wk.get("run"), "errors": (wk.get("errors") or [])[:5], "calls": wk.get("calls")}
+    if wk.get("errors"):
+        trace.log("signal", signal="WALK", level="warning", problems=wk["errors"][:10])
     st_res = run_selftest(rp, openapi)
     trace.log("self_test", **st_res)
     result["self_test"] = {k: st_res.get(k) for k in ("run", "scenarios", "passed", "failed", "note")}
@@ -300,6 +389,7 @@ def main():
     ap.add_argument("--out-dir", default=os.path.join(ROOT, "submission"))
     ap.add_argument("--trace-dir", default=os.path.join(ROOT, "traces"))
     ap.add_argument("--no-l3", action="store_true", help="do not start the L3 fallback writer (local tests)")
+    ap.add_argument("--no-examiner", action="store_true", help="do not run the independent examiner")
     a = ap.parse_args()
     *briefs, openapi = a.inputs
     if not briefs or not openapi.endswith(".json") or "paths" not in json.load(open(openapi)):
@@ -313,7 +403,12 @@ def main():
     if not a.no_l3:
         from builder import fallback_llm
         fallback = lambda b, o, log: fallback_llm.Fallback(b, o, log=log)
-    r = build(briefs, openapi, a.slot, client, a.out_dir, a.trace_dir, a.runs, int(a.budget_min * 60), fallback=fallback)
+    exam = None
+    if not a.no_examiner:
+        from builder.examiner import examine
+        exam = lambda b, o, sink, dl: examine(b, o, sink, dl)
+    r = build(briefs, openapi, a.slot, client, a.out_dir, a.trace_dir, a.runs, int(a.budget_min * 60), fallback=fallback,
+              examiner=exam)
     print(json.dumps({k: v for k, v in r.items()}, default=str))
     sys.exit(r["exit_code"])
 

@@ -329,7 +329,225 @@ def nested_paths():
     return True
 
 
+# ---------------------------------------------------------------- verified_value and amount_scale (tool_results)
+def status_and_scale():
+    """verify_identity reporting a string status (verified_value) and get_account amounts in cents (amount_scale)."""
+    pol = copy.deepcopy(POL["A"])
+    pol["tool_results"] = dict(pol.get("tool_results") or {})
+    pol["tool_results"]["verify_identity"] = dict(verified_this="data.status", verified_all="data.overall",
+                                                   wrong_left="data.left", verified_value="verified")
+    pol["tool_results"]["get_account"] = dict((pol["tool_results"].get("get_account") or {}), amount_scale=0.01)
+    st = R.init_state(pol, CV)
+    st, a = say(pol, st, "kind=who;also=none;st=complete;prod=;who=self;party=")
+    st, a = say(pol, st, "kind=identity;also=none;st=complete;prod=;field=date_of_birth;ans=1990-01-01")
+    st, a = tool(pol, st, dict(status="failed", overall="failed", left=2))
+    check(st["identity"]["wrong"] == 1 and a["type"] == "say_exact", f"'failed' is not verified: {a}")
+    st, a = say(pol, st, "kind=identity;also=none;st=complete;prod=;field=date_of_birth;ans=1990-01-02")
+    st, a = tool(pol, st, dict(status="verified", overall="pending", left=2))
+    check(a["type"] == "say_exact" and st["identity"]["idx"] == 1, f"'verified' moves to question 2: {a}")
+    st, a = say(pol, st, "kind=identity;also=none;st=complete;prod=;field=phone_last4;ans=1234")
+    st, a = tool(pol, st, dict(status="verified", overall="verified", left=2))
+    check(a["type"] == "call_tool" and a["tool"] == "get_account", f"all verified: {a}")
+    st, a = tool(pol, st, dict(products=[dict(product_id="p1", type="personal_loan", past_due=54000, days_late=5,
+                                              instalment_amount=18000)]))
+    check("540.00 past due" in a["text"] and st["_pd"][0]["floor"] == 180.0, f"cents to major units: {a} {st['_pd']}")
+    st, a = say(pol, st, "kind=yes;also=none;st=complete;prod=")
+    check("540.00" in a["text"], f"read-back in major units: {a}")
+    st, a = say(pol, st, "kind=yes;also=none;st=complete;prod=")
+    check(a["type"] == "call_tool" and a["args"]["amount"] == 54000 and isinstance(a["args"]["amount"], int), f"promise in cents: {a}")
+    # policy amounts are major units and are not scaled: min_x 40 accepts 50.00 on a cents account
+    mx = copy.deepcopy(POL["A"]); mx["amounts"] = dict(acceptance=dict(kind="min_x", min=40))
+    mx["tool_results"] = dict(mx.get("tool_results") or {})
+    mx["tool_results"]["get_account"] = dict((mx["tool_results"].get("get_account") or {}), amount_scale=0.01)
+    st, a = to_statement(mx, [dict(product_id="p1", type="personal_loan", past_due=54000, days_late=5, instalment_amount=18000)])
+    st, a = say(mx, st, "kind=no;also=none;st=complete;prod=")
+    st, a = say(mx, st, "kind=amount;also=none;st=complete;prod=;amt=50")
+    check(st["offer"]["amount"] == 50.0 and "cannot" not in a["text"], f"min_x 40 (major) on a cents account: {a}")
+    # absent fields: unchanged
+    check(R.amount_scale(POL["A"]) == 1.0 and R.api_amount(POL["A"], 540.0) == 540.0, "absent scale")
+    return True
+
+
+# ---------------------------------------------------------------- mixed verified shapes, composed request fields
+def mixed_verified_and_composed():
+    # verified_this = a string status, verified_all = a boolean: both count
+    pol = copy.deepcopy(POL["A"])
+    pol["tool_results"] = dict(pol.get("tool_results") or {})
+    pol["tool_results"]["verify_identity"] = dict(verified_this="data.status", verified_all="data.all_verified",
+                                                   wrong_left="data.wrong_answers_left", verified_value="verified")
+    st = R.init_state(pol, CV)
+    st, a = say(pol, st, "kind=who;also=none;st=complete;prod=;who=self;party=")
+    st, a = say(pol, st, "kind=identity;also=none;st=complete;prod=;field=date_of_birth;ans=1990-01-01")
+    st, a = tool(pol, st, dict(status="verified", all_verified=True, wrong_answers_left=3))
+    check(a["type"] == "call_tool" and a["tool"] == "get_account", f"string verified + boolean all_verified: {a}")
+    st = R.init_state(pol, CV)
+    st, a = say(pol, st, "kind=who;also=none;st=complete;prod=;who=self;party=")
+    st, a = say(pol, st, "kind=identity;also=none;st=complete;prod=;field=date_of_birth;ans=1990-01-01")
+    st, a = tool(pol, st, dict(status="failed", all_verified=False, wrong_answers_left=2))
+    check(st["identity"]["wrong"] == 1, f"'failed' + false: wrong: {a}")
+    # composed request field: schedule_callback.when = date + time, one var, PUB-02 flow
+    pol = copy.deepcopy(POL["A"])
+    pol["tool_args"] = dict(pol.get("tool_args") or {}, schedule_callback=dict(date="when", time="when"))
+    pol["composed_fields"] = {"schedule_callback.when": dict(format="date-time", roles=["date", "time"])}
+    cv = dict(customer_id="c_p2", first_name="Ana", last_name="Costa", title="Ms", now=NOW)
+    st = R.init_state(pol, cv)
+    st["tok"] = "kstart"
+    e = R.parse_event("n=kstart;src=user;kind=who;also=none;st=complete;prod=;who=other;party=relative", st, TOPICS)
+    st, a = R.step(pol, st, e, None, NOW, cv)
+    st["last_tok"] = "kstart"
+    st["tok"] = "kcbzzz"
+    e = R.parse_event("n=kcbzzz;src=user;kind=callback;also=none;st=complete;prod=;rel=tomorrow;d=;m=;wd=;wk=none;vague=no;tm=11:00", st, TOPICS)
+    st, a = R.step(pol, st, e, None, NOW, cv)
+    check(a["type"] == "call_tool" and a["tool"] == "schedule_callback" and a["args"].get("when") == "2026-10-15T11:00:00"
+          and "date" not in a["args"] and "time" not in a["args"], f"composed when: {a}")
+    v = dict(cv, ev="n=kstart;src=user;kind=who;also=none;st=complete;prod=;who=other;party=relative")
+    code = compile(R.hub_source(pol), "hub", "exec")
+    exec(code, dict(vars=v))
+    v["ev"] = "n=" + v["ev_tok"] + ";src=user;kind=callback;also=none;st=complete;prod=;rel=tomorrow;d=;m=;wd=;wk=none;vague=no;tm=11:00"
+    exec(code, dict(vars=v))
+    check(v.get("w_schedule_callback_when") == "2026-10-15T11:00:00" and "w_schedule_callback_date" not in v, f"hub vars: {v}")
+    # absent: unchanged
+    st = R.init_state(POL["A"], cv)
+    st["tok"] = "kstart"
+    st, a = R.step(POL["A"], st, R.parse_event("n=kstart;src=user;kind=who;also=none;st=complete;prod=;who=other;party=relative", st, TOPICS), None, NOW, cv)
+    st["last_tok"], st["tok"] = "kstart", "kcbyyy"
+    st, a = R.step(POL["A"], st, R.parse_event("n=kcbyyy;src=user;kind=callback;also=none;st=complete;prod=;rel=tomorrow;d=;m=;wd=;wk=none;vague=no;tm=11:00", st, TOPICS), None, NOW, cv)
+    check(a["args"].get("date") == "2026-10-15" and a["args"].get("time") == "11:00", f"absent composed: {a}")
+    return True
+
+
+# ---------------------------------------------------------------- per-answer flag only: all verified after the last question
+def per_answer_only():
+    pol = copy.deepcopy(POL["A"])
+    pol["tool_results"] = dict(pol.get("tool_results") or {})
+    pol["tool_results"]["verify_identity"] = dict(verified_this="data.answer_ok", wrong_left="data.left")
+    for extra in (dict(), dict(all_verified=True)):      # an unbound all-field in the response is ignored
+        st = R.init_state(pol, CV)
+        st, a = say(pol, st, "kind=who;also=none;st=complete;prod=;who=self;party=")
+        st, a = say(pol, st, "kind=identity;also=none;st=complete;prod=;field=date_of_birth;ans=1990-01-01")
+        st, a = tool(pol, st, dict(answer_ok=True, left=3, **extra))
+        check(a["type"] == "say_exact" and st["identity"]["idx"] == 1 and st["verified"] != "yes",
+              f"first right answer is not all-verified ({extra}): {a}")
+        st, a = say(pol, st, "kind=identity;also=none;st=complete;prod=;field=phone_last4;ans=1234")
+        st, a = tool(pol, st, dict(answer_ok=True, left=3, **extra))
+        check(a["type"] == "call_tool" and a["tool"] == "get_account" and st["verified"] == "yes", f"after the 2nd: {a}")
+    # a bound all-field is still honoured
+    pol["tool_results"]["verify_identity"]["verified_all"] = "data.done"
+    st = R.init_state(pol, CV)
+    st, a = say(pol, st, "kind=who;also=none;st=complete;prod=;who=self;party=")
+    st, a = say(pol, st, "kind=identity;also=none;st=complete;prod=;field=date_of_birth;ans=1990-01-01")
+    st, a = tool(pol, st, dict(answer_ok=True, done=True, left=3))
+    check(a["type"] == "call_tool" and a["tool"] == "get_account", f"bound all-field true on question 1: {a}")
+    return True
+
+
+# ---------------------------------------------------------------- flat renamed item paths (binding assist, cc4542b)
+def flat_item_paths():
+    """get_account rows whose fields carry other names, bound by flat item paths (item.age, item.outstanding): days_late,
+    past_due, the floor, type and id all come through the paths, so the band, deadline and attempt cap are right."""
+    pol = copy.deepcopy(POL["A"])
+    pol["tool_results"] = dict(pol.get("tool_results") or {})
+    pol["tool_results"]["get_account"] = dict(ok="data.ok", products="data.products", id="item.pid", type="item.kind",
+                                              past_due="item.outstanding", days_late="item.age",
+                                              **{"floor.personal_loan": "item.inst"})
+    row = dict(pid="p1", kind="personal_loan", outstanding=900.0, age=20, inst=300.0)   # only the renamed fields
+    st, a = to_statement(pol, [row])
+    pd = st["_pd"][0]
+    ref = R.init_state(POL["A"], CV)
+    R.load_products(POL["A"], ref, [dict(product_id="p1", type="personal_loan", past_due=900.0, days_late=20, instalment_amount=300.0)], R._d(NOW))
+    want = ref["_pd"][0]
+    for k in ("days_late", "band", "deadline", "past_due", "floor", "plan", "name"):
+        check(pd[k] == want[k], f"flat item path: {k} {pd[k]!r} != {want[k]!r}")
+    check(st["products"][0]["id"] == "p1" and "20 days late" in a["text"] and "900.00" in a["text"], f"statement: {a}")
+    return True
+
+
+# ---------------------------------------------------------------- rehearsal rule types (nightmare-1, biz-1)
+def rehearsal_rules():
+    v = R.V(POL["A"])
+    # the no-promise question (hooks on_no_promise expects_answer): asked once before a verified no_promise close
+    pol = copy.deepcopy(POL["A"])
+    pol["hooks"] = [dict(id="np", point="on_no_promise", expects_answer=True, text="Can I note that you are not making a promise today?")]
+    st, a = to_statement(pol, EARLY)
+    st, a = say(pol, st, "kind=no;also=none;st=complete;prod=")
+    st, a = say(pol, st, "kind=reject;also=none;st=complete;prod=;why=flat")
+    check(a.get("text") == "Can I note that you are not making a promise today?" and st["q"] == "confirm_np", f"np question: {a}")
+    yes_st, yes_a = say(pol, R.json.loads(R.json.dumps(st)), "kind=yes;also=none;st=complete;prod=")
+    check(yes_a["type"] == "close" and (yes_a["outcome"], yes_a["reason"]) == tuple(v["refused"]), f"yes closes refused: {yes_a}")
+    st, a = say(pol, st, "kind=date_amount;also=none;st=complete;prod=;rel=;d=16;m=10;wd=;wk=none;vague=no;amt=540")
+    check(st["q"] == "readback" and "540.00" in a["text"] and "16 October" in a["text"], f"a date instead: read-back: {a}")
+    st, a = say(pol, st, "kind=reject;also=none;st=complete;prod=;why=flat")
+    check(a["type"] != "say_exact" or "not making a promise" not in a["text"], f"asked once: {a}")
+    # never before a service_error close or after a promise
+    st, a = to_statement(pol, EARLY)
+    for b in ("kind=yes;also=none;st=complete;prod=", "kind=yes;also=none;st=complete;prod="):
+        st, a = say(pol, st, b)
+    for _ in range(2):
+        st, a = tool(pol, st, dict(), ok=False)
+    check(a["type"] == "close" and (a["outcome"], a["reason"]) == tuple(v["write_failed"]), f"service_error: no question: {a}")
+    # the customer asks for a callback before identity: no verification, the callback flow
+    cv = dict(CV)
+    st = R.init_state(POL["A"], cv)
+    st, a = say(POL["A"], st, "kind=who;also=none;st=complete;prod=;who=self;party=")
+    st, a = say(POL["A"], st, "kind=callback;also=none;st=complete;prod=;rel=tomorrow;d=;m=;wd=;wk=none;vague=no;tm=15:00")
+    check(a["type"] == "call_tool" and a["tool"] == "schedule_callback" and a["args"]["time"] == "15:00" and st["verified"] != "yes", f"self callback: {a}")
+    # a time outside the window, then no other time: no_callback
+    st = R.init_state(POL["A"], cv)
+    st, a = say(POL["A"], st, "kind=who;also=none;st=complete;prod=;who=other;party=relative")
+    st, a = say(POL["A"], st, "kind=callback;also=none;st=complete;prod=;rel=tomorrow;d=;m=;wd=;wk=none;vague=no;tm=22:00")
+    check(a["type"] == "say_exact" and st["q"] == "callback_time", f"outside the window: ask once: {a}")
+    st, a = say(POL["A"], st, "kind=no;also=none;st=complete;prod=")
+    check(a["type"] == "close" and (a["outcome"], a["reason"]) == tuple(v["callback_failed"]), f"no other time: {a}")
+    # an extra topic closes with its own outcome/reason, before identity, nothing disclosed
+    pol = copy.deepcopy(POL["A"])
+    pol["extra_topics"] = [dict(id="complaint", trigger="wants to make a complaint", effect="close", outcome="no_promise", reason="complaint")]
+    st = R.init_state(pol, CV)
+    st, a = say(pol, st, "kind=who;also=none;st=complete;prod=;who=self;party=")
+    st, a = say(pol, st, "kind=topic;also=none;st=complete;prod=;t=complaint")
+    check(a["type"] == "close" and (a["outcome"], a["reason"]) == ("no_promise", "complaint"), f"complaint: {a}")
+    # full_or_floor: only the full balance or exactly the floor
+    pol = copy.deepcopy(POL["A"]); pol["amounts"] = dict(acceptance="full_or_floor")
+    st, a = to_statement(pol, EARLY)
+    st, a = say(pol, st, "kind=no;also=none;st=complete;prod=")
+    for amt, ok in ((180, True), (540, True), (300, False)):
+        x, a = say(pol, R.json.loads(R.json.dumps(st)), "kind=amount;also=none;st=complete;prod=;amt=%s" % amt)
+        check(((x["offer"] or {}).get("amount") == float(amt)) == ok and (("cannot record" in a["text"]) != ok), f"full_or_floor {amt}: {a}")
+    return True
+
+
+# ---------------------------------------------------------------- identity gate (biz-1 rules 3-4)
+def identity_gate():
+    pol = copy.deepcopy(POL["A"])
+    pol["identity"]["gate"] = dict(ask="Are you authorised to discuss this account?", on_no="callback")
+    st = R.init_state(pol, CV)
+    st, a = say(pol, st, "kind=who;also=none;st=complete;prod=;who=self;party=")
+    check(a["text"] == "Are you authorised to discuss this account?" and st["q"] == "gate", f"gate first: {a}")
+    st2, a2 = say(pol, R.json.loads(R.json.dumps(st)), "kind=other;also=none;st=none;prod=")
+    check(a2["type"] == "say_exact" and "authorised" in a2["text"] and st2["q"] == "gate", f"gate re-asked: {a2}")
+    y, a = say(pol, R.json.loads(R.json.dumps(st)), "kind=yes;also=none;st=complete;prod=")
+    check(y["q"].startswith("id_") and "birth" in a["text"], f"yes -> the first security question: {a}")
+    n_, a = say(pol, R.json.loads(R.json.dumps(st)), "kind=no;also=none;st=complete;prod=")
+    check(n_["phase"] == "third_party" and "authorised person" in a["text"] and "540" not in a["text"], f"no -> when can an authorised person be reached: {a}")
+    n_, a = say(pol, n_, "kind=callback;also=none;st=complete;prod=;rel=tomorrow;d=;m=;wd=;wk=none;vague=no;tm=12:00")
+    check(a["type"] == "call_tool" and a["tool"] == "schedule_callback" and a["args"]["time"] == "12:00", f"callback booked: {a}")
+    pol["identity"]["gate"]["on_no"] = dict(close=dict(outcome="not_verified", reason="declined"))
+    st = R.init_state(pol, CV)
+    st, a = say(pol, st, "kind=who;also=none;st=complete;prod=;who=self;party=")
+    st, a = say(pol, st, "kind=no;also=none;st=complete;prod=")
+    check(a["type"] == "close" and (a["outcome"], a["reason"]) == ("not_verified", "declined"), f"on_no close: {a}")
+    st = R.init_state(POL["A"], CV)        # absent: unchanged
+    st, a = say(POL["A"], st, "kind=who;also=none;st=complete;prod=;who=self;party=")
+    check(st["q"].startswith("id_"), f"no gate: unchanged: {a}")
+    return True
+
+
 if __name__ == "__main__":
+    print("identity gate:", identity_gate())
+    print("rehearsal rule types:", rehearsal_rules())
+    print("flat renamed item paths:", flat_item_paths())
+    print("per-answer flag only:", per_answer_only())
+    print("mixed verified + composed fields:", mixed_verified_and_composed())
+    print("verified_value + amount_scale:", status_and_scale())
     print("nested response paths:", nested_paths())
     print("gap 4 date refusal:", date_refusal())
     print("gap 3 floor and acceptance:", floor_acceptance())

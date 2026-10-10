@@ -35,6 +35,24 @@ python3 examples/agent_builder.py briefs/brief-a.md briefs/brief-b.md   # Brief 
 
 `examples/agent_builder.py` is a builder. It runs Claude through the Claude Agent SDK with one skill, `.claude/skills/build-phone-agent/SKILL.md`. Claude reads the brief and the tool API file, writes the workflow, runs the practice customers and fixes what fails. The skill is short on purpose. Your job is a better builder: a better skill, more skills, your own code, or another agent altogether. It needs a Claude login or `ANTHROPIC_API_KEY`.
 
+## Running our builder
+
+`builder/build.py` is our builder: one command, brief files in, a saved Freya workflow out.
+
+Requirements:
+- Python 3.10+ and the `claude` CLI on the PATH, logged in (`claude login`) or with `ANTHROPIC_API_KEY` set. Policy extraction, the examiner and the fallback writer call `claude -p`. The model is pinned to `claude-opus-5-5`; set `POLICY_MODEL` to change it.
+- `FREYA_API_KEY` in the environment to save and export the workflow (`source env.sh`). Without it, use `--mock-freya` or `--no-save`.
+- Optional converters for non-text sources: `pdftotext` (poppler) for PDF, `soffice` for .doc/.odt/.rtf, `openpyxl` for .xlsx. A missing converter makes that file unreadable (signal S1); it never crashes the build.
+
+Run it with the brief files or folders, then the brief's own OpenAPI file last:
+
+```bash
+python3 builder/build.py briefs/brief-a.md tools/openapi.json --slot brief-a 2>&1 | tee build-brief-a.log
+python3 builder/build.py <brief files or folders...> <openapi.json> --slot <name> --budget-min 25
+```
+
+Progress lines go to stderr; the last stdout line is the JSON result. Exit codes: 0 built and saved, 2 fallback required (nothing saved; `signal` and `next` say why), 3 engine not loaded (fix the clone). The trace is `traces/<slot>-<time>.jsonl` with a `.txt` summary whose first block lists the assumptions, defaults and everything not implemented. Flags: `--runs 2` (extraction runs), `--no-l3` (no LLM fallback writer), `--no-examiner`, `--mock-freya`, `--no-save`.
+
 ## What is in this kit
 
 | Path | What it is |
