@@ -20,7 +20,8 @@ Exit codes (also `exit_code` in the JSON result; the trace has a `signal` event 
      ladder step a fallback builder should take (S2 core sections missing, S5 validator, extraction failed, time guard)
   3  engine not loaded (S0): builder.engine.reducer / event_field failed to import or raised. A packaging bug: fix the
      clone. Nothing is saved, there is no LLM fallback (a dead stub agent must never be saved).
-Signals (FINAL-PLAN section 2): S0 engine not loaded, S2 core sections missing after the targeted re-extraction,
+Signals (FINAL-PLAN section 2): S0 engine not loaded, S1 unreadable source / too little text (warning; abort only
+when nothing is readable), S2 core sections missing after the targeted re-extraction,
 S5 validator still failing after the repair pass, EXTRACT every extraction run failed, GUARD time guard.
 """
 import argparse, concurrent.futures as cf, hashlib, json, os, sys, time
@@ -30,6 +31,7 @@ sys.path.insert(0, ROOT)
 from builder import generator
 from builder.generator import generate, node_counts
 from builder.policy_bridge import consolidate_unmapped, to_reducer
+from builder.ingest import ingest, s1
 from builder.integration import EngineNotLoaded, _load
 from builder.engine.date_policy import core_missing
 from builder.policy_extract import apply_reextraction, extract, read_files, reextract_core, reextract_fields
@@ -75,10 +77,10 @@ class MockFreya:
 
 
 def _sources(trace, briefs, openapi):
-    files = read_files(briefs)
+    files, manifest = ingest(briefs)
     trace.log("sources", files=[{"name": n, "chars": len(t), "sha1": hashlib.sha1(t.encode()).hexdigest()[:12]} for n, t in files.items()],
-              openapi=os.path.basename(openapi), openapi_sha1=hashlib.sha1(open(openapi, "rb").read()).hexdigest()[:12])
-    return files
+              manifest=manifest, openapi=os.path.basename(openapi), openapi_sha1=hashlib.sha1(open(openapi, "rb").read()).hexdigest()[:12])
+    return files, manifest
 
 
 def _rules_summary(policy):
@@ -126,7 +128,14 @@ def build(briefs, openapi, slot=None, freya_client=None, out_dir="submission", t
                 raise EngineNotLoaded(f"{mod} has no {name}")
     except EngineNotLoaded as e:
         return engine_failed(e)
-    brief_text = "\n".join(_sources(trace, briefs, openapi).values())
+    files, manifest = _sources(trace, briefs, openapi)
+    brief_text = "\n".join(files.values())
+    probs = s1(manifest, files)       # S1: unreadable sources / too little text
+    if probs:
+        trace.log("signal", signal="S1", level="warning" if any(t.strip() for t in files.values()) else "abort", problems=probs)
+        result["s1"] = probs
+    if not any(t.strip() for t in files.values()):
+        return finish("no readable brief source: " + "; ".join(probs), 2, "S1", next="a human converts the source")
     # 1. extraction runs, in parallel
     policies = []
     with cf.ThreadPoolExecutor(runs) as ex:

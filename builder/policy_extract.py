@@ -205,16 +205,10 @@ def _collect_enums(s, path, acc):
 
 
 def read_files(paths):
-    files = {}
-    for p in paths:
-        if os.path.isdir(p):
-            for root, _, fs in os.walk(p):
-                for f in sorted(fs):
-                    if f.lower().endswith(TEXT_EXT):
-                        files[os.path.relpath(os.path.join(root, f), os.path.dirname(p.rstrip("/")))] = open(os.path.join(root, f), errors="replace").read()
-        else:
-            files[os.path.basename(p)] = open(p, errors="replace").read()
-    return files
+    """{name: text} of every readable source (builder.ingest: folders, zip, pdf, docx, html, xlsx; binaries never read
+    as text). The manifest of what happened to each file is logged by build.py."""
+    from builder.ingest import ingest
+    return ingest(paths)[0]
 
 
 class Trace:
