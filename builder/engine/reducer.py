@@ -150,11 +150,6 @@ def init_state(policy, call_vars=None):
     return st
 
 
-def _names(policy, st, call_vars):
-    out = dict(call_vars or dict())
-    return out
-
-
 # ---------------------------------------------------------------- products
 def _floor(policy, row):
     fb = ((policy.get('products') or dict()).get('floor_by_type') or dict()).get(str(row.get('type')))
@@ -236,6 +231,15 @@ def _index(st, pid):
     return None
 
 
+def _valid_prod(st, ev, default):
+    """prod=<1-based position>; an out-of-range or non-numeric ref falls back to the current product."""
+    try:
+        i = int(ev.get('prod')) - 1
+    except Exception:
+        return default
+    return i if 0 <= i < len(st['products']) else default
+
+
 def _open_products(st):
     return [i for i, p in enumerate(st['products']) if p['status'] in ('open', 'proposed')]
 
@@ -313,7 +317,17 @@ def update_hangup(policy, st):
     st['hangup'] = dict(slot='products', outcome=o, reason=r)
 
 
+def fallback_outcome(policy):
+    """Last resort when precedence finds nothing: the table's refused row, else the unclear slot."""
+    for row in (policy.get('closing') or dict()).get('table') or []:
+        if _none(row.get('outcome')) == 'no_promise' and _none(row.get('reason')) == 'refused':
+            return 'no_promise', 'refused'
+    return slot(policy, 'unclear')
+
+
 def do_close(policy, st, outcome, reason, farewell):
+    if not outcome:
+        outcome, reason = fallback_outcome(policy)
     st['phase'], st['q'], st['outcome'], st['reason'] = 'closed', 'none', outcome, _none(reason)
     st['offer'] = None
     return close_action(outcome, reason, farewell)
@@ -374,17 +388,6 @@ def step(policy, st, event, tool_event, now, call_vars=None):
 
 
 # ---------------------------------------------------------------- tool results
-def _failed(te):
-    sc = te.get('status_code')
-    try:
-        sc = int(sc) if sc not in (None, '') else None
-    except Exception:
-        sc = None
-    ok = str(te.get('ok')).lower()
-    return bool(te.get('no_delta')) or int(te.get('failure') or 0) > 0 and te.get('_df', 0) > 0 or \
-        (sc is not None and sc >= 400) or ok not in ('true',)
-
-
 def on_tool(policy, st, te, today, cv):
     pend = st['pending']
     ds = int(te.get('success') or 0) - int(pend['snap_success'])
@@ -639,7 +642,7 @@ def date_event(policy, st, ev, today, cv):
     if targets is None:
         idx = st['cur'] if st['cur'] is not None else 0
         if ev.get('prod') and str(ev.get('prod')).isdigit():
-            idx = int(ev['prod']) - 1
+            idx = _valid_prod(st, ev, idx)
         targets = [idx]
     if len(targets) > 1:   # one date for all: per-product decision, clamp without separate acceptance
         st['_clamped'] = []
@@ -868,15 +871,16 @@ def topic_event(policy, st, ev, today, cv):
         if st['verified'] != 'yes':
             o, r = slot(policy, 'declined') if st['who'] == 'self' else slot(policy, 'unclear')
             return do_close(policy, st, o, r, D_FAREWELL)
-        for i in _open_products(st):
-            st['products'][i]['status'] = 'refused'
-            st['_pd'][i]['note_reason'] = 'refused'
+        for i, p in enumerate(st['products']):      # every product not yet written or settled is refused
+            if p['status'] in ('open', 'proposed', 'agreed', 'confirmed'):
+                p['status'] = 'refused'
+                st['_pd'][i]['note_reason'] = st['_pd'][i].get('note_reason') or 'refused'
         return next_write(policy, st, cv) if multi else do_close(policy, st, 'no_promise', 'refused', D_FAREWELL)
     if st['verified'] != 'yes' or not st['products']:
         return resay(st)
     i = st['cur'] if st['cur'] is not None else 0
     if ev.get('prod') and str(ev.get('prod')).isdigit():
-        i = int(ev['prod']) - 1
+        i = _valid_prod(st, ev, i)
     if t == 'hardship':
         row = event_row(policy, 'hardship', 'transferred')
         st['counters']['support_offered'] += 1
