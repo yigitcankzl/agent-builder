@@ -14,14 +14,14 @@ from builder.engine.date_policy import _norm, bad_quotes
 from builder.policy_extract import _Forward, Trace, call_claude, material_block, oas_summary, parse_json, read_files
 
 QUESTIONS = {
-    "deadline_bands": "Late bands: for each band its name, the min and max days late it covers, the deadline as a number of days, and whether those are business days or calendar days. value: [{\"name\", \"min_days_late\", \"max_days_late\", \"days\", \"unit\": \"business\"|\"calendar\"}]",
+    "bands": "Late bands: for each band its name, the min and max days late it covers, the deadline as a number of days, and whether those are business days or calendar days. value: [{\"name\", \"min_days_late\", \"max_days_late\", \"days\", \"unit\": \"business\"|\"calendar\"}]",
     "holidays": "Every holiday (non-business date) the material lists, after later memos are applied. value: [\"YYYY-MM-DD\", ...]",
-    "business_weekdays": "Which weekdays are business days. value: [ints, Monday=0 .. Sunday=6]",
+    "weekdays_open": "Which weekdays are business days. value: [ints, Monday=0 .. Sunday=6]",
     "attempts_per_band": "How many persuasion attempts each band allows. value: {\"<band name>\": int}",
     "floor": "The minimum acceptable amount (floor) per product type. value: {\"<product type or *>\": \"<account field name>\" or \"<N>%\" or \"<amount>\"}",
     "identity": "The identity questions in order (the tool's field names when the tool API names them) and how many wrong answers end the check. value: {\"fields\": [str], \"max_wrong\": int}",
     "outcomes": "Every close outcome/reason pair the agent may send (exact API strings; a code list maps codes to them). value: [[\"outcome\", \"reason or null\"], ...]",
-    "callback_window": "The callback time window. value: {\"start\": \"HH:MM\", \"end\": \"HH:MM\"} or null",
+    "callback_hours": "The callback time window. value: {\"start\": \"HH:MM\", \"end\": \"HH:MM\"} or null",
     "pre_verification_transfer": "Queues a transfer may use BEFORE identity is verified. value: [\"queue\", ...] (empty if none)",
 }
 
@@ -45,13 +45,13 @@ character for character from the named file. Output JSON only:
 
 def ours(policy, qid):
     p = policy
-    if qid == "deadline_bands":
+    if qid == "bands":
         unit = "calendar" if "calendar" in str((p.get("deadline") or {}).get("rule", "")) else "business"
         return [{"name": b.get("name"), "min_days_late": b.get("min_days_late"), "max_days_late": b.get("max_days_late"),
                  "days": b.get("days"), "unit": unit} for b in (p.get("deadline") or {}).get("bands") or []]
     if qid == "holidays":
         return sorted((p.get("business_days") or {}).get("holidays") or [])
-    if qid == "business_weekdays":
+    if qid == "weekdays_open":
         return sorted((p.get("business_days") or {}).get("weekdays") or [])
     if qid == "attempts_per_band":
         return {b.get("name"): b.get("attempts") for b in (p.get("deadline") or {}).get("bands") or []}
@@ -66,7 +66,7 @@ def ours(policy, qid):
         return {"fields": [q.get("field") for q in idn.get("questions") or []], "max_wrong": idn.get("max_wrong")}
     if qid == "outcomes":
         return sorted(([r.get("outcome"), r.get("reason") or None] for r in (p.get("closing") or {}).get("table") or []), key=str)
-    if qid == "callback_window":
+    if qid == "callback_hours":
         cb = (p.get("writes") or {}).get("callback") or {}
         return {"start": cb.get("start"), "end": cb.get("end")} if cb.get("start") else None
     if qid == "pre_verification_transfer":
@@ -82,9 +82,9 @@ def _canon(qid, v):
     """A comparison key: order and spelling noise removed (names compared case/space-insensitively)."""
     s = lambda x: re.sub(r"[\s_\-]+", "_", str(x).strip().lower()) if x is not None else None
     try:
-        if qid == "deadline_bands":
+        if qid == "bands":
             return sorted((int(b["min_days_late"]), int(b["max_days_late"]), int(b["days"]), s(b.get("unit") or "business")) for b in v or [])
-        if qid in ("holidays", "business_weekdays", "pre_verification_transfer"):
+        if qid in ("holidays", "weekdays_open", "pre_verification_transfer"):
             return sorted(s(x) for x in v or [])
         if qid == "attempts_per_band":
             return sorted(int(x) for x in (v or {}).values())
@@ -94,7 +94,7 @@ def _canon(qid, v):
             return ([s(f) for f in (v or {}).get("fields") or []], int((v or {}).get("max_wrong") or 0))
         if qid == "outcomes":
             return sorted(((s(o), s(r) if r not in (None, "", "none", "null") else None) for o, r in v or []), key=str)
-        if qid == "callback_window":
+        if qid == "callback_hours":
             return (v or {}).get("start"), (v or {}).get("end")
     except (TypeError, ValueError, KeyError, AttributeError):
         return ("unparsed", json.dumps(v, sort_keys=True, default=str))
@@ -105,9 +105,9 @@ def _quotes(node):
     return [s.get("quote") for s in (node or {}).get("source") or [] if isinstance(s, dict) and s.get("quote")]
 
 
-OUR_SOURCES = {"deadline_bands": "deadline", "holidays": "business_days", "business_weekdays": "business_days",
+OUR_SOURCES = {"bands": "deadline", "holidays": "business_days", "weekdays_open": "business_days",
                "attempts_per_band": "deadline", "floor": "products", "identity": "identity", "outcomes": "closing",
-               "callback_window": "writes", "pre_verification_transfer": "human_request"}
+               "callback_hours": "writes", "pre_verification_transfer": "human_request"}
 
 
 def examine(paths, openapi=None, sink=None, deadline=None):
@@ -156,7 +156,7 @@ def apply(policy, qid, value):
     """Patch the extracted policy with a re-check winner for the questions that map 1:1 onto policy fields.
     -> True when patched, False when the question is warn-only (outcomes, floor, attempts, pre-verification)."""
     p = policy
-    if qid == "deadline_bands":
+    if qid == "bands":
         old = {b.get("name"): b for b in (p.get("deadline") or {}).get("bands") or []}
         new = []
         for b in value or []:
@@ -171,13 +171,13 @@ def apply(policy, qid, value):
     if qid == "holidays":
         p.setdefault("business_days", {})["holidays"] = sorted(value or [])
         return True
-    if qid == "business_weekdays":
+    if qid == "weekdays_open":
         p.setdefault("business_days", {})["weekdays"] = sorted(int(x) for x in value or [])
         return True
     if qid == "identity" and isinstance(value, dict) and isinstance(value.get("max_wrong"), int):
         p.setdefault("identity", {})["max_wrong"] = value["max_wrong"]
         return True
-    if qid == "callback_window" and isinstance(value, dict) and value.get("start") and value.get("end"):
+    if qid == "callback_hours" and isinstance(value, dict) and value.get("start") and value.get("end"):
         cb = p.setdefault("writes", {}).setdefault("callback", {})
         cb["start"], cb["end"] = value["start"], value["end"]
         return True

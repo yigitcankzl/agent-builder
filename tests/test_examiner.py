@@ -23,12 +23,12 @@ def check(c, m):
 
 
 def answers(late_days=7):
-    bands = copy.deepcopy(E.ours(POL, "deadline_bands"))
+    bands = copy.deepcopy(E.ours(POL, "bands"))
     for b in bands:
         if b["name"] == "late":
             b["days"] = late_days
     src = [{"file": "brief-a.md", "quote": Q_LATE}]
-    return {"deadline_bands": {"value": bands, "source": src},
+    return {"bands": {"value": bands, "source": src},
             "holidays": {"value": E.ours(POL, "holidays"), "source": [{"file": "brief-a.md", "quote": "2026-10-26"}]},
             "identity": {"value": E.ours(POL, "identity"), "source": [{"file": "brief-a.md", "quote": "After three wrong answers"}]}}
 
@@ -40,25 +40,25 @@ if __name__ == "__main__":
         if b["name"] == "late":
             b["days"] = 9                      # the planted misread
     dis = E.disagreements(planted, answers())
-    check(len(dis) == 1 and dis[0]["qid"] == "deadline_bands", f"the planted misread is caught: {[d['qid'] for d in dis]}")
+    check(len(dis) == 1 and dis[0]["qid"] == "bands", f"the planted misread is caught: {[d['qid'] for d in dis]}")
     logs = []
     log = lambda ev, **kw: logs.append((ev, kw))
     real = E.recheck
     try:
-        E.recheck = lambda *a, **k: {"deadline_bands": {"qid": "deadline_bands", "winner": "theirs", "verified": True,
+        E.recheck = lambda *a, **k: {"bands": {"qid": "bands", "winner": "theirs", "verified": True,
                                                         "source": {"file": "brief-a.md", "quote": Q_LATE}, "why": "table row"}}
         fixed, rep = E.reconcile(planted, BRIEF, None, answers(), log=log)
         late = [b for b in fixed["deadline"]["bands"] if b["name"] == "late"][0]
-        check(late["days"] == 7 and rep["patched"] == ["deadline_bands"] and any(e == "examiner_patch" for e, _ in logs),
+        check(late["days"] == 7 and rep["patched"] == ["bands"] and any(e == "examiner_patch" for e, _ in logs),
               f"re-check 'theirs' with a verbatim quote patches the band: {rep}")
-        E.recheck = lambda *a, **k: {"deadline_bands": {"qid": "deadline_bands", "winner": "ours", "verified": True}}
+        E.recheck = lambda *a, **k: {"bands": {"qid": "bands", "winner": "ours", "verified": True}}
         same, rep2 = E.reconcile(planted, BRIEF, None, answers(), log=log)
-        check(rep2["kept_ours"] == ["deadline_bands"] and [b["days"] for b in same["deadline"]["bands"] if b["name"] == "late"] == [9],
+        check(rep2["kept_ours"] == ["bands"] and [b["days"] for b in same["deadline"]["bands"] if b["name"] == "late"] == [9],
               "re-check 'ours' keeps ours")
         logs.clear()
-        E.recheck = lambda *a, **k: {"deadline_bands": {"qid": "deadline_bands", "winner": "theirs", "verified": False}}
+        E.recheck = lambda *a, **k: {"bands": {"qid": "bands", "winner": "theirs", "verified": False}}
         kept, rep3 = E.reconcile(planted, BRIEF, None, answers(), log=log)
-        check(rep3["unresolved"] == ["deadline_bands"] and any(e == "examiner_disagree" for e, _ in logs)
+        check(rep3["unresolved"] == ["bands"] and any(e == "examiner_disagree" for e, _ in logs)
               and [b["days"] for b in kept["deadline"]["bands"] if b["name"] == "late"] == [9],
               "an unverifiable re-check -> examiner_disagree, the quote-verified extraction is kept")
     finally:
@@ -70,12 +70,12 @@ if __name__ == "__main__":
     try:
         def ex(briefs, openapi, tp, rep_, sink, deadline):
             return copy.deepcopy(planted), json.load(open(os.path.join(ROOT, "tests", "policy_eval", "v3", "run4", "brief-a.report.json")))
-        E.recheck = lambda *a, **k: {"deadline_bands": {"qid": "deadline_bands", "winner": "theirs", "verified": True,
+        E.recheck = lambda *a, **k: {"bands": {"qid": "bands", "winner": "theirs", "verified": True,
                                                         "source": {"file": "brief-a.md", "quote": Q_LATE}}}
         r = build(BRIEF, os.path.join(ROOT, "tools", "openapi.json"), "exam", MockFreya(), os.path.join(tmp, "sub"),
                   os.path.join(tmp, "tr"), 2, 1500, ex, examiner=lambda b, o, sink, dl: answers())
         rp = json.load(open(os.path.join(tmp, "sub", "exam.policy.json")))
-        check(r["exit_code"] == 0 and r["examiner"]["patched"] == ["deadline_bands"]
+        check(r["exit_code"] == 0 and r["examiner"]["patched"] == ["bands"]
               and [b["days"] for b in rp["deadline"]["bands"] if b["name"] == "late"] == [7], f"build: examiner patch reaches the policy {r.get('examiner')}")
     finally:
         E.recheck = real

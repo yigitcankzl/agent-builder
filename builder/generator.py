@@ -215,12 +215,19 @@ def pack_hub(src, safe="Sorry, could you say that again?"):
     return loader if "{{" not in loader and "}}" not in loader else src
 
 
-def _compose_opening(meta):
-    """Self-introduction from the policy meta, without repeating the bank name if the description already has it."""
+def self_description(meta):
+    """'<description> of <bank>' with the bank named ONCE: a description that already names the bank ('digital
+    assistant calling from <bank>', "<bank>'s digital assistant") is kept as it is. Every composed line uses
+    this (greet, system prompt)."""
     desc = (meta.get("agent_self_description") or "digital assistant").strip().rstrip(".")
     bank = (meta.get("bank_name") or "").strip()
     who = desc if (not bank or bank.lower() in desc.lower()) else f"{desc} of {bank}"
-    return f"Hello, this is {who if who.lower().startswith(('a ', 'an ', 'the ')) or bank.lower() in who.lower() else 'the ' + who}."
+    return who if who.lower().startswith(("a ", "an ", "the ")) or (bank and who.lower().startswith(bank.lower())) else "the " + who
+
+
+def _compose_opening(meta):
+    """Self-introduction from the policy meta, without repeating the bank name if the description already has it."""
+    return f"Hello, this is {self_description(meta)}."
 
 
 def _call_var_placeholders(text, call_vars):
@@ -281,7 +288,8 @@ def generate(rp, oas_path):
     GENERATED_FROM.update(hub_plain_kb=round(plain_kb, 1), hub_kb=round(len(hub_src) / 1024, 1),
                           hub_packed=hub_src is not None and "zlib.decompress" in hub_src)
     lang = meta.get("language") or "English"
-    sysp = (f"You are the {meta.get('agent_self_description') or 'digital assistant'} of {meta.get('bank_name') or 'the bank'}. "
+    lang = {"en": "English", "tr": "Turkish", "de": "German", "fr": "French", "es": "Spanish"}.get(str(lang).strip().lower()[:2] if len(str(lang).strip()) <= 5 else "", lang)   # a language code -> its name
+    sysp = (f"You are {self_description(meta)}. "
             f"Speak {lang}, one or two short sentences per turn. Never say that anything was recorded, scheduled or "
             f"transferred. Never invent figures, dates or reasons.")
     nodes = {

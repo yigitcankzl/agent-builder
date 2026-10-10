@@ -271,13 +271,30 @@ def honesty():
     check(any(e.startswith("20") for e in validate(wf, rp, OAS)), "validator 20 catches 'recorded' in the greet")
 
 
+def bank_names():
+    print("== composed self-descriptions name the bank once")
+    from builder.generator import self_description
+    check(self_description({"agent_self_description": "digital assistant calling from Freya Bank", "bank_name": "Freya Bank"})
+          == "the digital assistant calling from Freya Bank", "a description that names the bank is kept")
+    check(self_description({"agent_self_description": "digital assistant", "bank_name": "Freya Bank"}) == "the digital assistant of Freya Bank",
+          "a description without the bank gets 'of <bank>'")
+    p = copy.deepcopy(BASE)
+    p["meta"] = dict(p.get("meta") or {}, agent_self_description="digital assistant calling from Freya Bank", bank_name="Freya Bank", language="en")
+    rp, _ = B.to_reducer(p, OAS, [])
+    wf = generate(rp, OAS)
+    check(wf["system_prompt"].count("Freya Bank") == 1 and "Speak English" in wf["system_prompt"], f"system prompt: {wf['system_prompt'][:90]!r}")
+    check(not [e for e in validate(wf, rp, OAS) if e.startswith("21")], "validator 21 passes")
+    wf["system_prompt"] = "You are the digital assistant calling from Freya Bank of Freya Bank."
+    check(any(e.startswith("21") for e in validate(wf, rp, OAS)), "validator 21 catches the doubled bank name")
+
+
 def gap2_exact():
     q = {"field": "postcode", "format": "postcode", "format_evidence": {"source": src("Send the postcode exactly as said, letters and digits.")}}
     check(B.answer_format(q)[0] == "free", "'exactly as said' wins over the postcode format -> free")
 
 
 if __name__ == "__main__":
-    for g in (gap1, gap2, gap2_exact, gap3, gap4, regressions, derive_fixes, integration_fixes, honesty):
+    for g in (gap1, gap2, gap2_exact, gap3, gap4, regressions, derive_fixes, integration_fixes, honesty, bank_names):
         g()
     print("RESULT:", "PASS" if not fails else f"FAIL ({len(fails)})")
     sys.exit(1 if fails else 0)

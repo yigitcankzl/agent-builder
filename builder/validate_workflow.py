@@ -27,6 +27,7 @@ validate(wf, rp, oas_path, unstable_quotes=()) -> list of problems (empty = pass
 18 identity answer formats are in the closed set
 19 floor rules, amounts.acceptance and date_rules use the closed shapes (gaps 3-4)
 20 honesty: no recorded/scheduled/transferred/saved/booked in the greet or any line spoken before a write succeeds
+21 the bank name appears once per sentence in composed self-descriptions (greet, system prompt, task messages)
 """
 import argparse, json, os, re, sys
 
@@ -369,6 +370,15 @@ def validate(wf, rp, oas_path, unstable_quotes=()):
         m = HONESTY.search(str(t or ""))
         if m:
             errs.append(f"20: {where} says {m.group(1)!r} before any tool result: {str(t)[:70]!r}")
+    # 21 the bank is named once in a composed self-description (greet, system prompt, free-talk prompts)
+    bank = str((rp.get("meta") or {}).get("bank_name") or "").strip()
+    if bank:
+        texts = [("system_prompt", wf.get("system_prompt", "")), ("greet", greet)]
+        texts += [(k, n.get("task_message", "")) for k, n in nodes.items() if n.get("task_message")]
+        for where, t in texts:
+            for sent in re.split(r"(?<=[.!?])\s+", str(t)):
+                if len(re.findall(re.escape(bank), sent, re.I)) > 1:
+                    errs.append(f"21: {where} names the bank twice in one sentence: {sent[:80]!r}")
     # 9 unstable unmapped
     # only where unmapped rules are compiled: the policy's unmapped_rules (reducer input) and the free-talk prompts.
     # (A short generic phrase like "Ask once more." can legitimately appear elsewhere, e.g. a fixed sentence.)
