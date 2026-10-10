@@ -708,8 +708,9 @@ def normalise(ev, st):
         e['kind'], e['st'] = 'yes', 'complete'
     if e.get('st') == 'none' and e.get('kind') != 'other':
         e['st'] = 'complete'
-    if e.get('kind') in ('date', 'date_amount') and st['phase'] == 'third_party':
-        e['kind'] = 'callback'
+    if e.get('kind') in ('date', 'date_amount') and (st['phase'] == 'third_party' or
+                                                      (st['phase'] in ('opening', 'identity') and str(e.get('tm') or '').strip())):
+        e['kind'] = 'callback'           # a day with a time before the account is discussed is a call-time preference
     if e.get('kind') == 'other' and st['q'] == 'confirm_name':
         e['kind'], e['who'] = 'who', 'unclear'
     # §1.5: in the opening a stated speaker ranks above any topic but injection (PUB-02 live: 'No, I'm her husband.
