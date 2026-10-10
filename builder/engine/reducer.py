@@ -1710,6 +1710,13 @@ def identity(policy, st, ev, today, cv):
         ans = norm_answer(fmt, ev.get('ans'))
         if not ans:          # not in the field's format: ask again, not a wrong answer
             return resay(st)
+        if answer_format(fmt)[0] == 'date' and 'y' in ev:
+            y = re.sub(r'\D', '', str(ev.get('y') or ''))
+            if len(y) != 4 or not ans.startswith(y):
+                # PUB-03 live (48a9827a): 'It is the twenty-first of July' came as ans=1992-07-21, the year taken from
+                # the previous wrong answer. A year the customer did not say in these words is never sent: the
+                # customer goes on (not a wrong answer)
+                return dict(type='say_exact', text=sentence(policy, 'continue_line', D_CONTINUE))
         st['_last_args'] = dict(customer_id=cid(cv), field=field, answer=ans)
         return call(st, 'verify', 'verify_identity', dict(st['_last_args']))
     if k == 'topic':

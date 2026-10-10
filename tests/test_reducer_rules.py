@@ -237,7 +237,40 @@ def pub02_live():
     return True
 
 
+def pub03_live():
+    """PUB-03 live (48a9827a): DOB 1991-07-12 (wrong), 1992-08-21 (wrong), then 'It is the twenty-first of July' (cut
+    off) labelled ans=1992-07-21: the year was taken from the previous answer and matched the bank's real DOB. With the
+    y= label a year not said in these words is never sent; the customer goes on and the said year is checked:
+    1990-07-21 -> the third wrong answer -> not_verified/failed. Identity answers never inherit parts of earlier turns."""
+    for name, pol in POL.items():
+        v = R.V(pol)
+        cv = dict(customer_id="c_p3", first_name="Owen", last_name="Park", title="Mr", now=NOW)
+        st = R.init_state(pol, cv)
+        st, a = say(pol, st, "kind=who;also=none;st=complete;prod=;who=self;party=")
+        sent = []
+        for left, body in ((2, "ans=1991-07-12;y=1991"), (1, "ans=1992-08-21;y=1992")):
+            st, a = say(pol, st, "kind=identity;also=none;st=complete;prod=;field=date_of_birth;" + body)
+            sent.append(a["args"]["answer"])
+            st, a = tool(pol, st, dict(verified=False, all_verified=False, wrong_answers_left=left))
+        st, a = say(pol, st, "kind=identity;also=none;st=complete;prod=;field=date_of_birth;ans=1992-07-21;y=")
+        check(a["type"] == "say_exact" and a["text"] == R.sentence(pol, "continue_line", R.D_CONTINUE) and st["identity"]["wrong"] == 2,
+              f"{name}: a year not said must not be sent: {a}")
+        st, a = say(pol, st, "kind=identity;also=none;st=complete;prod=;field=date_of_birth;ans=1990-07-21;y=1990")
+        check(a["type"] == "call_tool" and a["args"]["answer"] == "1990-07-21", f"{name}: the said year: {a}")
+        st, a = tool(pol, st, dict(verified=False, all_verified=False, wrong_answers_left=0))
+        check(a["type"] == "close" and (a["outcome"], a["reason"]) == tuple(v["id_failed"]), f"{name}: third wrong -> failed: {a}")
+        # a y= that disagrees with ans is not sent either; an event without y= (older prompt) keeps the old behaviour
+        st = R.init_state(pol, cv)
+        st, a = say(pol, st, "kind=who;also=none;st=complete;prod=;who=self;party=")
+        st, a = say(pol, st, "kind=identity;also=none;st=complete;prod=;field=date_of_birth;ans=1992-07-21;y=1990")
+        check(a["type"] == "say_exact", f"{name}: y disagrees with ans: {a}")
+        st, a = say(pol, st, "kind=identity;also=none;st=complete;prod=;field=date_of_birth;ans=1992-07-21")
+        check(a["type"] == "call_tool", f"{name}: no y= key: unchanged: {a}")
+    return True
+
+
 if __name__ == "__main__":
+    print("PUB-03 live: no inherited year:", pub03_live())
     print("PUB-02 live: speaker first in the opening:", pub02_live())
     print("answer topic + event, both orders (PUB-04):", answer_and_event())
     print("PUB-06 minimum-this-Friday + malformed events:", pub06_and_malformed())
