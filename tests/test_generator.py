@@ -58,6 +58,36 @@ def public_constants():
     return {c for c in consts if len(c) >= 4} - fixed
 
 
+def hub_failsafe():
+    """A lost hub result closes (a recorded promise stays a promise). talk_post can close on a goodbye.
+    hub_reset blanks the headers and error text that overflowed the sandbox."""
+    from builder.engine.reducer import RETURN_BUDGET, returned_len
+    _, _, wf, _ = build("brief-a")
+    edges = wf["nodes"]["hub"]["transitions"]
+    stale = next(e for e in edges if e.get("description") == "hub result lost")
+    close_at = next(i for i, e in enumerate(edges) if e["target_node"] == "close_say")
+    talk_at = next(i for i, e in enumerate(edges) if e["target_node"] == "talk_post")
+    post = wf["nodes"]["talk_post"]
+    code = wf["nodes"]["hub_reset"]["pre_actions"][0]["function"]["parameters"]["properties"]["code"]["default"]
+    fat = {"route": "say", "route_ok": "yes", "t_create_promise_response.data.ok": "true",
+           "t_get_account_response.header.Report-To": "H" * 400,
+           "hub_response.message": "M" * 700, "hub_reset_response.error": "E" * 200,
+           "close_outcome": "not_reached", "close_reason": "unclear", "st": "{}"}
+    before = returned_len(dict(fat))
+    ns = dict(vars=fat, __name__="hub")
+    exec(compile(code, "hub_reset", "exec"), ns)
+    after = returned_len(fat)
+    ok = (stale["target_node"] == "close_say" and close_at < talk_at
+          and any(t["target_node"] == "close_say" for t in post["transitions"])
+          and "set ending to yes" in post["task_message"]
+          and any(f.get("name") == "ending" for f in post["extraction_schema"])
+          and fat["route"] == "stale" and fat["close_outcome"] == "promise" and fat["close_reason"] == ""
+          and fat["t_get_account_response.header.Report-To"] == "" and fat["hub_response.message"] == ""
+          and after <= RETURN_BUDGET and after < before)
+    print(f"   hub fail-safe: {'yes' if ok else 'NO'}  reset payload {before} -> {after}")
+    return ok
+
+
 def talk_prompts_forbid_restating():
     """talk_pre and talk_post must not be able to re-propose an offer the reducer already said."""
     from builder.generator import NO_RESTATE
@@ -134,6 +164,8 @@ if __name__ == "__main__":
         print(f"   WARNING (Fork 3 files, reported, not edited): {theirs}")
     print("\n== free talk must not restate an offer")
     talk_ok = talk_prompts_forbid_restating()
-    ok = bad == 0 and all(caught) and not own and talk_ok
+    print("\n== hub result over the sandbox cut closes")
+    safe_ok = hub_failsafe()
+    ok = bad == 0 and all(caught) and not own and talk_ok and safe_ok
     print("\nRESULT:", "PASS" if ok else "FAIL")
     sys.exit(0 if ok else 1)

@@ -117,6 +117,39 @@ def offer_chatter_live():
     return True
 
 
+def payload_stays_under_truncation():
+    """40 talkative turns, with the live fat vars reappearing each turn (headers, sandbox error text).
+    The printed code_exec result stays under the ~10000-char cut."""
+    pol = POL["A"]
+    st = R.init_state(pol, dict(CV, customer_id="c_r"))
+    vars_ = dict(st=R._dump(st, (",", ":")), route="stale", route_ok="no", ev_tok="kstart",
+                 say_next="", farewell="Thank you. Goodbye.", talk_hint="", close_outcome="", close_reason="",
+                 promise_recorded="no", promise_word="promise", now=NOW, customer_id="c_r",
+                 first_name="Ann", last_name="Lee", title="Ms")
+    worst = 0
+    for i in range(40):
+        vars_["t_verify_identity_response.header.Report-To"] = "H" * 300
+        vars_["t_get_account_response.header.Report-To"] = "H" * 300
+        vars_["t_verify_identity_response.header.Nel"] = "N" * 80
+        vars_["t_get_account_response.header.Nel"] = "N" * 80
+        vars_["hub_response.message"] = "M" * 630
+        vars_["hub_reset_response.message"] = "M" * 630
+        vars_["hub_response.error"] = "E" * 120
+        tok = str(vars_.get("ev_tok") or "kstart")
+        vars_["ev"] = "n=%s;src=user;kind=other;also=none;st=none;prod=" % tok
+        before = R.returned_len(vars_)
+        R.hub_main(vars_, pol)
+        after = R.returned_len(vars_)
+        worst = max(worst, after)
+        check(after <= R.RETURN_BUDGET, "turn %d printed %d (in %d)" % (i, after, before))
+        check(vars_.get("hub_response.message") == "" and vars_.get("t_get_account_response.header.Report-To") == "",
+              "turn %d noise still in the result" % i)
+        check(vars_.get("route") != "talk_post" or after <= R.RETURN_BUDGET, "route")
+    check(worst <= R.RETURN_BUDGET, "worst %d" % worst)
+    print("   40-turn printed payload worst %d (budget %d)" % (worst, R.RETURN_BUDGET))
+    return worst
+
+
 def blocked_identity():
     """mut-04 (policy-extract f8a2aca, copied read-only): identity.blocked -> after the name is confirmed, close on the
     blocked/on_fail slot; no blocked question is ever asked, no account fact, no get_account."""
@@ -628,6 +661,7 @@ if __name__ == "__main__":
     print("blocked identity (mut-04):", blocked_identity())
     print("floor once (PUB-06):", floor_once())
     print("offer chatter does not restate the floor (PUB-06 live):", offer_chatter_live())
+    print("payload stays under the sandbox cut:", payload_stays_under_truncation() <= R.RETURN_BUDGET)
     for name, pol in POL.items():
         v = R.V(pol)
         # 1. an event that does not answer the name question: counted re-ask, never a bare safe_repeat; cap -> unclear

@@ -2324,6 +2324,85 @@ def _dump(st, sep=None):
     return s
 
 
+# Freya's code_exec prints __CODE_EXEC_RESULT__ plus the vars JSON and cuts the stdout near 10,000 chars.
+# A cut result is not applied, and the error text is stored back into vars, so the next run is larger.
+RETURN_BUDGET = 9000
+_RESULT_MARK = '__CODE_EXEC_RESULT__'
+
+
+def returned_len(vars):
+    """Bytes the sandbox prints for this variable table (the same spacing the platform uses)."""
+    return len(_RESULT_MARK) + len(json.dumps(dict(vars=vars), default=str))
+
+
+def _blank_noise(vars):
+    """Response headers and stored code_exec errors are never read. Blank them, do not delete them:
+    the platform merges the returned table, so a missing key would keep the previous fat value."""
+    for k in list(vars):
+        sk = str(k)
+        if '.header.' in sk or sk.endswith('_response.message') or sk.endswith('_response.error'):
+            if vars.get(k) not in ('', None):
+                vars[k] = ''
+
+
+def _blank_spent_data(vars):
+    """Tool bodies are copied into st on the hub run that reads them. Empty afterwards, so they do not
+    sit in every later snapshot. Counts and status codes stay."""
+    for k in list(vars):
+        sk = str(k)
+        if '_response.data' in sk or sk.endswith('_data'):
+            if vars.get(k) not in ('', None):
+                vars[k] = ''
+
+
+def _note_promise(vars):
+    """A recorded promise must survive a later close: the outcome word is promise_word from the workflow.
+    A transfer wins, the same way precedence() does."""
+    st = _jsonish(vars.get('st'))
+    if isinstance(st, dict) and any((p or dict()).get('status') == 'persisted' for p in (st.get('products') or [])):
+        vars['promise_recorded'] = 'yes'
+    if isinstance(st, dict) and st.get('transfers'):
+        return
+    word = vars.get('promise_word') or ''
+    if vars.get('promise_recorded') == 'yes' and word:
+        vars['close_outcome'] = word
+        vars['close_reason'] = ''
+
+
+def enforce_budget(vars):
+    """Keep the printed result under RETURN_BUDGET. Last resort is a close, never a free-talk route."""
+    _blank_noise(vars)
+    if returned_len(vars) <= RETURN_BUDGET:
+        return
+    _blank_spent_data(vars)
+    st = _jsonish(vars.get('st'))
+    if isinstance(st, dict):
+        if st.get('_said_last') and st.get('_said_last') == st.get('_last_ask'):
+            st['_said_last'] = ''
+        vars['st'] = _dump(st, (',', ':'))
+    if returned_len(vars) <= RETURN_BUDGET:
+        return
+    keep = set(['st', 'route', 'route_ok', 'say_next', 'farewell', 'talk_hint', 'close_outcome', 'close_reason',
+                'ev', 'ev_tok', 'xfer_pre', 'promise_recorded', 'promise_word', 'hook_skip'])
+    for k in list(vars):
+        if k in keep or str(k).endswith('_count') or str(k).endswith('_status_code'):
+            continue
+        if isinstance(vars.get(k), str) and len(vars[k]) > 40:
+            vars[k] = ''
+    if returned_len(vars) <= RETURN_BUDGET:
+        return
+    _note_promise(vars)
+    if vars.get('route') not in ('close', 'close_retry', 'end'):
+        vars['route'] = 'close'
+    if not vars.get('farewell'):
+        vars['farewell'] = D_FAREWELL
+    vars['ev'] = ''
+    vars['say_next'] = ''
+    vars['talk_hint'] = ''
+    if returned_len(vars) > RETURN_BUDGET:
+        vars['st'] = ''
+
+
 CLOSE_PREF = dict(refused=('refused', 'dispute', 'hardship', 'write'), dispute=('dispute', 'refused', 'hardship', 'write'),
                   hardship=('hardship', 'refused', 'dispute', 'write'), write_failed=('write', 'refused', 'dispute', 'hardship'))
 
@@ -2369,10 +2448,11 @@ def close_hub(vars, policy, st):
         vars['route'], vars['close_outcome'], vars['close_reason'] = 'close_retry', nxt[0] or '', nxt[1] or ''
     else:
         vars['route'] = 'end'
-    vars['st'] = _dump(st)
+    vars['st'] = _dump(st, (',', ':'))
 
 
 def hub_main(vars, policy):
+    _blank_noise(vars)          # headers and old sandbox errors, before anything is printed back
     cvmap = (policy.get('meta') or dict()).get('call_vars') or dict()
     cv = dict((role, vars.get(name)) for role, name in cvmap.items())
     now = str(vars.get((policy.get('now') or dict()).get('var', 'now')) or cv.get('now') or '')
@@ -2381,7 +2461,10 @@ def hub_main(vars, policy):
         st = init_state(policy, cv)
     st['tok'] = str(vars.get('ev_tok') or st.get('tok') or 'kstart')
     if st.get('phase') == 'closed' and st.get('_close_snap') is not None:
-        return close_hub(vars, policy, st)        # back from t_close_call: a rejected close is retried once
+        close_hub(vars, policy, st)        # back from t_close_call: a rejected close is retried once
+        _blank_spent_data(vars)
+        enforce_budget(vars)
+        return
     try:
         te = read_tool(vars, st)
         extra = [x.get('id') for x in policy.get('extra_topics') or [] if isinstance(x, dict) and x.get('id')]
@@ -2421,7 +2504,10 @@ def hub_main(vars, policy):
     new = _token(st2.get('runs', 0))
     st2['tok'] = new
     vars['ev_tok'] = new
-    vars['st'] = _dump(st2)
+    vars['st'] = _dump(st2, (',', ':'))
+    _blank_spent_data(vars)
+    _note_promise(vars)
+    enforce_budget(vars)
 
 
 def minify(src):
