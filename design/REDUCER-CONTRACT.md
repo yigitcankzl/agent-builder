@@ -430,4 +430,12 @@ the date. No attempt is consumed and `all_today_asked=true`.
 13. **Passthrough tts → `close_call` without a user turn.** Does a conversation node with `on_enter: tts {{farewell}}`
     and `passthrough: true` speak the line and then route immediately (always → `t_close_call` → `end`)? Also: is the
     tts text in the transcript BEFORE the `close_call` tool event? Probe: `close_say` in `tests/extract_eval.py`'s
-    sibling probe (`probe/m0_close_say.py`). Fallback in §6.
+    sibling probe (`probe/m0_close_say.py`). Fallback in §6. **Measured after the outage: PASS** (`64478bb6`): farewell →
+    `close_call` → `end`, no user turn.
+14. **Code node not completing under load** (`64478bb6` first pass): the graph proceeds with stale or unset vars, so a
+    literal `{{farewell}}` was spoken and `close_call` had unresolved args. Required:
+    - pre-populate every tts and close variable with a safe value from the first run;
+    - a one-shot guard on tool edges (`w_go_<tool>`, consumed by the tool node's mapping);
+    - see M0-FINDINGS 11.
+15. **Empty tts = no speech; the turn never completes** (reproduced twice). Invariant 2 is mandatory. After repeated
+    silent loops the hub's code stopped executing (an engine loop guard?), see M0-FINDINGS 12.

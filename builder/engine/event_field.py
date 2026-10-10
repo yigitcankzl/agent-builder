@@ -10,8 +10,9 @@ STATUS = ["complete", "partial", "ambiguous", "none"]
 PAYLOAD_KEYS = ["field", "ans", "who", "party", "rel", "d", "m", "wd", "wk", "vague", "amt", "why", "tm", "t"]
 
 
-def pattern():
-    kinds = "|".join(KINDS)
+def pattern(topics=()):
+    """Topic names are also accepted as a kind (an alias the model produces); parse() normalises them to kind=topic."""
+    kinds = "|".join(KINDS + [t for t in topics if t not in KINDS])
     return (rf"^n=[a-z0-9]{{1,8}};src=user;kind=({kinds});also=({kinds}|none);st=({'|'.join(STATUS)});"
             rf"prod=([0-9]{{1,2}}|all)?(;({'|'.join(PAYLOAD_KEYS)})=[^;=]*)*$")
 
@@ -41,19 +42,25 @@ def field(vocab):
         "code kxzrwa, 'on the twenty-' -> n=kxzrwa;src=user;kind=date;also=none;st=partial;prod=;rel=;d=;m=;wd=;wk=none;"
         "vague=no\n"
         "code kqqhst, 'nice weather today' -> n=kqqhst;src=user;kind=other;also=none;st=none;prod=\n"
+        "code kpwrnd, 'I can pay 300 but not today' -> n=kpwrnd;src=user;kind=amount;also=reject;st=complete;prod=;amt=300\n"
+        f"code kdvmse, a {vocab['topics'][0]} topic -> n=kdvmse;src=user;kind=topic;also=none;st=complete;prod=;t={vocab['topics'][0]}\n"
         "{{extractor.type_preamble}}\n{{extractor.variables_list}}\nConversation:\n{{extractor.conversation.last-10}}\n"
         "Last message: {{extractor.speech}}")
-    return {"name": "ev", "type": "string", "min_confidence": 0.3, "max_retries": 2, "validation_pattern": pattern(),
+    return {"name": "ev", "type": "string", "min_confidence": 0.3, "max_retries": 2, "validation_pattern": pattern(vocab["topics"]),
             "description": "A code label like n=kbmtpq;src=user;kind=date;also=none;st=complete;prod=;d=27;m=;wd=;wk=none;vague=no. "
                            "Never the customer's own words.",
             "extraction_prompt": prompt}
 
 
-def parse(value):
-    if not value or not re.match(pattern(), str(value)):
+def parse(value, topics=()):
+    if not value or not re.match(pattern(topics), str(value)):
         return None
     out = dict()
     for part in str(value).split(";"):
         k, _, v = part.partition("=")
         out[k] = v
+    if out.get("kind") in topics and out["kind"] not in KINDS:  # alias kind=<topic> -> kind=topic;t=<topic>
+        out["t"], out["kind"] = out["kind"], "topic"
+    if out.get("also") in topics and out["also"] not in KINDS:
+        out["also"] = "topic"
     return out

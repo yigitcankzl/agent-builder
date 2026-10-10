@@ -18,8 +18,11 @@
 | 7a | ~60 KB code node | **PASS** (67,142 chars saved byte-identical; runs in about 50 ms) | `a018453e-9c63-4acd-9fa5-866849d757d3` |
 | 7b | `}}` / `{{` inside a variable value | **PASS for tts** (spoken verbatim: "a }} b {{ c"). In a prompt: not measured (platform outage) | `bd36d839…` |
 | 7c | a second `close_call` | mock answers `{"ok": false, "error": "the call is already closed"}`; the ledger keeps the FIRST outcome, but both calls are logged | `probe/m0_evidence/m0_close_twice.json` |
-| 8 | partial utterance with one composite field | **NOT MEASURED** (chat API returned 503 on every turn from 13:50) | script ready: `probe/m0_partial.py` |
-| 9 | silence after a transition | **root cause of 1327758a = platform stall, not the graph**; the live test of an empty tts was not measured (outage) | `1327758a-145e-423c-9b29-825ccc952d96` |
+| 8 | partial utterance with one composite field | **PASS** (rerun after recovery): "the twenty-" → `part=yes;d=` (no action); "seventh" → `d=27;part=no` | `6a4e21c0-dd18-4ddd-9981-67ac95487750`, `abf76c2d-b2fd-4fd9-9461-9cd4bd0deb01` |
+| 9 | silence after a transition | **an empty tts = silence; the turn never completes** (chat 504, reproduced twice). 1327758a was a separate platform stall | `abf76c2d…`, `6a4e21c0…`, `1327758a…` |
+| 10 | passthrough tts → close_call → end, no user turn (contract v2 §10.13) | **PASS when the code node completed**: the farewell is spoken, then `close_call`, then `end` (`assistant-ended-call`), in that order in the transcript | `64478bb6-b706-451c-ae0a-2e2124176737` |
+| 11 | **NEW RISK:** under load a code node can be entered without completing, and the graph proceeds | first pass of `64478bb6`: `code_exec` started, never completed, `close_say` spoke the literal `{{farewell}}`, and `close_call` went out with unresolved fields (mock: `unknown outcome`) | `64478bb6…` |
+| 12 | **NEW RISK:** after repeated hub entries without any agent speech, the hub's `code_exec` stopped running (node entered, no function_call events), and stale `route`/`say_next` were reused | the 4th and later entries in `abf76c2d…` and `6a4e21c0…` |
 
 ## Details and workarounds
 
@@ -104,6 +107,25 @@ The counters are keyed by the **node id**, not by the function name. For a write
 - The chat API gave 502/503/504 under load. A retried message can be recorded twice: "Please run the bad tool."
   appears twice in `bd36d839…`.
 - Make the scorer harness tolerate this, and do not judge the graph on outage-window runs.
+
+### 10–12. Close path and code-node failure modes (after the outage)
+- **10 works.** A passthrough `close_say` speaks, then `t_close_call`, then `end`, with no user turn
+  (`assistant-ended-call`). Contract v2's close graph is feasible.
+- **11 is dangerous.** If the hub's code does not complete, every variable keeps its previous value, or stays unset on
+  the first run. The passthrough edges still fire, so the result can be a literal placeholder spoken aloud, a
+  `close_call` with unresolved args, or a stale route repeated.
+  Mitigations to build in (and probe):
+  - (a) Every tts text has a non-placeholder fallback. An `on_enter` text can't have defaults, so the hub must
+    pre-populate `say_next` and `farewell` with a safe line from the very first run, e.g. in `test_variables`.
+  - (b) Tool edges need a one-shot guard that the TOOL node consumes: `w_go_<tool> = 'go'` set by the reducer, plus a
+    node-level `response_mapping` that overwrites it, so a stale route can't re-fire a write. Unverified: the mapping
+    is unset on an HTTP error (M0 5), so a failed write could loop. Cap it with `max_node_turns`/visit count, or make
+    the failure path go through a counter (`<node>_failure_count greater_than k` → safe node).
+  - (c) `close_outcome`/`close_reason` are pre-populated from the very first run with the best current outcome, never
+    left unset.
+- **12 looks like an engine loop guard:** repeated entries without assistant output stop the code. It surfaced only
+  because the empty tts produced no speech. With invariant 2 (never empty tts) it should not trigger, but it means a
+  silent loop is not self-healing.
 
 ## Smallest graph that satisfies 1–6
 ```

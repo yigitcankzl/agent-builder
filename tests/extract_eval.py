@@ -29,6 +29,7 @@ VOCAB = {"topics": ["hardship", "dispute", "paid", "restructure", "human", "stop
          "identity_fields": ["date_of_birth", "phone_last4"]}
 DATE_KEYS = ("rel", "d", "m", "wd", "wk", "vague")
 AMOUNT_KEYS = ("amt",)
+TOPICS = VOCAB["topics"]
 TRIGGER_KINDS = {"identity", "accept", "yes", "callback"}        # kinds that can lead to a tool call in the reducer
 NON_CHANGING = {("other", "none")}
 
@@ -131,7 +132,7 @@ def run_case(wid, case):
             e = json.loads(t)
             if e.get("name") == "ev" and e.get("input_text") == last:
                 raw = e.get("value")
-                got = EF.parse(raw) if e["event"] == "variable_extracted" else None
+                got = EF.parse(raw, TOPICS) if e["event"] == "variable_extracted" else None
     return {"id": case["id"], "call_id": call, "raw": raw, "got": got, "http_errors": errs}
 
 
@@ -206,6 +207,7 @@ if __name__ == "__main__":
     cases = [c for c in spec["cases"] if not a.only or c["id"] in a.only.split(",")]
     if simulation_active():
         sys.exit("a simulation is running in this workspace; extraction eval is chat-only and waits for it to finish")
+    TOPICS = (spec.get("vocab") or VOCAB)["topics"]
     wf = workflow(spec.get("vocab") or VOCAB)
     print("dry run:", freya.validate_workflow("eval-ev", wf))
     ids = freya.save_workflow("eval-ev", wf, state_file=STATE)
