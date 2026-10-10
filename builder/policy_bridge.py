@@ -541,6 +541,12 @@ def _brief_worded(text, quotes):
     return bool(words) and all(_norm(w.strip()) in _norm(" ".join(quotes)) for w in words) and not INSTRUCTION.search(text)
 
 
+_EXPLICIT_REFUSE = re.compile(r"\b(refus\w*|reject\w*|not (?:be )?accept\w*|cannot (?:be )?(?:record|accept)\w*|"
+                              r"not allowed|is not possible|decline\w*|do not record)\b", re.I)
+_SHIFT_LINE = re.compile(r"next business day|next working day|<DATE>", re.I)
+_UNSTATED = {"weekend": "shift_next_business_day", "holiday": "shift_next_business_day", "after_deadline": "offer_deadline"}
+
+
 def date_rules(p):
     """-> (date_rules {situation: {action, say?, source}}, notes). The extractor's date_rules first; a situation it does
     not answer comes from the legacy sections (on_non_business_day for weekend and holiday, on_after_deadline,
@@ -567,14 +573,53 @@ def date_rules(p):
             elif not act:
                 notes.append(f"date_rules.{sit}: no rule in the material")
                 continue
+        if act == "refuse" and sit in _UNSTATED and not any(_EXPLICIT_REFUSE.search(x) for x in q):
+            notes.append(f"date_rules.{sit}: refuse with no explicit refusal in the material -> {_UNSTATED[sit]} (legacy behaviour)")
+            act, how = _UNSTATED[sit], how + "+unstated"
         rule = {"action": act, "source": e.get("source") or DEFAULT, "from": how}
         say = str(e.get("say") or "").strip()
+        if act == "refuse" and _SHIFT_LINE.search(say):
+            say = ""            # a shift line is never paired with a refusal
         if say and _brief_worded(say, q):
             rule["say"] = say
         elif say and say not in CONTRACT_DATE_SAY.values():
             notes.append(f"date_rules.{sit}.say {say[:50]!r} is not the brief's wording: omitted (reducer default)")
         out[sit] = rule
+    # the date core reads the legacy section: keep it consistent with the weekend rule (a shift is never a reject)
+    if nbd.get("action") == "reject" and (out.get("weekend") or {}).get("action") == "shift_next_business_day":
+        nbd["action"] = "next_business_day"
+        notes.append("on_non_business_day.action reject -> next_business_day (no explicit refusal in the material)")
     return out, notes
+
+
+_CB_REASON = re.compile(r"\bcall.?back\b", re.I)
+_NO_CB_REASON = re.compile(r"\bno.?call.?back\b", re.I)
+
+
+def callback_who_rules(p):
+    """The effect of a who row comes from its reason / effect, never from words anywhere in its quote: no_callback when
+    the reason says no callback, callback when the reason or effect says callback. A relative row in a brief with a
+    callback window and a callback row in closing.table books a callback and carries that row's reason (an extraction
+    that left the reason empty, or quoted another rule, must not close with no reason). -> notes"""
+    notes = []
+    live = [r for r in (p.get("closing") or {}).get("table") or [] if not r.get("blocked") and r.get("reason")]
+    cb = next((r for r in live if _CB_REASON.search(str(r["reason"])) and not _NO_CB_REASON.search(str(r["reason"]))), None)
+    cbw = (p.get("writes") or {}).get("callback") or {}
+    window = bool(cbw.get("start") and cbw.get("end"))
+    for w in p.get("who_rules") or []:
+        r = str(w.get("reason") or "")
+        if _NO_CB_REASON.search(r):
+            w["effect_kind"] = "no_callback"
+        elif _CB_REASON.search(r) or w.get("effect_kind") == "callback":
+            w["effect_kind"] = "callback"
+        else:
+            w["effect_kind"] = "" if w.get("effect_kind") in ("callback", "no_callback") else w.get("effect_kind", "")
+        if w.get("party") == "relative" and window and cb and (w.get("effect_kind") != "callback" or not w.get("reason")):
+            notes.append(f"who relative: {w.get('outcome')}/{w.get('reason')} -> callback {cb['outcome']}/{cb['reason']} (callback window + callback row)")
+            w.update(effect_kind="callback", outcome=cb["outcome"], reason=cb["reason"])
+        if w.get("effect_kind") == "callback" and not w.get("reason") and cb:
+            w.update(outcome=cb["outcome"], reason=cb["reason"])
+    return notes
 
 
 def _map_sentence_keys(p):
@@ -915,11 +960,7 @@ def to_reducer(policy, oas_path, stable_unmapped=None):
         if sid not in sent:
             sent[sid] = {"text": "", "verbatim": True, "max_times": 99, "source": DEFAULT}
             notes.append(f"sentence {sid}: the brief has none; empty (the reducer's fallback applies)")
-    for w in p.get("who_rules") or []:   # callback / no_callback rows carry the effect, never a who value
-        if re.search(r"\bno.?callback\b", json.dumps(w).lower()):
-            w["effect_kind"] = "no_callback"
-        elif "callback" in json.dumps(w).lower() and not w.get("effect_kind"):
-            w["effect_kind"] = "callback"
+    notes += callback_who_rules(p)
     notes += _date_templates(p)
     p["date_rules"], dnotes = date_rules(p)
     notes += dnotes

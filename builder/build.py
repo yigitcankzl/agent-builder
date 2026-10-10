@@ -172,6 +172,8 @@ def build(briefs, openapi, slot=None, freya_client=None, out_dir="submission", t
     trace.log("workflow", nodes=len(wf["nodes"]), node_types=node_counts(wf), tool_nodes=tool_nodes, kb=len(json.dumps(wf)) // 1024)
     os.makedirs(out_dir, exist_ok=True)
     json.dump(rp, open(os.path.join(out_dir, f"{slot}.policy.json"), "w"), indent=1)
+    # the raw extraction (before the bridge), so a bridge change can be re-checked without a new model call
+    json.dump(pol, open(os.path.join(out_dir, f"{slot}.extracted.json"), "w"), indent=1)
     # 3. save and export
     if time.time() > t0 + budget_s - 30:
         return finish("time guard fired before saving")

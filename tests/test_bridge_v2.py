@@ -175,13 +175,44 @@ def gap4():
     check(any(e.startswith("19") for e in validate(generate(bad, OAS), bad, OAS)), "validator 19 catches an unknown action")
 
 
+def regressions():
+    print("== regressions from the ae1890b rebuild")
+    # raw-b: the relative row came back with reason None (the extractor quoted another rule) -> rb-third closed with no reason
+    p = copy.deepcopy(BASE)
+    p["opening_situations"] = dict(p.get("opening_situations") or {}, wrong_person={
+        "present": True, "effect": "close", "outcome": "not_reached", "reason": "", "say": "",
+        "source": src("A relative may not answer security questions and may not be told the balance.")})
+    rp, rep = B.to_reducer(p, OAS, [])
+    rel = [w for w in rp["who_rules"] if w.get("party") == "relative"]
+    check(rel and rel[0]["effect_kind"] == "callback" and rel[0]["reason"], f"relative row books a callback with its reason: {rel}")
+    check(all(w.get("reason") for w in rp["who_rules"] if w.get("effect_kind") == "callback"), "every callback who-row carries its reason")
+    for name in ("brief-a", "brief-ab", "ins-clean", "raw-b", "mut-03"):
+        f = os.path.join(ROOT, "tests", "e2e8", "submission", name + ".extracted.json")
+        if os.path.exists(f):
+            oas = os.path.join(ROOT, "tests", "fixtures", "general", "ins-clean", "openapi.json") if name == "ins-clean" else OAS
+            r2, _ = B.to_reducer(json.load(open(f)), oas, [])
+            bad = [w for w in r2["who_rules"] if w.get("effect_kind") == "callback" and not w.get("reason")]
+            check(not bad, f"{name}: every callback who-row carries its reason")
+    # raw-b dates: 'must be a business day' is not a refusal -> shift (legacy); refuse only when the material says so
+    q = src("A promise date must be today or later, a business day, and not after that product's deadline.")
+    rp, _ = bridged(date_rules={"weekend": {"action": "refuse", "say": "", "source": q}, "holiday": {"action": "refuse", "say": "", "source": q}},
+                    on_non_business_day=dict(BASE["on_non_business_day"], action="reject", source=q))
+    check(rp["date_rules"]["weekend"]["action"] == "shift_next_business_day" == rp["date_rules"]["holiday"]["action"],
+          "refuse without an explicit refusal -> shift_next_business_day")
+    check(rp["on_non_business_day"]["action"] == "next_business_day", "legacy section made consistent with the weekend rule")
+    q2 = src("Weekend dates are refused: ask for a weekday.")
+    rp, _ = bridged(date_rules={"weekend": {"action": "refuse", "say": "<NAMED> is not a business day. The next business day is <DATE>.", "source": q2}})
+    check(rp["date_rules"]["weekend"]["action"] == "refuse" and "say" not in rp["date_rules"]["weekend"],
+          "an explicit refusal stays refuse, and a shift line is never paired with it")
+
+
 def gap2_exact():
     q = {"field": "postcode", "format": "postcode", "format_evidence": {"source": src("Send the postcode exactly as said, letters and digits.")}}
     check(B.answer_format(q)[0] == "free", "'exactly as said' wins over the postcode format -> free")
 
 
 if __name__ == "__main__":
-    for g in (gap1, gap2, gap2_exact, gap3, gap4):
+    for g in (gap1, gap2, gap2_exact, gap3, gap4, regressions):
         g()
     print("RESULT:", "PASS" if not fails else f"FAIL ({len(fails)})")
     sys.exit(1 if fails else 0)
