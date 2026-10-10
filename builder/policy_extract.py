@@ -368,6 +368,28 @@ def reextract_fields(paths, mismatches, openapi=None, sink=None, deadline=None):
     return res
 
 
+REEXTRACT_CORE = """A first reading of a bank's call policy missed some CORE sections (listed below). Re-read the material and
+return ONLY those sections, each in the schema below, every value with its source quotes copied character for character
+from the named file. If the material truly has nothing for a section, return it as null. Output JSON only:
+{"sections": {"<section name>": <section value or null>}}
+"""
+
+
+def reextract_core(paths, missing, openapi=None, sink=None, deadline=None):
+    """Signal S2: one focused Claude call for the missing core sections (identity, products, deadline, closing).
+    -> {section: value} for the sections that came back non-empty with every quote verbatim (others are left out)."""
+    trace = _Forward(sink, deadline) if sink is not None else Trace(None)
+    files, oas = read_files(paths), oas_summary(openapi)
+    secs = sorted({m.split(".")[0] for m in missing})
+    out = parse_json(call_claude(REEXTRACT_CORE + "\nMISSING SECTIONS: " + ", ".join(secs) + "\n\nSCHEMA:\n" + SCHEMA
+                                 + "\n\nMATERIAL:\n" + material_block(files, oas), "re-extract missing core sections", trace))
+    got = {}
+    for k, v in (out.get("sections") or {}).items():
+        if k in secs and v and not bad_quotes({k: v}, files):
+            got[k] = v
+    return got
+
+
 def apply_reextraction(policy, mismatches, res):
     """Patch accepted values into a copy of the extracted (pre-bridge) policy, as sourced aliases the bridge honours."""
     import copy as _copy

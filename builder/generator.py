@@ -4,7 +4,7 @@
 
 Graph:
   greet (tts opening) / exact_say (tts {{say_next}}) / talk_pre / talk_post   --always--> hub_reset --always--> hub
-  hub (code: the reducer from builder.integration.hub_code: Fork 3's module, or the stub), edges in contract order:
+  hub (code: the reducer from builder.integration.hub_code: Fork 3's module; no stub, a load failure raises), edges in contract order:
     close_say | t_transfer_to_agent (go + (route_ok | xfer_pre)) | t_get_account, t_create_promise, t_add_note
     (go + route_ok) | t_verify_identity, t_schedule_callback (go) | talk_post (route_ok) | exact_say | talk_pre (last)
   t_<tool>  api_request, args baked from w_<tool>_<arg>, response_mapping status -> w_go_<tool>, always -> hub

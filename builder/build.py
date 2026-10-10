@@ -13,6 +13,15 @@ Time guard: the whole build stops at --budget-min (default 25, the rules allow 3
 workflow stays invalid after the repair pass, or the guard fires before saving, nothing is saved, the trace records
 `fallback_required` with the reason, the exit code is 2, and the previously exported workflow for that slot (if any)
 stays the submission.
+
+Exit codes (also `exit_code` in the JSON result; the trace has a `signal` event with the code):
+  0  built, validated and saved (or --no-save)
+  2  fallback_required: nothing saved, the previous export for the slot stays; `signal` names why and `next` the
+     ladder step a fallback builder should take (S2 core sections missing, S5 validator, extraction failed, time guard)
+  3  engine not loaded (S0): builder.engine.reducer / event_field failed to import or raised. A packaging bug: fix the
+     clone. Nothing is saved, there is no LLM fallback (a dead stub agent must never be saved).
+Signals (FINAL-PLAN section 2): S0 engine not loaded, S2 core sections missing after the targeted re-extraction,
+S5 validator still failing after the repair pass, EXTRACT every extraction run failed, GUARD time guard.
 """
 import argparse, concurrent.futures as cf, hashlib, json, os, sys, time
 
@@ -21,7 +30,9 @@ sys.path.insert(0, ROOT)
 from builder import generator
 from builder.generator import generate, node_counts
 from builder.policy_bridge import consolidate_unmapped, to_reducer
-from builder.policy_extract import apply_reextraction, extract, read_files, reextract_fields
+from builder.integration import EngineNotLoaded, _load
+from builder.engine.date_policy import core_missing
+from builder.policy_extract import apply_reextraction, extract, read_files, reextract_core, reextract_fields
 from builder.selftest import run_selftest
 from builder.trace import BuildTrace
 from builder.validate_workflow import validate
@@ -92,17 +103,29 @@ def build(briefs, openapi, slot=None, freya_client=None, out_dir="submission", t
     deadline = t0 + budget_s - 90          # keep 90 s for save and export
     result = {"slot": slot, "trace": trace.path, "fallback_required": False}
 
-    def finish(reason=None, code=0):
+    def finish(reason=None, code=0, signal=None, **extra):
         if reason:
-            result.update(fallback_required=True, fallback_reason=reason)
+            code = code or 2
+            result.update(fallback_required=True, fallback_reason=reason, signal=signal, **extra)
+            trace.log("signal", signal=signal, exit_code=code, reason=reason, **extra)
             trace.log("fallback_required", reason=reason, action="nothing saved; the previous export for this slot stays the submission")
         result["seconds"] = round(time.time() - t0, 1)
+        result["exit_code"] = code
         trace.log("end", seconds=result["seconds"], result={k: v for k, v in result.items() if k != "trace"})
         trace.summary(trace.path.replace(".jsonl", ".txt"))
-        result["exit_code"] = code if not reason else 2
         return result
 
+    def engine_failed(e):
+        trace.log("hub_import_failed", error=str(e)[:400])
+        return finish(f"engine not loaded: {e}", 3, "S0", next="fix the clone (no fallback)")
+
     trace.log("start", slot=slot, briefs=[os.path.basename(b.rstrip("/")) for b in briefs], runs=runs, budget_s=budget_s)
+    try:     # S0 before any model call: a clone without a loadable engine stops in seconds, not after extraction
+        for mod, name in (("builder.engine.reducer", "hub_source"), ("builder.engine.event_field", "ev_field")):
+            if not _load(mod, name):
+                raise EngineNotLoaded(f"{mod} has no {name}")
+    except EngineNotLoaded as e:
+        return engine_failed(e)
     brief_text = "\n".join(_sources(trace, briefs, openapi).values())
     # 1. extraction runs, in parallel
     policies = []
@@ -118,7 +141,24 @@ def build(briefs, openapi, slot=None, freya_client=None, out_dir="submission", t
             except Exception as e:
                 trace.log("extraction_run", run=i, error=str(e)[:400])
     if not policies:
-        return finish("policy extraction failed in every run")
+        return finish("policy extraction failed in every run", 2, "EXTRACT", next="L3")
+    # S2: core sections missing in EVERY run -> one targeted re-extraction; still missing -> fallback
+    missing = [core_missing(p) for p in policies]
+    if all(missing):
+        want = sorted({m for ms in missing for m in ms})
+        trace.log("core_missing", runs=missing, action="targeted re-extraction of " + ", ".join(want))
+        try:
+            got = reextract_core(briefs, want, openapi, trace, deadline) if time.time() < deadline - 60 else {}
+        except Exception as e:
+            got = {}
+            trace.log("re_extract_core", error=str(e)[:300])
+        for sec, val in got.items():
+            policies[0][sec] = val
+        still = core_missing(policies[0])
+        trace.log("re_extract_core", filled=sorted(got), still_missing=still)
+        if still:
+            lvl = "L3" if any(m.split(".")[0] in ("identity", "closing") for m in still) else "L2"
+            return finish(f"core sections missing after re-extraction: {still}", 2, "S2", core_missing=still, next=lvl)
     sigs = [core_signature(p) for p in policies]
     agree = len(set(sigs)) == 1
     trace.log("core_agreement", runs=len(policies), agree=agree,
@@ -154,7 +194,12 @@ def build(briefs, openapi, slot=None, freya_client=None, out_dir="submission", t
                 rp, brep = to_reducer(pol, openapi, stable, brief_text)
                 trace.log("bridge", attempt="1-reextracted", api_mismatch=brep["api_mismatch"], notes=brep["notes"],
                           identity_blocked=(rp.get("identity") or {}).get("blocked"))
-        wf = generate(rp, openapi)
+        try:
+            wf = generate(rp, openapi)
+        except EngineNotLoaded as e:
+            return engine_failed(e)
+        if "stub" in (generator.GENERATED_FROM.get("hub"), generator.GENERATED_FROM.get("ev")):
+            return engine_failed("the generator used a stub hub or event field")
         errs = validate(wf, rp, openapi, [u["quote"] for u in unstable])
         trace.log("validator", attempt=k + 1, passed=not errs, errors=errs, hub_code=generator.GENERATED_FROM.get("hub"),
                   ev_field=generator.GENERATED_FROM.get("ev"))
@@ -163,9 +208,9 @@ def build(briefs, openapi, slot=None, freya_client=None, out_dir="submission", t
         if k == 0 and len(attempt_order) == 1:
             trace.log("repair", note="no second extraction run to repair from")
     else:
-        return finish("workflow still invalid after the repair pass")
+        return finish("workflow still invalid after the repair pass", 2, "S5", next="L2", validator_errors=errs[:10])
     if errs:
-        return finish("workflow invalid")
+        return finish("workflow invalid", 2, "S5", next="L2", validator_errors=errs[:10])
     tool_nodes = [k for k, n in wf["nodes"].items() if n["node_type"] == "api_request"]
     result.update(nodes=len(wf["nodes"]), node_types=node_counts(wf), tools=[k[2:] for k in tool_nodes],
                   api_mismatch=len(brep["api_mismatch"]), hub_code=generator.GENERATED_FROM.get("hub"))
@@ -176,7 +221,7 @@ def build(briefs, openapi, slot=None, freya_client=None, out_dir="submission", t
     json.dump(pol, open(os.path.join(out_dir, f"{slot}.extracted.json"), "w"), indent=1)
     # 3. save and export
     if time.time() > t0 + budget_s - 30:
-        return finish("time guard fired before saving")
+        return finish("time guard fired before saving", 2, "GUARD")
     if freya_client is None:
         trace.log("save", skipped=True, note="no Freya client (--no-save)")
     else:
