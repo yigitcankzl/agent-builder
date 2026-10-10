@@ -462,7 +462,61 @@ def flat_item_paths():
     return True
 
 
+# ---------------------------------------------------------------- rehearsal rule types (nightmare-1, biz-1)
+def rehearsal_rules():
+    v = R.V(POL["A"])
+    # the no-promise question (hooks on_no_promise expects_answer): asked once before a verified no_promise close
+    pol = copy.deepcopy(POL["A"])
+    pol["hooks"] = [dict(id="np", point="on_no_promise", expects_answer=True, text="Can I note that you are not making a promise today?")]
+    st, a = to_statement(pol, EARLY)
+    st, a = say(pol, st, "kind=no;also=none;st=complete;prod=")
+    st, a = say(pol, st, "kind=reject;also=none;st=complete;prod=;why=flat")
+    check(a.get("text") == "Can I note that you are not making a promise today?" and st["q"] == "confirm_np", f"np question: {a}")
+    yes_st, yes_a = say(pol, R.json.loads(R.json.dumps(st)), "kind=yes;also=none;st=complete;prod=")
+    check(yes_a["type"] == "close" and (yes_a["outcome"], yes_a["reason"]) == tuple(v["refused"]), f"yes closes refused: {yes_a}")
+    st, a = say(pol, st, "kind=date_amount;also=none;st=complete;prod=;rel=;d=16;m=10;wd=;wk=none;vague=no;amt=540")
+    check(st["q"] == "readback" and "540.00" in a["text"] and "16 October" in a["text"], f"a date instead: read-back: {a}")
+    st, a = say(pol, st, "kind=reject;also=none;st=complete;prod=;why=flat")
+    check(a["type"] != "say_exact" or "not making a promise" not in a["text"], f"asked once: {a}")
+    # never before a service_error close or after a promise
+    st, a = to_statement(pol, EARLY)
+    for b in ("kind=yes;also=none;st=complete;prod=", "kind=yes;also=none;st=complete;prod="):
+        st, a = say(pol, st, b)
+    for _ in range(2):
+        st, a = tool(pol, st, dict(), ok=False)
+    check(a["type"] == "close" and (a["outcome"], a["reason"]) == tuple(v["write_failed"]), f"service_error: no question: {a}")
+    # the customer asks for a callback before identity: no verification, the callback flow
+    cv = dict(CV)
+    st = R.init_state(POL["A"], cv)
+    st, a = say(POL["A"], st, "kind=who;also=none;st=complete;prod=;who=self;party=")
+    st, a = say(POL["A"], st, "kind=callback;also=none;st=complete;prod=;rel=tomorrow;d=;m=;wd=;wk=none;vague=no;tm=15:00")
+    check(a["type"] == "call_tool" and a["tool"] == "schedule_callback" and a["args"]["time"] == "15:00" and st["verified"] != "yes", f"self callback: {a}")
+    # a time outside the window, then no other time: no_callback
+    st = R.init_state(POL["A"], cv)
+    st, a = say(POL["A"], st, "kind=who;also=none;st=complete;prod=;who=other;party=relative")
+    st, a = say(POL["A"], st, "kind=callback;also=none;st=complete;prod=;rel=tomorrow;d=;m=;wd=;wk=none;vague=no;tm=22:00")
+    check(a["type"] == "say_exact" and st["q"] == "callback_time", f"outside the window: ask once: {a}")
+    st, a = say(POL["A"], st, "kind=no;also=none;st=complete;prod=")
+    check(a["type"] == "close" and (a["outcome"], a["reason"]) == tuple(v["callback_failed"]), f"no other time: {a}")
+    # an extra topic closes with its own outcome/reason, before identity, nothing disclosed
+    pol = copy.deepcopy(POL["A"])
+    pol["extra_topics"] = [dict(id="complaint", trigger="wants to make a complaint", effect="close", outcome="no_promise", reason="complaint")]
+    st = R.init_state(pol, CV)
+    st, a = say(pol, st, "kind=who;also=none;st=complete;prod=;who=self;party=")
+    st, a = say(pol, st, "kind=topic;also=none;st=complete;prod=;t=complaint")
+    check(a["type"] == "close" and (a["outcome"], a["reason"]) == ("no_promise", "complaint"), f"complaint: {a}")
+    # full_or_floor: only the full balance or exactly the floor
+    pol = copy.deepcopy(POL["A"]); pol["amounts"] = dict(acceptance="full_or_floor")
+    st, a = to_statement(pol, EARLY)
+    st, a = say(pol, st, "kind=no;also=none;st=complete;prod=")
+    for amt, ok in ((180, True), (540, True), (300, False)):
+        x, a = say(pol, R.json.loads(R.json.dumps(st)), "kind=amount;also=none;st=complete;prod=;amt=%s" % amt)
+        check(((x["offer"] or {}).get("amount") == float(amt)) == ok and (("cannot record" in a["text"]) != ok), f"full_or_floor {amt}: {a}")
+    return True
+
+
 if __name__ == "__main__":
+    print("rehearsal rule types:", rehearsal_rules())
     print("flat renamed item paths:", flat_item_paths())
     print("per-answer flag only:", per_answer_only())
     print("mixed verified + composed fields:", mixed_verified_and_composed())

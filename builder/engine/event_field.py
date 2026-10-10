@@ -50,6 +50,7 @@ def field(vocab):
         "asks what the call is about; t=change_promise: wants to change or cancel a promise already recorded; t=terms: asks "
         "for a discount, a waiver or other terms (t=restructure only for an explicit new payment plan or lower instalments; paying the minimum or the lowest "
         "amount on a day is a date or amount proposal, never restructure); "
+        + "".join("t=%s: %s; " % (x["id"], x.get("trigger") or x["id"]) for x in vocab.get("extra") or []) +
         "t=unknown_info: only a clear question about something outside the account data (the amounts, dates, products, "
         "the minimum and the offer are known: a question about them is kind=other); t=stop: does not want to talk.\n"
         "S: complete; partial = the customer was cut off mid number or date (then leave d, m and amt empty); ambiguous = "
@@ -126,7 +127,9 @@ def ev_field(policy):
     """The extraction field for a bridged policy: contract topics (always), identity fields from policy.identity."""
     idf = [q.get("field") for q in (policy.get("identity") or {}).get("questions") or [] if q.get("field")]
     fmts = dict((q.get("field"), q.get("format")) for q in (policy.get("identity") or {}).get("questions") or [] if q.get("field"))
-    return field({"topics": CONTRACT_TOPICS, "identity_fields": idf or ["answer"], "identity_formats": fmts})
+    extra = [x for x in policy.get("extra_topics") or [] if isinstance(x, dict) and x.get("id")]
+    return field({"topics": CONTRACT_TOPICS[:-1] + [x["id"] for x in extra] + ["other"], "identity_fields": idf or ["answer"],
+                  "identity_formats": fmts, "extra": extra})
 
 
 def parse(value, topics=()):

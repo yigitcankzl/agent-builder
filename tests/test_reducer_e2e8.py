@@ -106,18 +106,22 @@ def osprey():
 def kestrel():
     pol = load("snippet-hooks-id")
     c = Call(pol, "2026-10-14T11:00", card(400.0, 10, mp=40.0), ["  ahmet ", "sw1a  1aa"])
-    check("_hooks_said" in c.st and any(x.endswith("expects_answer") for x in c.st.get("_hook_skip") or []), c.st.get("_hook_skip"))
+    check("_hooks_said" in c.st and not any(x.startswith("no_promise_confirm") for x in c.st.get("_hook_skip") or []), c.st.get("_hook_skip"))
     txt = c.a["text"]
     check("Interest continues to accrue" in txt and txt.endswith("?"), f"after_debt: {txt}")
     for b in ("kind=no;also=none;st=complete;prod=", "kind=reject;also=none;st=complete;prod=;why=flat"):
         a = c.say(b)
+    check(a["type"] == "say_exact" and "not making a payment promise today" in a["text"], f"the brief's no-promise question first: {a}")
+    a = c.say("kind=yes;also=none;st=complete;prod=")
     check(a["type"] == "close" and "Kestrel Savings" in a["farewell"] and "recoveries" not in a["farewell"], f"standard band close: {a}")
     c = Call(pol, "2026-10-14T11:00", card(400.0, 45, mp=40.0), ["ahmet", "sw1a 1aa"])
     for b in ("kind=no;also=none;st=complete;prod=", "kind=reject;also=none;st=complete;prod=;why=flat"):
         a = c.say(b)
-    check("recoveries team" in a["farewell"] and a["farewell"].count("recoveries") == 1, f"serious band close: {a}")
-    check(not any("payment promise today" in (x or "") for x in (a.get("farewell"), a.get("text"))), f"expects_answer spoken: {a}")
-    return "hooks at their points once; expects_answer skipped; band condition; Ahmet / SW1A 1AA"
+    check("not making a payment promise today" in a.get("text", ""), f"serious band: the question: {a}")
+    q = a["text"]
+    a = c.say("kind=yes;also=none;st=complete;prod=")
+    check(a["type"] == "close" and (q + a["farewell"]).count("recoveries team") == 1, f"serious band: the warning once: {q} / {a}")
+    return "hooks at their points once; the on_no_promise question asked before the close; band condition; Ahmet / SW1A 1AA"
 
 
 def sizes():
