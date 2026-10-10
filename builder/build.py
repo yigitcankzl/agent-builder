@@ -124,6 +124,8 @@ def _smoke(freya_client, wf, trace, result, candidate, rp):
     cv = ((rp or {}).get("meta") or {}).get("call_vars") or {}
     call_vars = sorted(set(cv) | set(cv.values()) | set(CALL_ROLES))
     if not smoke.enabled() or freya_client is None or not hasattr(freya_client, "api") or not result.get("workflow_id"):
+        trace.log("smoke", candidate=candidate, run=False, reason="BUILDER_SMOKE is not 1" if not smoke.enabled() else
+                  "no real Freya client (--no-save / --mock-freya)" if freya_client is None or not hasattr(freya_client, "api") else "no saved workflow")
         return True
     try:
         s = smoke.run(lambda m, path, body: freya_client.api(m, path, body), freya_client.get_call, result["workflow_id"], wf,
@@ -145,9 +147,11 @@ def _repro():
             return subprocess.run(["git", "-C", ROOT, *a], capture_output=True, text=True, timeout=10).stdout.strip()
         except Exception:
             return ""
+    dirty = [ln.split(None, 1)[-1] for ln in git("status", "--porcelain", "--untracked-files=no").splitlines() if ln.strip()]
     return {"commit": git("rev-parse", "HEAD") or "unknown", "branch": git("rev-parse", "--abbrev-ref", "HEAD"),
-            "dirty": bool(git("status", "--porcelain", "--untracked-files=no")), "model": MODEL,
-            "python": platform.python_version(), "argv": sys.argv[1:]}
+            "dirty": bool(dirty), "dirty_files": dirty[:20], "model": MODEL,
+            "python": platform.python_version(), "argv": [os.path.relpath(a, ROOT) if os.path.isabs(a) and a.startswith(ROOT + os.sep) else a for a in sys.argv[1:]],
+            "smoke": os.environ.get("BUILDER_SMOKE") == "1"}
 
 
 def _assumptions(rp, brep, result):

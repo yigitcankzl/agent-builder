@@ -52,6 +52,8 @@ python3 builder/build.py <brief files or folders...> <openapi.json> --slot <name
 ```
 
 Progress lines go to stderr; the last stdout line is the JSON result. Exit codes: 0 built and saved, 2 fallback required (nothing saved; `signal` and `next` say why), 3 engine not loaded (fix the clone). The trace is `traces/<slot>-<time>.jsonl` with a `.txt` summary whose first block lists the assumptions, defaults and everything not implemented. Flags: `--runs 2` (extraction runs), `--no-l3` (no LLM fallback writer), `--no-examiner`, `--mock-freya`, `--no-save`.
+`BUILDER_SMOKE=1` adds a two-turn chat smoke after the save (needs `FREYA_API_KEY`). A platform error skips it and keeps the workflow; workflow evidence (signal S7) puts the L3 workflow in the same slot. With `--no-save` or `--mock-freya` the trace records the smoke as off.
+The `.txt` summary starts with a BUILD block (commit, dirty files, models, the command, exit code, signal) and a PIPELINE block (extraction, examiner, bridge, validator, save, graph walk, self-test, smoke, each with its status and seconds). Keys and tokens are redacted when the trace is written.
 
 ## What is in this kit
 
