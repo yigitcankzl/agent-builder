@@ -171,7 +171,7 @@ def _alias(policy, field, value, enum):
 
 # Contract defaults (REDUCER-CONTRACT; the date-slice wording) used when the brief gives no exact wording.
 CONTRACT_DATE_SAY = {("on_non_business_day", "say"): "<NAMED> is not a business day. The next business day is <DATE>. Could you pay on <DATE>?",
-                     ("on_after_deadline", "say"): "The latest date I can record is <DEADLINE>. Could you pay on <DEADLINE>?",
+                     ("on_after_deadline", "say"): "<NAMED> is after the latest date I can record, which is <DEADLINE>. Could you pay on <DEADLINE>?",
                      ("on_vague", "say_ask"): "Which exact day would that be?",
                      ("on_vague", "say_final"): "Then I can offer <DEADLINE>, the latest date I can record. Could you pay on <DEADLINE>?",
                      ("on_before_earliest", "say"): "That date has already passed. Which day from today on would work for you?",

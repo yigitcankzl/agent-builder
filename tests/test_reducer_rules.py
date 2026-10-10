@@ -640,7 +640,97 @@ def date_reject_cues():
     return True
 
 
+def gate_denial_is_callback():
+    """PUB-03 live (72f115ae): while identity.gate.ask is open, a denial of authority is the gate's no
+    (ask when an authorised person can be reached). no, reject, t=decline, who=other, and a negated statement
+    never open a security question. A topic glued to who=self does not either."""
+    import copy
+    from builder.engine.event_field import field, CONTRACT_TOPICS
+    pol = copy.deepcopy(POL["A"])
+    pol["identity"]["gate"] = dict(ask="Are you authorised to discuss this account?", on_no="callback",
+                                   callback_ask="When can an authorised person be reached?")
+    prompt = field({"topics": CONTRACT_TOPICS, "identity_fields": ["date_of_birth"]})["extraction_prompt"]
+    check("Sorry, I am not allowed to talk about that account." in prompt, "gate denial example")
+    check("I'm actually not authorised to discuss the account details" not in prompt, "example is not the live sentence")
+    check("denial of that authority" in prompt and "kind=no" in prompt, "gate denial outranks who=self")
+
+    def at_gate():
+        st = R.init_state(pol, CV)
+        st, a = say(pol, st, "kind=who;also=none;st=complete;prod=;who=self;party=")
+        check(st["q"] == "gate" and "authorised" in a["text"], f"gate asked: {a}")
+        return st
+
+    bodies = [
+        "kind=no;also=none;st=complete;prod=",
+        "kind=reject;also=none;st=complete;prod=;why=flat",
+        "kind=topic;also=none;st=complete;prod=;t=decline;who=self;party=",
+        "kind=who;also=none;st=complete;prod=;who=other;party=",
+        "kind=who;also=none;st=complete;prod=;who=self;party=;ans=I am not allowed to discuss it",
+    ]
+    for body in bodies:
+        st, a = say(pol, at_gate(), body)
+        check(st["phase"] == "third_party" and st["q"] == "callback_time" and "birth" not in a["text"].lower()
+              and "authorised person" in a["text"], f"{body}: {a} q={st['q']} phase={st['phase']}")
+    st, a = say(pol, at_gate(), "kind=other;also=none;st=none;prod=")
+    check(st["q"] == "gate" and "authorised" in a["text"], f"other still re-asks the gate: {a}")
+    st, a = say(pol, at_gate(), "kind=yes;also=none;st=complete;prod=")
+    check(str(st["q"]).startswith("id_"), f"yes still opens the security questions: {a}")
+    st, a = say(pol, at_gate(), "kind=topic;also=none;st=complete;prod=;t=purpose;who=self;party=")
+    check(not str(st["q"]).startswith("id_") and "birth" not in a["text"].lower(), f"purpose+who=self must not ask a DOB: {a}")
+    return True
+
+
+def named_day_on_moved_date():
+    """PUB-07 live (894a5c50): the after-deadline line names the day the customer proposed and the deadline.
+    A non-business day names that day too. The brief's own sentence is kept when it already names the day;
+    a sentence that omits it still does. Single product and every product."""
+    import json, copy
+    pol = json.load(open(os.path.join(ROOT, "tests/generated/rehearsal/biz-1.reducer_policy.json")))
+    cv = dict(customer_id="c_b1", first_name="Owen", last_name="Park", title="Mr", now=NOW)
+
+    def ready(policy, nprod):
+        st = R.init_state(policy, cv)
+        rows = [dict(id="p%d" % (i + 1), type="personal_loan", past_due=400.0 + 20 * i, days_late=5) for i in range(nprod)]
+        R.load_products(policy, st, rows, R._d(NOW))
+        st["phase"], st["q"], st["who"], st["verified"] = "negotiation", "exact_day", "self", "yes"
+        check(st["_pd"][0]["deadline"] == "2026-10-20", f"early deadline is Tuesday 20 October: {st['_pd'][0]['deadline']}")
+        return st
+
+    def speak(policy, nprod, body):
+        st = ready(policy, nprod)
+        st["tok"] = "kdate1"
+        e = R.parse_event("n=kdate1;src=user;" + body, st, R.CONTRACT_TOPICS)
+        return R.step(policy, st, e, None, NOW, cv)
+
+    late = "kind=date;also=none;st=complete;prod=;rel=;d=26;m=10;wd=mon;wk=none;vague=no"
+    closed = "kind=date;also=none;st=complete;prod=;rel=;d=16;m=10;wd=fri;wk=none;vague=no"
+    st, a = speak(pol, 1, late)
+    check("Monday 26 October is after the latest date I can record, which is Tuesday 20 October." in a["text"]
+          and "Could you pay on Tuesday 20 October?" in a["text"], f"single after deadline: {a}")
+    st, a = speak(pol, 1, closed)
+    check("Friday 16 October is not a business day" in a["text"] and "Monday 19 October" in a["text"], f"single closed day: {a}")
+    st, a = speak(pol, 2, late.replace("prod=;", "prod=all;"))
+    check("Monday 26 October is after the latest date" in a["text"] and "Tuesday 20 October" in a["text"], f"multi after deadline: {a}")
+    st, a = speak(pol, 2, closed.replace("prod=;", "prod=all;"))
+    check("Friday 16 October is not a business day" in a["text"], f"multi closed day: {a}")
+    own = copy.deepcopy(pol)
+    own["date_rules"]["after_deadline"]["say"] = "You asked for <NAMED>. The latest I can record is <DEADLINE>."
+    st, a = speak(own, 1, late)
+    check("You asked for Monday 26 October." in a["text"] and "Tuesday 20 October" in a["text"], f"brief sentence kept: {a}")
+    bare = copy.deepcopy(pol)
+    bare["date_rules"]["after_deadline"]["say"] = "We stop at <DEADLINE>."
+    st, a = speak(bare, 1, late)
+    check("Monday 26 October" in a["text"] and "We stop at Tuesday 20 October." in a["text"], f"brief sentence without the day: {a}")
+    shift = copy.deepcopy(pol)
+    shift["date_rules"]["holiday"]["say"] = "That day is closed. The next business day is <DATE>."
+    st, a = speak(shift, 1, closed)
+    check("Friday 16 October is not a business day" in a["text"] and "That day is closed." in a["text"], f"closed-day sentence without the day: {a}")
+    return True
+
+
 if __name__ == "__main__":
+    print("gate denial is the callback (PUB-03 live):", gate_denial_is_callback())
+    print("a moved day names the day the customer proposed (PUB-07 live):", named_day_on_moved_date())
     print("reject-cued dates and the all-products change (raw-3 live):", date_reject_cues())
     print("multi-product dates: own amounts, revive, holiday said, ok:false fails (raw-2 live):", multi_date_rules())
     print("the open offer's own amount/date accepts (biz-1 PUB-07):", offer_echo_accepts())

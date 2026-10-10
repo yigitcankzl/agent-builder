@@ -755,7 +755,9 @@ def normalise(ev, st):
     # §1.5: in the opening a stated speaker ranks above any topic but injection (PUB-02 live: 'No, I'm her husband.
     # What is this about?' came as t=purpose;also=who;who=other and was re-asked into an unclear close); in the security
     # questions an answer ranks above any topic but injection. The topic stays as also_t (an answer topic is answered).
-    if e.get('kind') == 'topic' and e.get('t') != 'injection':
+    # While the authority question is open, that promotion must not turn a denial into who=self (PUB-03: t=purpose;who=self
+    # opened the security questions). The gate reads the topic itself.
+    if e.get('kind') == 'topic' and e.get('t') != 'injection' and st.get('q') != 'gate':
         if st['phase'] == 'opening' and e.get('who') in ('self', 'other', 'unclear', 'handoff', 'busy'):
             e['kind'], e['also_t'], e['also'] = 'who', e.get('t'), 'topic'
         elif st['phase'] == 'identity' and str(e.get('ans') or '').strip() and str(st.get('q') or '').startswith('id_'):
@@ -1206,7 +1208,9 @@ def date_event(policy, st, ev, today, cv):
             d = r['accepted'] or _d(pd['deadline'])
             if r['reason'] == 'after_deadline':
                 st['_clamped'].append(p['id'])
-            if r['reason'] == 'non_business_day' and not said:   # say why the day moved (raw-2 PUB-11), once
+            if r['reason'] == 'after_deadline' and not said:   # name the day they proposed, then the deadline
+                said = fill_date(r['say'], r)
+            elif r['reason'] == 'non_business_day' and not said:   # say why the day moved (raw-2 PUB-11), once
                 said = ' '.join(x for x in re.split(r'(?<=[.?!])\s+', fill_date(r['say'], r)) if x and not x.endswith('?'))
             # one amount never goes to several products (raw-2 surface: 220 + 640 + 75 summed to 935): only a product
             # whose own amount it is takes it, every other product its own full amount
@@ -1257,7 +1261,25 @@ D_DATE_SAY = dict(past='That date has passed.', today_not_allowed='I cannot reco
                   holiday='<NAMED> is not a business day, so I cannot record it.',
                   after_deadline='I cannot record a date after <DEADLINE>.',
                   shift='<NAMED> is not a business day. The next business day is <DATE>. Could you pay on <DATE>?',
-                  offer_deadline='The latest date I can record is <DEADLINE>. Could you pay on <DEADLINE>?')
+                  offer_deadline='<NAMED> is after the latest date I can record, which is <DEADLINE>. Could you pay on <DEADLINE>?')
+
+_OFFER_WITHOUT_NAMED = 'The latest date I can record is <DEADLINE>. Could you pay on <DEADLINE>?'
+
+
+def customer_dated(say, reason):
+    """A moved day is spoken with the day the customer proposed. A brief sentence that already names it (<NAMED>) is
+    kept; the contract line, and any other sentence that omits it, still names that day."""
+    say = (say or '').strip()
+    if reason == 'after_deadline':
+        if '<NAMED>' in say:
+            return say
+        line = D_DATE_SAY['offer_deadline']
+        if not say or say == _OFFER_WITHOUT_NAMED:
+            return line
+        return line.split(' Could you pay')[0] + '. ' + say
+    if reason == 'non_business_day' and '<NAMED>' not in say:
+        return ('<NAMED> is not a business day. ' + say).strip() if say else D_DATE_SAY['shift']
+    return say
 
 
 def fill_date(tpl, r):
@@ -1317,13 +1339,15 @@ def date_verdict(policy, today, pd, named):
         alt = shift_to_business_day(named, policy, 1 if act == 'shift_next_business_day' else -1)
         alt_sit = sit_of(alt) if alt else 'after_deadline'
         if not alt_sit:
-            return dict(out, reason='non_business_day', accepted=alt, say=say or D_DATE_SAY['shift'])
+            return dict(out, reason='non_business_day', accepted=alt,
+                        say=customer_dated(say or D_DATE_SAY['shift'], 'non_business_day'))
         sit = alt_sit
         act, say = date_action(policy, sit)
         out['sit'] = sit
     if act == 'offer_deadline' and sit in ('after_deadline', 'weekend', 'holiday') and not sit_of(dl):
         pre = '<NAMED> is not a business day. ' if sit in ('weekend', 'holiday') and not say else ''
-        return dict(out, reason='after_deadline', accepted=dl, say=say or pre + D_DATE_SAY['offer_deadline'])
+        return dict(out, reason='after_deadline', accepted=dl,
+                    say=customer_dated(say or pre + D_DATE_SAY['offer_deadline'], 'after_deadline'))
     return dict(out, reason='refuse', accepted=None, say=say or D_DATE_SAY.get(sit, D_DATE_SAY['past']))
 
 
@@ -1897,20 +1921,39 @@ def gate_spec(policy):
     return g if isinstance(g, dict) and str(g.get('ask') or '').strip() else None
 
 
+_GATE_DENY = re.compile(r"\b(not authoris\w*|not authoriz\w*|can(?:not|'t) discuss|cannot discuss|not allowed)\b", re.I)
+
+
+def gate_is_no(ev):
+    """A denial of authority while the gate is open: no, reject, t=decline, who=other, or a negated statement."""
+    if ev.get('kind') in ('no', 'reject') or ev.get('also') in ('no', 'reject'):
+        return True
+    if ev.get('t') == 'decline' or ev.get('also_t') == 'decline':
+        return True
+    if ev.get('who') == 'other':
+        return True
+    blob = ' '.join(str(ev.get(x) or '') for x in ('ans', 'why', 'party'))
+    return bool(_GATE_DENY.search(blob))
+
+
+def gate_no(policy, st, today, cv):
+    on_no = gate_spec(policy).get('on_no') or 'callback'
+    if isinstance(on_no, dict) and isinstance(on_no.get('close'), dict) and _none(on_no['close'].get('outcome')):
+        return do_close(policy, st, _none(on_no['close'].get('outcome')), _none(on_no['close'].get('reason')), D_FAREWELL)
+    st['who'], st['phase'] = 'other', 'third_party'
+    return ask(st, fill_names(str(gate_spec(policy).get('callback_ask') or D_REACH_AUTH), cv), 'callback_time')
+
+
 def gate_answer(policy, st, ev, today, cv):
     """identity.gate (biz-1 rules 3-4: 'Are you authorised to discuss this account?'): a yes opens the security
-    questions; a no takes on_no ('callback': ask when an authorised person can be reached, nothing disclosed;
-    {close: {outcome, reason}}: close); anything else asks again (counted, loop cap)."""
+    questions; a denial of authority takes on_no ('callback': ask when an authorised person can be reached, nothing
+    disclosed; {close: {outcome, reason}}: close); anything else asks again (counted, loop cap)."""
     k = ev.get('kind')
+    if gate_is_no(ev):
+        return gate_no(policy, st, today, cv)
     if k in ('yes', 'accept') or (k == 'who' and ev.get('who') == 'self'):
         st['_gate_ok'], st['q'] = True, 'none'
         return opening(policy, st, dict(kind='who', who='self', party=''), today, cv)
-    if k in ('no', 'reject') or (k == 'topic' and ev.get('t') == 'decline') or (k == 'who' and ev.get('who') == 'other'):
-        on_no = gate_spec(policy).get('on_no') or 'callback'
-        if isinstance(on_no, dict) and isinstance(on_no.get('close'), dict) and _none(on_no['close'].get('outcome')):
-            return do_close(policy, st, _none(on_no['close'].get('outcome')), _none(on_no['close'].get('reason')), D_FAREWELL)
-        st['who'], st['phase'] = 'other', 'third_party'
-        return ask(st, fill_names(str(gate_spec(policy).get('callback_ask') or D_REACH_AUTH), cv), 'callback_time')
     if k == 'callback':
         st['who'], st['phase'] = 'other', 'third_party'
         return third_party(policy, st, ev, today, cv)
