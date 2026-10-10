@@ -148,6 +148,7 @@ def run(vars, policy):
     sig = str(vars.get('date_iso') or '') + '|' + str(vars.get('date_spec') or '')
     if sig == str(vars.get('date_handled') or ''):
         vars['date_state'] = 'same'  # extraction vars cannot be cleared from code, so dedupe on what was handled
+        vars['date_route'] = 'cont'
         return
     vars['date_handled'] = sig
     vars['date_state'] = 'new'

@@ -142,6 +142,28 @@ def test_code_node_safe():
     check("{{" not in src and "}}" not in src, "code-node source must not contain double braces")
 
 
+def test_emitter():
+    from builder.engine import date_graph as G
+    code = G.code_source(FIX)
+    check("{{" not in code and "}}" not in code, "emitted code has double braces")
+    v = {"now": "2026-10-14T11:00", "days_late": "5", "date_iso": "2026-10-26", "date_spec": "rel=none;d=26;m=10;wd=mon;wk=none;vague=no;corr=no"}
+    exec(compile(code, "date_resolve", "exec"), {"vars": v})  # the snippet runs as the code node would
+    check(v["date_status"] == "non_business" and v["date_route"] == "say", v)
+    import re
+    check(re.match(G.SPEC_PATTERN, v["date_spec"]), "spec pattern accepts the documented format")
+    wf = {"initial_node": "talk", "nodes": {"talk": {"name": "talk", "node_type": "conversation", "task_message": "T",
+          "transitions": [{"target_node": "end", "description": "x", "condition": {"operator": "always"}}]},
+          "end": {"name": "end", "node_type": "end_call"}}}
+    G.wire(wf, "talk", FIX)
+    n = wf["nodes"]
+    check({"talk_date_say", "talk_cont", "date_resolve"} <= set(n), "nodes added")
+    check(n["talk"]["transitions"][0]["target_node"] == "date_resolve", "date transition first")
+    check(n["talk_date_say"]["on_enter"] == {"type": "tts", "text": "{{say_next}}"}, "say node speaks the code sentence")
+    targets = [t["target_node"] for t in n["date_resolve"]["transitions"]]
+    check(len(targets) == len(set(targets)), "one transition per target (engine merges duplicates)")
+    check(all("{{now}}" in f["extraction_prompt"] for f in n["talk"]["extraction_schema"]), "extraction anchored to now")
+
+
 if __name__ == "__main__":
     for name, f in list(globals().items()):
         if name.startswith("test_"):
