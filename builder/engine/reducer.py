@@ -1461,16 +1461,62 @@ def third_party(policy, st, ev, today, cv):
     return ask(st, V(policy)['callback_retry_say'] or 'Could you suggest another time?', 'callback_time')
 
 
+def answer_format(fmt):
+    """identity.questions[].format -> (kind, n). Closed set: date, digits(n), name, alnum, postcode, free; older
+    free-text formats ('YYYY-MM-DD', '4 digits', 'YYYY') are read too. Unknown -> free."""
+    f = str(fmt or '').strip().lower()
+    for w, d in NUM_WORDS:
+        f = re.sub(r'\b' + w + r'\b', d, f)
+    m = re.match(r'^digits\s*\(\s*(\d+)\s*\)$', f) or re.match(r'^(\d+) digits\b', f)
+    if m:
+        return 'digits', int(m.group(1))
+    if f in ('date', 'name', 'alnum', 'postcode', 'free', 'digits'):
+        return f, 0
+    if f.startswith('yyyy-mm-dd'):
+        return 'date', 0
+    if f == 'yyyy':
+        return 'digits', 4
+    if re.search(r'\b(inward|outward) code\b', f):
+        return 'postcode', 0
+    return 'free', 0
+
+
+NUM_WORDS = (('one', '1'), ('two', '2'), ('three', '3'), ('four', '4'), ('five', '5'), ('six', '6'), ('seven', '7'),
+             ('eight', '8'), ('nine', '9'), ('ten', '10'), ('eleven', '11'), ('twelve', '12'))
+
+
+def norm_answer(fmt, ans):
+    """The answer as the verify tool should get it, or '' when it does not fit the format (re-ask, not counted)."""
+    kind, n = answer_format(fmt)
+    a = re.sub(r'\s+', ' ', str(ans or '')).strip()
+    if kind == 'date':
+        m = re.match(r'^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})$', a)
+        return '%s-%02d-%02d' % (m.group(1), int(m.group(2)), int(m.group(3))) if m else ''
+    if kind == 'digits':
+        d = re.sub(r'\D', '', a)
+        return d if d and (not n or len(d) == n) else ''
+    if kind == 'name':
+        a = re.sub(r"[^\w '\-]|\d|_", '', a).strip()
+        return re.sub(r'[^\W\d_]+', lambda m: m.group(0)[:1].upper() + m.group(0)[1:].lower(), a)
+    if kind == 'alnum':
+        return re.sub(r'[^0-9A-Za-z]', '', a).upper()
+    if kind == 'postcode':     # uppercase, one space; a UK-style 'inward code' format gets the space before the last 3
+        p = re.sub(r'[^0-9A-Za-z]', '', a).upper()
+        if re.search(r'\b(inward|outward) code\b', str(fmt).lower()) and 5 <= len(p) <= 7:
+            return p[:-3] + ' ' + p[-3:]
+        return re.sub(r'[^0-9A-Za-z ]', '', a).upper().strip()
+    return a
+
+
 def identity(policy, st, ev, today, cv):
     k = ev.get('kind')
     idt = st['identity']
     qs = (policy.get('identity') or dict()).get('questions') or []
     if k == 'identity':
         field = idt['order'][idt['idx']]
-        ans = str(ev.get('ans') or '').strip()
         fmt = str(qs[idt['idx']].get('format') or '') if idt['idx'] < len(qs) else ''
-        if ('YYYY-MM-DD' in fmt and not re.match(r'^[0-9]{4}-[0-9]{2}-[0-9]{2}$', ans)) or \
-                (re.search(r'\b4 digits\b', fmt) and not re.match(r'^[0-9]{4}$', ans)) or not ans:
+        ans = norm_answer(fmt, ev.get('ans'))
+        if not ans:          # not in the field's format: ask again, not a wrong answer
             return resay(st)
         st['_last_args'] = dict(customer_id=cid(cv), field=field, answer=ans)
         return call(st, 'verify', 'verify_identity', dict(st['_last_args']))

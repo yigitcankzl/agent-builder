@@ -117,5 +117,44 @@ def hooks():
     return True
 
 
+# ---------------------------------------------------------------- gap 2: identity formats
+def identity_formats():
+    from builder.engine import event_field as E
+    cases = [("date", "1986-5-17", "1986-05-17"), ("YYYY-MM-DD", "1986/05/17", "1986-05-17"), ("date", "17 May", ""),
+             ("digits(3)", "4 6 3", "463"), ("digits(3)", "4631", ""), ("4 digits", "44 01", "4401"),
+             ("four digits", "4401", "4401"), ("YYYY", "1986", "1986"), ("YYYY", "86", ""),
+             ("name", "  ahmet   YILMAZ ", "Ahmet Yilmaz"), ("name", "O'Brien-smith", "O'Brien-Smith"), ("name", "Şükrü", "Şükrü"),
+             ("alnum", "sc-123 456", "SC123456"), ("postcode", "n1  4ab", "N1 4AB"),
+             ("uppercase with a single space before the inward code, e.g. N1 4AB", "n14ab", "N1 4AB"),
+             ("exactly as the customer said it, letters and digits, no spaces stripped", "n1 4AB", "n1 4AB"),
+             ("free", " the  blue house ", "the blue house"), ("", "anything", "anything")]
+    for fmt, ans, exp in cases:
+        got = R.norm_answer(fmt, ans)
+        check(got == exp, f"norm_answer({fmt!r}, {ans!r}) = {got!r}, expected {exp!r}")
+    # a name question end to end: passes through (no digit forcing), a bad digits answer is re-asked, not counted
+    pol = copy.deepcopy(POL["A"])
+    pol["identity"]["questions"] = [dict(field="father_name", ask="What is your father's first name?", format="name"),
+                                    dict(field="tckn_last3", ask="What are the last three digits of your ID number?", format="digits(3)")]
+    pol["identity"]["order"] = ["father_name", "tckn_last3"]
+    st = R.init_state(pol, CV)
+    st, a = say(pol, st, "kind=who;also=none;st=complete;prod=;who=self;party=")
+    check("father" in a["text"], f"first ask: {a}")
+    st, a = say(pol, st, "kind=identity;also=none;st=complete;prod=;field=father_name;ans=ahmet")
+    check(a["type"] == "call_tool" and a["args"]["answer"] == "Ahmet", f"name passes through: {a}")
+    st, a = tool(pol, st, dict(verified=True, all_verified=False, wrong_answers_left=3))
+    st, a = say(pol, st, "kind=identity;also=none;st=complete;prod=;field=tckn_last3;ans=4631")
+    check(a["type"] == "say_exact" and st["identity"]["wrong"] == 0, f"4 digits for digits(3): re-ask, not counted: {a}")
+    st, a = say(pol, st, "kind=identity;also=none;st=complete;prod=;field=tckn_last3;ans=4 6 3")
+    check(a["type"] == "call_tool" and a["args"]["answer"] == "463", f"digits(3): {a}")
+    # the ev prompt follows each question's format; names never 'digits only'
+    pr = E.ev_field(pol)["extraction_prompt"]
+    check("father_name: the name as said, letters only" in pr and "tckn_last3: digits only, exactly 3" in pr, pr[:200])
+    import re
+    check(re.match(E.platform_pattern(), "n=kabcde;src=user;kind=identity;also=none;st=complete;prod=;field=father_name;ans=Şükrü O'Brien"),
+          "platform pattern must accept names with letters outside ASCII and apostrophes")
+    return True
+
+
 if __name__ == "__main__":
+    print("gap 2 identity formats:", identity_formats())
     print("gap 1 hooks:", hooks())
