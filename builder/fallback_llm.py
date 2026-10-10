@@ -4,13 +4,14 @@ One `claude -p` call (no tools, no simulation, no Freya call) reads the brief, t
 and examples/base-agent.json, and writes a complete Freya workflow. A local static check (shape, targets, OAS tools,
 fields and enums, nulls, agent_config, code size, spoken placeholders) runs on it; one repair call on errors.
 
-It runs in a thread from t0 of build.py and only writes a local candidate. build.py picks one candidate with
-select_candidate() and saves exactly once:
+It runs in a thread from t0 and only writes a local candidate. The hook is in build.py main() only (build() unchanged;
+the main path saves itself on exit 0, so there is never more than one save per slot):
 
-    fb = fallback_llm.Fallback(briefs, openapi, log=trace.model_call).start()      # at t0
-    ...main path...
-    wf, candidate, why = fallback_llm.select_candidate(main_wf, signals, fb, wait_s=...)   # main_wf None if it failed
-    if wf is not None: save once
+    t0 = time.time()
+    fb = fallback_llm.Fallback(briefs, openapi).start()                                      # at t0, local only
+    r = build(briefs, openapi, a.slot, client, a.out_dir, a.trace_dir, a.runs, min(budget, fallback_llm.MAIN_CAP_S))
+    r = fallback_llm.rescue(r, fb, client, r["slot"], a.out_dir, t_end=t0 + budget)          # exit 2 -> L3 saved once
+    # exit 0 / 3: rescue() only cancels the thread. L3 saved: exit_code 0, candidate "llm", fallback_used "L3".
 
     python3 builder/fallback_llm.py <brief files or folders...> <openapi.json> [--out f.json]   # local, prints the check
 """
@@ -22,8 +23,11 @@ from builder.policy_extract import MODEL, parse_json, read_files
 
 CODE_LIMIT = 131072                      # code_exec: code + data
 CAP_S = 600                              # the L3 thread's own cap (plan: 10 min)
-L3_SIGNALS = {"main_failed", "S2_identity", "S2_closing", "S3", "S5_core", "S7"}
-ABORT_SIGNALS = {"S0"}                   # engine not loaded: a packaging bug, never covered by L3
+# build.py exit-2 signals (Fork 4, 699a736). S2/S5 with next=L2 also go to L3 until an L2 degraded build exists.
+L3_SIGNALS = {"main_failed", "EXTRACT", "S2", "S3", "S5", "GUARD", "S7"}
+ABORT_SIGNALS = {"S0"}                   # exit 3, engine not loaded: a packaging bug, never covered by L3
+MAIN_CAP_S = 15 * 60 + 90                # build() budget while L3 runs: L0+L1 hard cap 15 min (its deadline is budget - 90 s)
+SAVE_RESERVE_S = 150                     # save + export after the selection
 
 PROMPT = """You write a Freya workflow (a phone agent) for the bank brief below. Output ONLY the workflow JSON object, nothing else.
 
@@ -236,6 +240,8 @@ class Fallback:
         cmd = ["claude", "-p", "--output-format", "json", "--tools", "", "--no-session-persistence"] + (["--model", MODEL] if MODEL else [])
         t = time.time()
         self.proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        if self.cancelled:                                   # cancel() ran between the check above and Popen
+            self.proc.kill()
         try:
             out, err = self.proc.communicate(prompt, timeout=left)
         except subprocess.TimeoutExpired:
@@ -299,6 +305,44 @@ def select_candidate(main_wf, signals, fb, wait_s):
     if r["workflow"] is not None and not r["errors"]:
         return r["workflow"], "llm", why
     return None, "none", why + "; L3 " + ("not ready in time" if not fb.done.is_set() else "invalid: " + "; ".join(r["errors"][:3]))
+
+
+def rescue(result, fb, client, slot, out_dir, t_end):
+    """The build.py hook for exit 2: pick the L3 candidate and save it ONCE to the same slot. Returns the updated result.
+    Exit 3 (S0) and exit 0 only cancel the thread. t_end: the wall-clock time the whole build must end by."""
+    code = result.get("exit_code")
+    if code != 2:
+        fb.cancel()
+        return result
+    t = time.time()
+    wf, cand, why = select_candidate(None, {result.get("signal") or "main_failed"}, fb, wait_s=t_end - t - SAVE_RESERVE_S)
+    ev = {"event": "fallback_selection", "at": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "candidate": cand, "reason": why,
+          "waited_s": round(time.time() - t, 1), "l3_seconds": fb.result.get("seconds"), "l3_errors": fb.result.get("errors")[:5],
+          "l3_calls": fb.result.get("calls")}
+    result.update(candidate=cand, candidate_reason=why)
+    if wf is not None and time.time() < t_end - 30:
+        os.makedirs(out_dir, exist_ok=True)
+        path = os.path.join(out_dir, f"{slot}.workflow.json")
+        if client is None:
+            json.dump({"workflow": wf}, open(path, "w"), indent=1)
+            ev["save"] = "skipped (no Freya client); written to " + path
+        else:
+            ids = client.save_workflow(slot, wf)                  # the one save of this build
+            path = client.export_workflow(ids["workflow_id"], path)
+            result.update(workflow_id=ids["workflow_id"], agent_id=ids["agent_id"], export=path)
+            ev["save"] = {"workflow_id": ids["workflow_id"], "agent_id": ids["agent_id"], "export": path}
+        result.update(exit_code=0, fallback_used="L3")
+    else:
+        fb.cancel()
+    ev["exit_code"] = result["exit_code"]
+    if result.get("trace"):
+        from builder.trace import redact
+        line = redact(json.dumps(ev, ensure_ascii=False, default=str))
+        open(result["trace"], "a").write(line + "\n")
+        txt = result["trace"].replace(".jsonl", ".txt")
+        if os.path.exists(txt):
+            open(txt, "a").write(f"[{ev['at']}] fallback_selection: {line[:4000]}\n")
+    return result
 
 
 if __name__ == "__main__":
