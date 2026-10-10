@@ -65,7 +65,7 @@ def tool_results(oas_path, policy):
                                           fields.get("days_late")), "item.")
             for t, rule in ((policy.get("products") or {}).get("floor_by_type") or {}).items():
                 f = (rule or {}).get("field")
-                if (rule or {}).get("kind") == "account_field" and f:
+                if (rule or {}).get("kind") in ("field", "account_field") and f:
                     need(tool, f"floor.{t}", f if f in item else None, "item.")
     return out, missing
 

@@ -84,18 +84,19 @@ class Bank:
 
 def _products(policy, mix, today):
     """Products from the policy's own types and bands (no brief literals)."""
-    types = list(((policy.get("products") or {}).get("floor_by_type") or {}).keys()) or ["product"]
+    types = [k for k in ((policy.get("products") or {}).get("floor_by_type") or {}) if k != "*"] or list(((policy.get("products") or {}).get("naming_by_type") or {})) or ["product"]
     bands = (policy.get("deadline") or {}).get("bands") or [{"min_days_late": 1, "max_days_late": 30}]
     out = []
     for i, (ti, bi, edge) in enumerate(mix):
         t, b = types[ti % len(types)], bands[bi % len(bands)]
         dl = b.get("max_days_late") if edge == "max" else (b.get("min_days_late") or 1)
-        fb = ((policy.get("products") or {}).get("floor_by_type") or {}).get(t) or {}
+        fbt = (policy.get("products") or {}).get("floor_by_type") or {}
+        fb = fbt.get(t) or fbt.get("*") or {}
         row = {"product_id": f"p{i + 1}", "type": t, "past_due": 300.0 + 100 * i, "days_late": int(dl)}
         tpl = ((policy.get("products") or {}).get("naming_by_type") or {}).get(t) or ""
         for f in re.findall(r"\{(\w+)\}", tpl):     # fields the spoken product name needs (e.g. last digits)
             row.setdefault(f, "4321")
-        if fb.get("kind") == "account_field" and fb.get("field"):
+        if fb.get("kind") in ("field", "account_field") and fb.get("field"):
             row[fb["field"]] = 90.0 + 10 * i
         out.append(row)
     return out

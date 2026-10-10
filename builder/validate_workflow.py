@@ -25,6 +25,7 @@ validate(wf, rp, oas_path, unstable_quotes=()) -> list of problems (empty = pass
 16 the hub code fits the code_exec input limit
 17 hooks: known points, closed-set conditions, speakable text with its quote; the greet says every opening hook
 18 identity answer formats are in the closed set
+19 floor rules, amounts.acceptance and date_rules use the closed shapes (gaps 3-4)
 """
 import argparse, json, os, re, sys
 
@@ -279,7 +280,7 @@ def validate(wf, rp, oas_path, unstable_quotes=()):
             arr = [(v.get("items") or {}).get("properties") or {} for v in (_resp_schema(oas, "get_account").get("properties") or {}).values() if (v or {}).get("type") == "array"]
             types = next((p.get("type", {}).get("enum") for p in arr if p.get("type")), None)
     for t in ((rp.get("products") or {}).get("floor_by_type") or {}):
-        if types and t not in types:
+        if types and t not in types and t != "*":     # '*' = the floor for any type (gap 3)
             errs.append(f"14: product type {t!r} not in the OAS get_account enum")
     for q in (rp.get("identity") or {}).get("questions") or []:
         if not q.get("blocked") and enum("verify_identity", "field") and q.get("field") not in enum("verify_identity", "field"):
@@ -330,6 +331,20 @@ def validate(wf, rp, oas_path, unstable_quotes=()):
     for q in (rp.get("identity") or {}).get("questions") or []:
         if not FORMATS.match(str(q.get("format") or "")):
             errs.append(f"18: identity {q.get('field')} format {q.get('format')!r} is not date|digits(n)|name|alnum|postcode|free")
+    # 19 floor / acceptance / date rules (gaps 3-4) in Fork 3's shapes
+    from builder.policy_bridge import ACCEPTANCE, DATE_ACTIONS, DATE_SITUATIONS, FLOOR_KINDS
+    need = {"field": ("field",), "percent": ("percent",), "fixed": ("amount",), "max_fixed_percent": ("amount", "percent")}
+    for t, f in ((rp.get("products") or {}).get("floor_by_type") or {}).items():
+        if not isinstance(f, dict) or f.get("kind") not in FLOOR_KINDS or any(f.get(k) in (None, "") for k in need[f.get("kind")]):
+            errs.append(f"19: floor_by_type.{t} {f!r} is not a field|percent|fixed|max_fixed_percent rule")
+    acc = (rp.get("amounts") or {}).get("acceptance", "floor_to_full")
+    if not (acc in ACCEPTANCE or (isinstance(acc, dict) and acc.get("kind") == "min_x" and isinstance(acc.get("min"), (int, float)))):
+        errs.append(f"19: amounts.acceptance {acc!r} is not floor_to_full|full_only|above_full_allowed|min_x")
+    for sit, r in (rp.get("date_rules") or {}).items():
+        if sit not in DATE_SITUATIONS or not isinstance(r, dict) or r.get("action") not in DATE_ACTIONS:
+            errs.append(f"19: date_rules.{sit} {r!r} is outside the closed sets")
+        elif r.get("say") and (INSTRUCTION.search(r["say"]) or set(re.findall(r"<[A-Z_]+>", r["say"])) - {"<NAMED>", "<DATE>", "<DEADLINE>"}):
+            errs.append(f"19: date_rules.{sit}.say is not a speakable line: {r['say'][:60]!r}")
     # 9 unstable unmapped
     # only where unmapped rules are compiled: the policy's unmapped_rules (reducer input) and the free-talk prompts.
     # (A short generic phrase like "Ask once more." can legitimately appear elsewhere, e.g. a fixed sentence.)

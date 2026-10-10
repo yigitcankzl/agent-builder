@@ -219,7 +219,8 @@ def _person(text):
     t = re.sub(r"^ you are ", " I am ", t, flags=re.I)
     t = re.sub(r"^ you ", " I ", t, flags=re.I)
     for a, b in ((" the agent is ", " I am "), (" they can ", " you can "), (" they are ", " you are "),
-                 (" their ", " your "), (" them ", " you "), (" the customer's ", " your ")):
+                 (" their ", " your "), (" them ", " you "), (" the customer's ", " your "), (" the customer can ", " you can "),
+                 (" the customer is ", " you are "), (" the customer has ", " you have "), (" the customer ", " you ")):
         t = re.sub(a, b, t, flags=re.I)
     t = t.strip()
     return t[:1].upper() + t[1:] if t else t
@@ -327,6 +328,10 @@ def build_hooks(p, types):
         if isinstance(v, dict) and k in FIXED_SENTENCES:     # only the keys the reducer speaks
             spoken.add(_norm(v.get("text") or ""))
             src_quotes |= {_norm(s.get("quote") or "") for s in v.get("source") or [] if isinstance(s, dict)}
+    for r in (p.get("date_rules") or {}).values():     # a date-refusal line is spoken by the date decision itself
+        if isinstance(r, dict) and r.get("say"):
+            spoken.add(_norm(r["say"]))
+            src_quotes |= {_norm(s.get("quote") or "") for s in r.get("source") or [] if isinstance(s, dict)}
     for ev in (p.get("events") or []) + list(((p.get("topic_checklist") or {}).values())):
         if isinstance(ev, dict) and ev.get("say"):
             spoken.add(_norm(ev["say"]))
@@ -347,6 +352,10 @@ def build_hooks(p, types):
         if _norm(text) in spoken or (_norm(quote) in src_quotes and not point == "opening"):
             notes.append(f"hook {hid}: already spoken by a sentence or an event line, dropped")
             continue
+        if point in ("unsure", None, "") and text and not cond and not problem and not item["expects_answer"]:
+            item["point"], point = "before_close", "before_close"   # a timeless statement: said once, in the goodbye
+            item["placed"] = "no moment given"
+            notes.append(f"hook {hid}: placed at before_close (no moment given): {text[:60]!r}")
         why = (None if point in HOOK_POINTS else f"point {point!r} is not a known moment") or problem \
             or (None if text else "no speakable rewrite of the quote")
         if why:
@@ -392,6 +401,10 @@ def answer_format(q, oas_text=""):
     """identity question -> (format in {date, digits(n), name, alnum, postcode, free}, how). The extractor's value is
     kept when it is already one of them; otherwise a fixed reading of its own words, the question and the OAS text."""
     f = str(q.get("format") or "").strip().lower()
+    said = " ".join([f, str(q.get("format_brief") or "")] + [str(s_.get("quote") if isinstance(s_, dict) else s_)
+                    for s_ in ((q.get("format_evidence") or {}).get("source") or [])])
+    if re.search(r"\bexactly as (?:the customer |they |he |she )?(?:said|says|given|gave|spoken|heard)", said, re.I):
+        return "free", "exactly as said"          # the brief's own instruction wins over any format inference
     if FORMATS.match(f):
         return f, "extractor"
     own = " ".join(str(q.get(k) or "") for k in ("format", "brief_name", "ask", "field")).lower().replace("_", " ")
@@ -431,6 +444,119 @@ def _oas_answer_text(oas_path):
                 s = (((op.get("requestBody") or {}).get("content") or {}).get("application/json") or {}).get("schema") or {}
                 return " ".join(str((v or {}).get("description") or "") for v in (s.get("properties") or {}).values())
     return ""
+
+
+# ---- gap 3: floor and acceptance ------------------------------------------------------------------------------------
+FLOOR_KINDS = ("field", "percent", "fixed", "max_fixed_percent")
+ACCEPTANCE = ("floor_to_full", "full_only", "above_full_allowed")
+
+
+def _num(x):
+    try:
+        return float(x)
+    except (TypeError, ValueError):
+        return None
+
+
+def floor_spec(v, acct_fields):
+    """One floor_by_type entry (extractor, old or new shape) -> (Fork 3's flat rule, problem). Shapes:
+    {kind: field, field} | {kind: percent, percent, round, to} | {kind: fixed, amount} |
+    {kind: max_fixed_percent, amount, percent, round, to}. Old kinds account_field / percent_of_past_due are read."""
+    if not isinstance(v, dict):
+        return None, f"floor {v!r} is not a rule"
+    prm = dict(v.get("params") or {}, **{k: x for k, x in v.items() if k != "params"})
+    kind = {"account_field": "field", "percent_of_past_due": "percent"}.get(prm.get("kind"), prm.get("kind"))
+    rnd = prm.get("round") or (prm.get("rounding") or {}).get("mode") if isinstance(prm.get("rounding"), dict) else prm.get("round")
+    to = prm.get("to") or ((prm.get("rounding") or {}).get("to") if isinstance(prm.get("rounding"), dict) else None)
+    to = {0.01: "cent", "0.01": "cent", 1: "unit", "1": "unit", 1.0: "unit"}.get(to, to)
+    out = {"kind": kind, "source": v.get("source") or DEFAULT}
+    if kind == "field":
+        f = prm.get("field")
+        if not f:
+            return None, "floor kind field without a field"
+        if acct_fields and f not in acct_fields:
+            return None, f"floor field {f!r} is not an account field of the OAS get_account response"
+        out["field"] = f
+    elif kind in ("percent", "max_fixed_percent", "fixed"):
+        if kind != "fixed":
+            pct = _num(prm.get("percent"))
+            if pct is None or not 0 < pct <= 100:
+                return None, f"floor percent {prm.get('percent')!r} is not in (0, 100]"
+            out["percent"] = pct
+            if rnd in ("up", "down", "nearest"):
+                out["round"] = rnd
+            if to in ("cent", "unit"):
+                out["to"] = to
+        if kind != "percent":
+            amt = _num(prm.get("amount"))
+            if amt is None or amt <= 0:
+                return None, f"floor amount {prm.get('amount')!r} is not a positive number"
+            out["amount"] = amt
+    else:
+        return None, f"floor kind {kind!r} is not one of {FLOOR_KINDS}"
+    return out, None
+
+
+def acceptance_rule(a):
+    """amounts.acceptance -> Fork 3's value ('floor_to_full' | 'full_only' | 'above_full_allowed' | {kind: min_x, min})
+    and a note, or (None, problem)."""
+    if a in (None, "", {}):
+        return "floor_to_full", "amounts.acceptance not stated: floor_to_full (contract default)"
+    if isinstance(a, dict):
+        kind, mn = a.get("kind"), _num(a.get("min"))
+        if kind == "min_x":
+            return ({"kind": "min_x", "min": mn}, None) if mn is not None and mn > 0 else (None, f"min_x without a positive min: {a!r}")
+        a = kind
+    return (a, None) if a in ACCEPTANCE else (None, f"acceptance {a!r} is not one of {ACCEPTANCE + ('min_x',)}")
+
+
+# ---- gap 4: date refusal policy ------------------------------------------------------------------------------------
+DATE_SITUATIONS = ("weekend", "holiday", "after_deadline", "today_not_allowed", "past")
+DATE_ACTIONS = ("shift_next_business_day", "shift_previous_business_day", "offer_deadline", "refuse")
+_LEGACY_ACTION = {"next_business_day": "shift_next_business_day", "previous_business_day": "shift_previous_business_day",
+                  "reject": "refuse", "offer_deadline": "offer_deadline"}
+
+
+def _brief_worded(text, quotes):
+    """A sentence is the brief's own when its words (tokens aside) are in the quotes; else it is the extractor's."""
+    words = [w for w in re.split(r"<[A-Z]+>", str(text or "")) if w.strip(" .,?")]
+    return bool(words) and all(_norm(w.strip()) in _norm(" ".join(quotes)) for w in words) and not INSTRUCTION.search(text)
+
+
+def date_rules(p):
+    """-> (date_rules {situation: {action, say?, source}}, notes). The extractor's date_rules first; a situation it does
+    not answer comes from the legacy sections (on_non_business_day for weekend and holiday, on_after_deadline,
+    earliest.allow_today, past = refuse). A say is kept only when the brief words it; else omitted (reducer default)."""
+    ext = p.get("date_rules") if isinstance(p.get("date_rules"), dict) else {}
+    nbd, aft, ear = p.get("on_non_business_day") or {}, p.get("on_after_deadline") or {}, p.get("earliest") or {}
+    legacy = {"weekend": nbd, "holiday": nbd, "after_deadline": aft}
+    out, notes = {}, []
+    for sit in DATE_SITUATIONS:
+        e = ext.get(sit) if isinstance(ext.get(sit), dict) else {}
+        q = [str(x.get("quote") if isinstance(x, dict) else x) for x in (e.get("source") or [])]
+        act = e.get("action") if e.get("action") in DATE_ACTIONS else None
+        how = "extractor"
+        if not act or not q:
+            sec = legacy.get(sit)
+            if sec is not None and _LEGACY_ACTION.get(sec.get("action")):
+                act, q, e, how = _LEGACY_ACTION[sec["action"]], [str(x.get("quote") if isinstance(x, dict) else x) for x in sec.get("source") or []], {"say": sec.get("say"), "source": sec.get("source")}, "legacy"
+            elif sit == "today_not_allowed":
+                if ear.get("allow_today") is not False:
+                    continue        # today is allowed: no rule for this situation
+                act, q, e, how = act or "refuse", [str(x.get("quote") if isinstance(x, dict) else x) for x in ear.get("source") or []], {"source": ear.get("source")}, "legacy"
+            elif sit == "past":
+                act, how = act or "refuse", "contract default"
+            elif not act:
+                notes.append(f"date_rules.{sit}: no rule in the material")
+                continue
+        rule = {"action": act, "source": e.get("source") or DEFAULT, "from": how}
+        say = str(e.get("say") or "").strip()
+        if say and _brief_worded(say, q):
+            rule["say"] = say
+        elif say and say not in CONTRACT_DATE_SAY.values():
+            notes.append(f"date_rules.{sit}.say {say[:50]!r} is not the brief's wording: omitted (reducer default)")
+        out[sit] = rule
+    return out, notes
 
 
 def _map_sentence_keys(p):
@@ -519,14 +645,29 @@ def to_reducer(policy, oas_path, stable_unmapped=None):
     for k in ("floor_by_type", "naming_by_type"):
         m = {}
         for t, v in (prod.get(k) or {}).items():
-            nt = _ptype(t)
-            if types and nt not in types:
+            nt = "*" if str(t).strip() in ("*", "any", "all") else _ptype(t)
+            if types and nt not in types and nt != "*":
                 nt = resolve(f"products.{k}.{t}", nt, "get_account.products[].type", types)
             if nt:
                 m[nt] = v
         if k in prod:
             prod[k] = m
     acct_fields = response_fields(oas_path, "get_account")
+    floors = {}
+    for t, v in (prod.get("floor_by_type") or {}).items():
+        rule, problem = floor_spec(v, acct_fields)
+        if rule:
+            floors[t] = rule
+        else:
+            mism.append({"policy_path": f"products.floor_by_type.{t}", "value": v.get("field") if isinstance(v, dict) else v,
+                         "field": "get_account.products[]", "oas_enum": None,
+                         "action": f"block ({problem}; the floor is the full amount)"})
+    prod["floor_by_type"] = floors
+    am = p.setdefault("amounts", {})
+    acc, anote = acceptance_rule(am.get("acceptance"))
+    am["acceptance"] = acc or "floor_to_full"
+    if anote:
+        notes.append(anote if acc else f"amounts.acceptance: {anote}; floor_to_full used")
     for t, tpl in (prod.get("naming_by_type") or {}).items():
         def repl(mo):
             words = mo.group(1).lower()
@@ -762,6 +903,8 @@ def to_reducer(policy, oas_path, stable_unmapped=None):
         elif "callback" in json.dumps(w).lower() and not w.get("effect_kind"):
             w["effect_kind"] = "callback"
     notes += _date_templates(p)
+    p["date_rules"], dnotes = date_rules(p)
+    notes += dnotes
     hooks, unplaced, hnotes = build_hooks(p, types)
     rec = recording_hook(p, stable_unmapped or [], hooks, unplaced)
     hnotes += [rec] if rec else []

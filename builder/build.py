@@ -34,7 +34,7 @@ def core_signature(p):
     bd = p.get("business_days") or {}
     bands = [(b.get("min_days_late"), b.get("max_days_late"), b.get("days"), b.get("attempts")) for b in (p.get("deadline") or {}).get("bands") or []]
     idn = p.get("identity") or {}
-    floor = {k: (v.get("kind"), v.get("field"), v.get("percent")) for k, v in ((p.get("products") or {}).get("floor_by_type") or {}).items()}
+    floor = {k: (v.get("kind"), v.get("field") or (v.get("params") or {}).get("field"), v.get("percent"), v.get("amount")) for k, v in ((p.get("products") or {}).get("floor_by_type") or {}).items()}
     cb = (p.get("writes") or {}).get("callback") or {}
     plan = {b: [(s.get("date_rule"), s.get("amount_rule")) for s in st] for b, st in ((p.get("attempts") or {}).get("plan") or {}).items()}
     return json.dumps({"holidays": sorted(bd.get("holidays") or []), "weekdays": sorted(bd.get("weekdays") or []), "bands": bands,

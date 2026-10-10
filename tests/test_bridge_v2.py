@@ -52,6 +52,10 @@ def gap1():
               "source": src("Warn them that the account may be passed to the legal team.")},
              {"id": "when", "point": "unsure", "condition": None, "expects_answer": False,
               "source": src("Remind them that the mobile app shows every payment.")},
+             {"id": "whenq", "point": "unsure", "condition": None, "expects_answer": False,
+              "source": src('Ask "Would you like a reminder by text message?"')},
+             {"id": "whencond", "point": "unsure", "condition": "band=late", "expects_answer": False,
+              "source": src("Tell them that the late band has a shorter deadline.")},
              {"id": "badband", "point": "on_refusal", "condition": "band=ultra", "expects_answer": False,
               "source": src("Warn them that the card may be blocked.")},
              {"id": "confirm", "point": "on_no_promise", "condition": None, "expects_answer": True,
@@ -63,7 +67,9 @@ def gap1():
     un = {u["id"]: u for u in rp["unplaced_hooks"]}
     check(by.get("fee", {}).get("point") == "after_debt" and by["fee"]["text"].startswith("Interest"), "after_debt hook kept at its point")
     check(by.get("legal", {}).get("condition") == "band=late", "condition kept as band=late")
-    check("when" in un and "when" not in by, "point unsure -> unplaced, not moved")
+    check(by.get("when", {}).get("point") == "before_close" and by["when"].get("placed") == "no moment given",
+          "a timeless plain statement with no moment -> before_close, marked placed")
+    check("whenq" in un and "whencond" in un, "an unsure question or conditional line stays unplaced (never bolted on)")
     check("badband" in un, "unknown band -> unplaced")
     check(by.get("confirm", {}).get("expects_answer") is True, "a confirmation question is emitted with expects_answer")
     check("dup" not in by, "a line the text_message sentence already says is dropped")
@@ -102,8 +108,67 @@ def gap2():
     check(any(e.startswith("18") for e in validate(generate(bad, OAS), bad, OAS)), "validator 18 catches a free-text format")
 
 
+def gap3():
+    print("== gap 3: floor and acceptance")
+    S = lambda v, f=("minimum_payment",): B.floor_spec(v, list(f))
+    check(S({"kind": "account_field", "field": "minimum_payment"})[0] == {"kind": "field", "field": "minimum_payment", "source": B.DEFAULT},
+          "old account_field -> {kind: field, field}")
+    r = S({"kind": "percent_of_past_due", "percent": 30, "round": "up"})[0]
+    check(r and r["kind"] == "percent" and r["percent"] == 30 and r["round"] == "up", "old percent_of_past_due -> {kind: percent, percent, round}")
+    r = S({"kind": "max_fixed_percent", "amount": 50, "percent": 10, "round": "nearest", "to": "unit"})[0]
+    check(r and (r["amount"], r["percent"], r["to"]) == (50, 10, "unit"), "max_fixed_percent keeps amount, percent, round, to")
+    check(S({"kind": "fixed", "amount": 25})[0]["amount"] == 25, "fixed amount")
+    check(S({"kind": "field", "field": "not_in_oas"})[0] is None, "a floor field not in the OAS response is refused")
+    check(S({"kind": "percent", "percent": 140})[0] is None, "percent outside (0, 100] is refused")
+    A = B.acceptance_rule
+    check(A(None)[0] == "floor_to_full" and A("full_only")[0] == "full_only", "acceptance default and full_only")
+    check(A({"kind": "min_x", "min": 50})[0] == {"kind": "min_x", "min": 50}, "min_x keeps its min")
+    check(A({"kind": "min_x"})[0] is None and A("half")[0] is None, "min_x without min / unknown kind refused")
+    p = {"products": {"floor_by_type": {"*": {"kind": "percent", "percent": 30, "round": "nearest", "to": "cent"}}},
+         "amounts": {"acceptance": {"kind": "min_x", "min": 40}}}
+    rp, rep = bridged(**p)
+    check(rp["products"]["floor_by_type"].get("*", {}).get("percent") == 30, "'*' is kept as the any-type key")
+    check(rp["amounts"]["acceptance"] == {"kind": "min_x", "min": 40}, "acceptance emitted as {kind: min_x, min}")
+    check(not [e for e in validate(generate(rp, OAS), rp, OAS) if e.startswith("19")], "validator 19 passes")
+    bad = copy.deepcopy(rp)
+    bad["products"]["floor_by_type"]["*"] = {"kind": "percent"}
+    bad["amounts"]["acceptance"] = "half"
+    check(len([e for e in validate(generate(bad, OAS), bad, OAS) if e.startswith("19")]) == 2, "validator 19 catches a bad floor and acceptance")
+    rp, rep = bridged(products=dict(BASE["products"], floor_by_type={"credit_card": {"kind": "field", "field": "no_such_field"}}))
+    check(not rp["products"]["floor_by_type"] and any("floor_by_type" in m["policy_path"] for m in rep["api_mismatch"]),
+          "an unbindable floor field -> api_mismatch, never a guessed field")
+
+
+def gap4():
+    print("== gap 4: date rules")
+    rp, rep = bridged()
+    dr = rp["date_rules"]
+    check(dr["weekend"]["action"] == dr["holiday"]["action"] == "shift_next_business_day", "brief A legacy: weekend/holiday shift")
+    check(dr["after_deadline"]["action"] == "offer_deadline" and dr["past"]["action"] == "refuse", "after_deadline offer, past refuse")
+    p = {"date_rules": {"weekend": {"action": "refuse", "say": "We cannot take a payment date on a weekend. Which weekday suits you?",
+                                    "source": src("Weekend dates are refused: say \"We cannot take a payment date on a weekend. Which weekday suits you?\"")},
+                        "holiday": {"action": "shift_next_business_day", "say": "Then you should pick another day, please.",
+                                    "source": src("A holiday moves to the next business day.")},
+                        "today_not_allowed": {"action": "refuse", "say": "", "source": src("A promise for today is not accepted.")}}}
+    rp, rep = bridged(**p)
+    dr = rp["date_rules"]
+    check(dr["weekend"] == dict(dr["weekend"], action="refuse", say="We cannot take a payment date on a weekend. Which weekday suits you?"),
+          "a brief-worded refusal sentence is kept with action refuse")
+    check(dr["holiday"]["action"] == "shift_next_business_day" and "say" not in dr["holiday"], "an invented say is omitted (reducer default)")
+    check(dr["today_not_allowed"]["action"] == "refuse", "today_not_allowed refuse")
+    check(not [e for e in validate(generate(rp, OAS), rp, OAS) if e.startswith("19")], "validator 19 passes on date_rules")
+    bad = copy.deepcopy(rp)
+    bad["date_rules"]["weekend"]["action"] = "ignore"
+    check(any(e.startswith("19") for e in validate(generate(bad, OAS), bad, OAS)), "validator 19 catches an unknown action")
+
+
+def gap2_exact():
+    q = {"field": "postcode", "format": "postcode", "format_evidence": {"source": src("Send the postcode exactly as said, letters and digits.")}}
+    check(B.answer_format(q)[0] == "free", "'exactly as said' wins over the postcode format -> free")
+
+
 if __name__ == "__main__":
-    for g in (gap1, gap2):
+    for g in (gap1, gap2, gap2_exact, gap3, gap4):
         g()
     print("RESULT:", "PASS" if not fails else f"FAIL ({len(fails)})")
     sys.exit(1 if fails else 0)

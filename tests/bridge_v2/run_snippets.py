@@ -39,9 +39,13 @@ def run(name, fresh=False):
         print(f"  UNPLACED ({u['why']}): {u['quote'][:90]!r}")
     for q in (rp.get("identity") or {}).get("questions") or []:
         print(f"  ID {q['field']:15} format={q['format']:10} ({q.get('format_how')}; extractor said {q.get('format_brief')!r})")
-    for k in ("floor_rules", "acceptance", "date_refusal"):
-        if rp.get(k):
-            print(f"  {k}:", json.dumps(rp[k])[:600])
+    print("  floor_by_type:", json.dumps({t: {k: v for k, v in f.items() if k != "source"} for t, f in (rp.get("products") or {}).get("floor_by_type", {}).items()}))
+    print("  acceptance:", json.dumps((rp.get("amounts") or {}).get("acceptance")))
+    for sit, r in (rp.get("date_rules") or {}).items():
+        print(f"  date_rules.{sit:18} {r['action']:24} from={r.get('from'):17} say={r.get('say')!r}")
+    print("  notes:", [n for n in brep["notes"] if "date_rules" in n or "acceptance" in n or "hook" in n])
+    if brep["api_mismatch"]:
+        print("  api_mismatch:", json.dumps(brep["api_mismatch"])[:400])
     return rp
 
 

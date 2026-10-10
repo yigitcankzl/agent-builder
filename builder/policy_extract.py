@@ -39,15 +39,24 @@ Use {"file": "default", "quote": ""} ONLY when the material says nothing at all 
               "max_wrong": int, "on_fail": {"outcome": str, "reason": str}, "on_decline": {"outcome": str, "reason": str},
               "decline_explain_max": int, "hint_rules": [str], "source": Q},
  "products": {"fields": {"id": str, "type": str, "past_due": str, "days_late": str},
-              "floor_by_type": {"<product type>": {"kind": "account_field", "field": str} |
-                                {"kind": "percent_of_past_due", "percent": number, "round": "up" | "down" | "nearest"}},
+              "floor_by_type": {"<product type, or * for every type>":
+                                {"kind": "field", "field": "<account field>"} |
+                                {"kind": "percent", "percent": number, "round": "up" | "down" | "nearest", "to": "cent" | "unit"} |
+                                {"kind": "fixed", "amount": number} |
+                                {"kind": "max_fixed_percent", "amount": number, "percent": number, "round": .., "to": ..}},
               "naming_by_type": {"<product type>": "<how to name it>"}, "order": str, "source": Q},
  "attempts": {"plan": {"<band name as in deadline.bands>": [{"date_rule": DATE_RULE, "amount_rule": AMOUNT_RULE, "source": Q}]},
               "flat_refusal_uses_attempt": {"value": bool, "source": Q},
               "proposal_never_refusal": {"value": bool, "source": Q},
               "no_repeat_refused_offer": {"value": bool, "source": Q},
               "stop_when_exhausted": {"value": bool, "source": Q}},
- "amounts": {"first_ask": str, "too_much": str, "accept_range": str, "below_floor": str, "source": Q},
+ "amounts": {"first_ask": str, "too_much": str, "accept_range": str, "below_floor": str,
+             "acceptance": "floor_to_full" | "full_only" | "above_full_allowed" | {"kind": "min_x", "min": number},
+             "acceptance_evidence": {"source": Q}, "source": Q},
+ "date_rules": {"<situation>": {"action": "shift_next_business_day" | "shift_previous_business_day" | "offer_deadline" | "refuse",
+                                "say": "<the material's exact words for that case, may use <NAMED> <DATE> <DEADLINE>, or ''>",
+                                "source": Q}}
+     <- situations, ALL five always answered: weekend, holiday, after_deadline, today_not_allowed, past. See rule 17.
  "multi_product": {"applies": bool, "state_all_first": bool, "ask_all_today_once": bool, "one_date_clamp": bool,
                    "one_readback": bool, "source": Q},
  "events": [{"topic": str, "say": str, "effect": str, "note_reason": str, "outcome": str, "reason": str, "source": Q}],
@@ -141,6 +150,16 @@ Rules:
     limits the rule to one band, one product type or one outcome. expects_answer = true when the agent must wait for
     the customer's answer (a confirmation question). The build rewrites the quote into the spoken line; you only give
     the quote.
+17. Amounts. floor_by_type: field = an account field (e.g. a minimum payment field); percent = a percent of the
+    past-due amount; fixed = a fixed amount; max_fixed_percent = the larger of a fixed amount and a percent. rounding
+    (round, to) only when the material says how the floor is rounded. amounts.acceptance: floor_to_full = any
+    amount from the floor up to the full amount; full_only = only the full past-due amount (no partial payment);
+    min_x = any amount from `min` up to the full amount; above_full_allowed = amounts above the past-due amount may be
+    recorded. date_rules: for each situation, what the material does with a date the customer names: move it to the
+    next business day, offer the deadline, or refuse it. today_not_allowed applies only when today cannot be
+    promised (action refuse, or shift_next_business_day when the material moves it); past is a date before today.
+    When the material says nothing about a situation, use the action the date sections above already give and
+    source [].
 16. identity.questions[].format: date (a calendar date), digits(<n>) (exactly n digits, e.g. digits(4) for the last
     four digits, digits(4) for a year), name (a person's or place's name), alnum (letters and digits, e.g. a
     reference or the last characters of a policy number), postcode, free (anything else). format_evidence.source quotes the
