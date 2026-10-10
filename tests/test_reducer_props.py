@@ -225,8 +225,9 @@ def loop_caps():
         "opening/confirm_name": ([], "unclear"),
         "opening/help_first": (["kind=topic;also=none;st=complete;prod=;t=human"], None),
         "third_party/callback_time": ([EVENTS[1]], "callback_failed"),
-        "identity/id_": ([WHO], "declined"),
-        "identity/id_2": ([WHO, DOB, OK], "declined"),
+        "identity/id_": ([WHO], "unclear"),            # no answer at all is not a refusal
+        "identity/id_2": ([WHO, DOB, OK], "unclear"),
+        "identity/id_ after a refusal": ([WHO, "kind=topic;also=none;st=complete;prod=;t=decline"], "declined"),
         "negotiation/pay_today": ([WHO, DOB, OK, PH, ALL, dict(products=A)], None),
         "negotiation/offer": ([WHO, DOB, OK, PH, ALL, dict(products=A), EVENTS[7]], None),
         "negotiation/exact_day": ([WHO, DOB, OK, PH, ALL, dict(products=A), EVENTS[7], EVENTS[14]], None),
