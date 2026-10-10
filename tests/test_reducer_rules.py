@@ -297,7 +297,41 @@ def pub06_rep3():
     return True
 
 
+def clean1_pub07():
+    """Rehearsal clean-1 (Northline, rh-clean-1, call c1297bc6). 'I cannot pay that today.' was extracted as
+    why=too_much (the prompt now says flat); with flat, attempt 1 is the full 540 on the deadline, Thursday 22 October.
+    With the mis-extraction replayed: the brief's 'too much' floor offer goes on the deadline (rule 15), and an attempt
+    equal to the offer just refused (the floor on the same day) is used up, never proposed again."""
+    import json
+    pol = json.load(open(os.path.join(ROOT, "tests/generated/rehearsal/rh-clean-1.reducer_policy.json")))
+    cv = dict(customer_id="c_c107", first_name="Samuel", last_name="Ortiz", title="Mr", now=NOW)
+    acc = [dict(product_id="p1", type="personal_loan", past_due=540.0, days_late=5, instalment_amount=180.0)]
+
+    def statement():
+        st = R.init_state(pol, cv)
+        st, a = say(pol, st, "kind=who;also=none;st=complete;prod=;who=self;party=")
+        st, a = say(pol, st, "kind=identity;also=none;st=complete;prod=;field=date_of_birth;ans=1975-12-05;y=1975")
+        st, a = tool(pol, st, dict(verified=True, all_verified=False, wrong_answers_left=3))
+        st, a = say(pol, st, "kind=identity;also=none;st=complete;prod=;field=phone_last4;ans=7093")
+        st, a = tool(pol, st, dict(verified=True, all_verified=True, wrong_answers_left=3))
+        st, a = tool(pol, st, dict(products=acc))
+        check("full balance today" in a["text"], f"clean-1 first ask: {a}")
+        return st
+    st = statement()
+    st, a = say(pol, st, "kind=reject;also=none;st=complete;prod=;why=flat")
+    check("540.00" in a["text"] and "22 October" in a["text"] and "overdue" not in a["text"], f"flat -> attempt 1 full on the deadline: {a}")
+    st, a = say(pol, st, "kind=yes;also=none;st=complete;prod=")
+    check(st["q"] == "readback" and "540.00" in a["text"] and "22 October" in a["text"], f"read-back: {a}")
+    st = statement()
+    st, a = say(pol, st, "kind=reject;also=none;st=complete;prod=;why=too_much")
+    check("216.00" in a["text"] and "22 October" in a["text"] and st["products"][0]["attempts"] == 0, f"too much -> floor on the deadline, no attempt: {a}")
+    st, a = say(pol, st, "kind=reject;also=none;st=complete;prod=1;why=flat")
+    check(a["type"] == "close" or "216" not in a.get("text", ""), f"the refused floor on the same day is not offered again: {a}")
+    return True
+
+
 if __name__ == "__main__":
+    print("rehearsal clean-1 PUB-07:", clean1_pub07())
     print("PUB-06 rep 3: no second floor offer:", pub06_rep3())
     print("PUB-03 live: no inherited year:", pub03_live())
     print("PUB-02 live: speaker first in the opening:", pub02_live())

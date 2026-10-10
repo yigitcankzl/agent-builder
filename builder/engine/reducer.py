@@ -332,6 +332,15 @@ def _floor(policy, row):
     return min(v, full)
 
 
+def too_much_on_deadline(policy):
+    """Where the 'too much' floor offer goes: amounts.too_much_date (deadline | today | offer), else the brief's
+    too_much rule naming the deadline (clean-1: 'offer the floor once, on the deadline'), else the offer's day."""
+    a = policy.get('amounts') or dict()
+    if a.get('too_much_date'):
+        return str(a['too_much_date']) == 'deadline'
+    return bool(re.search(r'\bon the deadline\b|\bat the deadline\b', str(a.get('too_much') or ''), re.I))
+
+
 def amount_fits(policy, pd, amt):
     kind, x = accept_rule(policy)
     low = x if kind == 'min_x' and x is not None else pd['floor']
@@ -1012,6 +1021,9 @@ def start_attempt(policy, st, i, today, from_today_ask=True):
     rule = pd['plan'][p['attempts']]
     date = plan_date(rule.get('date_rule'), today, pd, policy)
     amount, is_floor = plan_amount(rule.get('amount_rule'), pd)
+    if [round(float(amount), 2), iso(date)] in pd.get('refused_offers', []):
+        p['attempts'] += 1      # the same amount on the same day was just refused: this attempt is used, the next one
+        return start_attempt(policy, st, i, today, from_today_ask)
     again = is_floor and p['floor_offered']        # the floor was already offered: only the new day (PUB-06 live)
     p['attempts'] += 1
     if is_floor:
@@ -1217,12 +1229,15 @@ def reject_event(policy, st, ev, today, cv):
         return start_attempt(policy, st, nxt[0], today) if nxt else after_resolved(policy, st, today, cv)
     i = st['cur'] if st['cur'] is not None else 0
     p, pd = _p(st, i)
+    o = st.get('offer') or dict()
+    if o.get('amount') is not None and o.get('date') and p['id'] in (o.get('product_ids') or []):
+        pd['refused_offers'] = pd['refused_offers'] + [[round(float(o['amount']), 2), o['date']]]   # never proposed again
     if st['q'] == 'pay_today' and ev.get('why') != 'too_much':   # a "not today" answers the today ask
         st['all_today_asked'] = True
     if ev.get('why') == 'too_much' and not p['floor_offered'] and pd['floor'] < pd['past_due'] - 0.005:
         pd['too_much'] = True
         p['floor_offered'] = True
-        date = (st['offer'] or dict()).get('date') or iso(today)
+        date = pd['deadline'] if too_much_on_deadline(policy) else ((st['offer'] or dict()).get('date') or iso(today))
         p['status'], p['offer'] = 'proposed', dict(amount=pd['floor'], date=date)
         st['offer'] = dict(product_ids=[p['id']], amount=pd['floor'], date=date, kind='floor')
         return ask(st, offer_line(pd, pd['floor'], date, floor_clause=True), 'offer')
