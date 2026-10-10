@@ -58,7 +58,7 @@ Rules for the extraction prompt (generated, fixed text plus policy enums):
 | `kind` | Payload keys | Notes |
 |---|---|---|
 | `identity` | `field=<OAS enum of verify_identity.field>`, `ans=<normalised answer>` | The normaliser for each field comes from the OAS description (e.g. date → `YYYY-MM-DD`, 4 digits). It runs in code; the extractor only fills `ans` |
-| `who` | `who=<self|other|unclear>`, `rel=<relative|wrong_number|deceased|>` | Who is on the line (opening phase) |
+| `who` | `who=<self|other|unclear>`, `party=<relative|wrong_number|deceased|>` | Who is on the line (opening phase). v2.1: the key was renamed from `rel`, which collided with the date key `rel` |
 | `date` | `rel=<today|tomorrow|>`, `d=`, `m=`, `wd=<mon..sun|>`, `wk=<this|next|after_next|none>`, `vague=<yes|no>` | **The labels are the only source of truth for dates** (the `date_spec` grammar of `date-slice`). There is no `iso` in the event: a model can contradict itself even inside one field (d=20 with iso=10-26). Python computes the day with `dates.date_from_spec` against `now`. A weekday that contradicts the day of month makes the event `st=ambiguous` |
 | `amount` | `amt=<digits[.dd]>` | |
 | `date_amount` | the union of `date` and `amount` | "I can pay 300 on Friday" |
