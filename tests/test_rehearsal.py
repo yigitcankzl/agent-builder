@@ -71,6 +71,11 @@ SURFACE = {   # the surface siblings: the same events, with the turn the style c
 LIVE = {     # live shapes from the platform runs, replayed on the cases.json case (reported as <id>L)
     ("nightmare-1", "PUB-07"): lambda c: ["kind=callback;also=none;st=complete;prod=;rel=tomorrow;d=;m=;wd=;wk=none;vague=no;tm=15:00"],
     ("nightmare-1", "PUB-09"): lambda c: ["kind=topic;also=none;st=complete;prod=;t=complaint;who=self;party="],
+    ("raw-2", "PUB-11"): lambda c: [W, DOB(c), PH(c), "kind=reject;also=none;st=complete;prod=all;why=flat",   # surface 6d842b96
+                                    "kind=reject;also=none;st=complete;prod=;why=flat;rel=;d=;m=;wd=wed;wk=none;vague=no",
+                                    "kind=date;also=reject;st=complete;prod=;rel=;d=;m=;wd=mon;wk=none;vague=no",
+                                    "kind=date;also=amount;st=complete;prod=all;rel=;d=20;m=10;wd=tue;wk=none;vague=no;amt=935;y=2026",
+                                    YES],
 }
 SKIP = {("biz-1", "PUB-03")}     # debatable (coordinator)
 PFILE = (("clean-1", "rh-clean-1"),)

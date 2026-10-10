@@ -549,6 +549,19 @@ def load_products(policy, st, rows, today):
         st['_pd'].append(dict(id=str(r.get('product_id')), type=str(r.get('type')), name=_name(policy, r), past_due=float(r.get('past_due') or 0),
                               days_late=dl, floor=_floor(policy, r), band=band.get('name'), deadline=iso(dline),
                               plan=_plan(policy, band), too_much=False, note_reason=None, refused_offers=[]))
+    distinct_names(st)
+
+
+def distinct_names(st):
+    """Products that share a spoken name ('loan', 'loan') are named by their type instead, then numbered."""
+    names = [pd['name'] for pd in st['_pd']]
+    for i, pd in enumerate(st['_pd']):
+        if names.count(pd['name']) > 1:
+            pd['name'] = str(pd.get('type') or pd['name']).replace('_', ' ')
+    names = [pd['name'] for pd in st['_pd']]
+    for i, pd in enumerate(st['_pd']):
+        if names.count(pd['name']) > 1:
+            pd['name'] = '%s %d' % (pd['name'], names[:i + 1].count(pd['name']))
 
 
 def _p(st, i):
@@ -1151,17 +1164,30 @@ def date_event(policy, st, ev, today, cv):
         targets = [idx]
     if len(targets) > 1:   # one date for all: per-product decision, clamp without separate acceptance
         st['_clamped'] = []
+        said = ''
         for i in targets:
             p, pd = _p(st, i)
+            if p['status'] == 'refused' and not p.get('note'):
+                p['status'] = 'open'      # the customer's own date for every product revives one refused on our offers
             if p['status'] not in ('open', 'proposed'):
                 continue
-            r = decide(today, pd['days_late'], 'exact', named, 0, policy)
+            r = date_verdict(policy, today, pd, named)
+            if r['reason'] == 'refuse':
+                continue                  # this product cannot take that day: left open, its offers follow
             d = r['accepted'] or _d(pd['deadline'])
             if r['reason'] == 'after_deadline':
                 st['_clamped'].append(p['id'])
-            p['status'], p['offer'] = 'agreed', dict(amount=float(amt) if amt else pd['past_due'], date=iso(d))
+            if r['reason'] == 'non_business_day' and not said:   # say why the day moved (raw-2 PUB-11), once
+                said = ' '.join(x for x in re.split(r'(?<=[.?!])\s+', fill_date(r['say'], r)) if x and not x.endswith('?'))
+            # one amount never goes to several products (raw-2 surface: 220 + 640 + 75 summed to 935): only a product
+            # whose own amount it is takes it, every other product its own full amount
+            own = _num(amt) if amt and _num(amt) is not None and abs(_num(amt) - pd['past_due']) < 0.005 else None
+            p['status'], p['offer'] = 'agreed', dict(amount=own if own is not None else (pd['floor'] if pd['too_much'] else pd['past_due']), date=iso(d))
         st['offer'] = None
-        return after_resolved(policy, st, today, cv)
+        out = after_resolved(policy, st, today, cv)
+        if said and out.get('type') == 'say_exact':
+            out = dict(out, text=said + ' ' + out['text'])
+        return out
     i = targets[0]
     p, pd = _p(st, i)
     r = date_verdict(policy, today, pd, named)
