@@ -60,6 +60,20 @@ Use {"file": "default", "quote": ""} ONLY when the material says nothing at all 
              "precedence": [str], "reason_omitted_for": [str], "source": Q},
  "sentences": {"<id>": {"text": "<exact required wording>", "verbatim": true, "max_times": int, "source": Q}},
  "honesty_words": {"words": [str], "source": Q},
+ "topic_checklist": {"<topic>": {"present": bool, "say": "<the EXACT words the material makes the agent say, or ''>",
+                                 "effect": "<short description of what happens>", "outcome": "<API outcome or ''>",
+                                 "reason": "<API reason or ''>", "note_reason": "<note reason or ''>", "source": Q}}
+     <- topics, ALL answered every time: hardship, dispute, paid, restructure, human, scam, robot, unknown_info, stop,
+        decline (refuses to answer a question), purpose (asks what the call is about), change_promise (wants to change
+        or cancel a recorded promise), terms (asks for a discount, waiver or other terms). present=false with source []
+        when the material says nothing about it. `say` is never an instruction ("one sentence of sympathy", "then
+        offer ..."); it is either the material's quoted words or ''.
+ "human_request": {"applies_before_verification": bool, "queue": "<transfer queue enum value>", "source": Q},
+ "opening_situations": {"<id>": {"present": bool, "effect": "close" | "callback" | "re_ask" | "continue",
+                                 "outcome": str, "reason": str, "say": str, "source": Q}}
+     <- ids, ALL six always present: wrong_person (a relative or someone else answers), wrong_number, deceased,
+        unclear (cannot tell who answered), busy_voicemail (busy, call later, answering machine), handoff (the phone is
+        passed to the customer). present=false with source [] when the material says nothing about that situation.
  "aliases": [{"field": "<tool>.<field>", "brief_value": "<the material's own code or word>", "api_value": "<tool API value>",
               "source": Q}],   <- every explicit mapping the material states (e.g. one row of a code list)
  "superseded": [{"rule": "<policy path>", "old_value": any, "new_value": any, "winner_file": str, "loser_file": str,
@@ -97,11 +111,18 @@ Rules:
 10. attempts.plan: for each band, one entry per persuasion attempt, in order. DATE_RULE is one of: DATE_RULES_LIST.
     AMOUNT_RULE is one of: AMOUNT_RULES_LIST (floor_if_too_much_else_full = the floor if the customer already said
     the full amount is too much, else the full amount). Also fill the four attempts flags, each with its quote.
+12. human_request: when the customer asks for a person, which transfer queue is used, and whether the material lets
+    that happen BEFORE identity is verified (e.g. a rule that says it applies before and after verification, or a
+    rule placed in the opening). Quote the line that decides it; if the material is silent, false.
+13. opening_situations: answer all six ids every time (present true with quotes, or false), even if events also
+    mention them.
 11. events checklist: look for each of these situations and add an entry for every one the material covers, with
     the material's own topic name: hardship (illness, job loss, bereavement), dispute, already paid, restructuring or
     payment plan, asks for a human, asks whether the call is a scam, asks whether it is a robot or AI, a question
     the agent cannot answer, does not want to talk, refuses to answer a question, asks what the call is about,
     hands the phone to the customer. Raw material often scatters these over several files: check every file.
+14. topic_checklist: answer every topic every time. For each present topic give the outcome and reason the call
+    closes with (exact API strings, through a code list where there is one), even when another rule implies them.
 9. Holidays and dates as YYYY-MM-DD. Weekdays as integers with Monday = 0.
 """
 

@@ -46,6 +46,8 @@ def public_constants():
     # the seven tool names are fixed for every brief by the hackathon rules ("The seven tool names stay the same")
     # our own schema vocabulary (also a key in the fixtures), not a brief value
     fixed_schema = {"business_days_after_today"}
+    # contract vocabulary (REDUCER-CONTRACT §1.2 party values and the v3.2 effect names), not brief values
+    fixed_schema |= {"wrong_number", "no_callback"}
     fixed = fixed_schema | {"verify_identity", "get_account", "create_promise", "add_note", "schedule_callback", "transfer_to_agent", "close_call"}
     return {c for c in consts if len(c) >= 4} - fixed
 
@@ -90,6 +92,12 @@ if __name__ == "__main__":
     caught.append(expect_caught("empty exact_say default", w, rp, unstable, "7:"))
     w = copy.deepcopy(wf); w["nodes"]["hub"]["pre_actions"][0]["function"]["parameters"]["properties"]["code"]["default"] += "x = {'a': {'b': 1}}\n"
     caught.append(expect_caught("double braces in code", w, rp, unstable, "8:"))
+    w = copy.deepcopy(wf); w["nodes"]["t_create_promise"]["pre_actions"][0]["function"]["parameters"]["properties"]["body"]["properties"]["date"]["default"] = "{{w_create_promise_when}}"
+    caught.append(expect_caught("baked name differs from the tool_args table", w, rp, unstable, "11:"))
+    p = copy.deepcopy(rp); p["tool_results"]["get_account"]["past_due"] = "item.balance_xyz"
+    caught.append(expect_caught("response path not in the OAS", wf, p, unstable, "13:"))
+    p = copy.deepcopy(rp); p["closing"]["slots"]["promise"] = {"outcome": "arranged", "reason": None}
+    caught.append(expect_caught("slot outcome outside the enum", wf, p, unstable, "14:"))
     if unstable:
         w = copy.deepcopy(wf); w["nodes"]["talk_post"]["task_message"] += " " + unstable[0]
         caught.append(expect_caught("unstable unmapped compiled", w, rp, unstable, "9:"))

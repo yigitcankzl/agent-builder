@@ -9,7 +9,7 @@ wrong / wrong x max, 1-3 product mixes, tool failure x (retries + 1), a partial 
 human request. A scripted customer answers the reducer's open question (st['q'], contract §11.1); a fake bank answers
 the tool calls from the OAS response shapes.
 """
-import datetime, importlib, json, os, sys, time
+import datetime, importlib, json, os, re, sys, time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from builder.engine import dates as D
@@ -92,6 +92,9 @@ def _products(policy, mix, today):
         dl = b.get("max_days_late") if edge == "max" else (b.get("min_days_late") or 1)
         fb = ((policy.get("products") or {}).get("floor_by_type") or {}).get(t) or {}
         row = {"product_id": f"p{i + 1}", "type": t, "past_due": 300.0 + 100 * i, "days_late": int(dl)}
+        tpl = ((policy.get("products") or {}).get("naming_by_type") or {}).get(t) or ""
+        for f in re.findall(r"\{(\w+)\}", tpl):     # fields the spoken product name needs (e.g. last digits)
+            row.setdefault(f, "4321")
         if fb.get("kind") == "account_field" and fb.get("field"):
             row[fb["field"]] = 90.0 + 10 * i
         out.append(row)
@@ -225,7 +228,7 @@ def run_scenario(R, policy, name, knobs, oas_path, idq):
     closed = None
     for i in range(MAX_STEPS):
         ev = None if tool_ev else cust.next(st, tok)
-        before = json.dumps({k: v for k, v in st.items() if k not in ("runs", "tok", "last_tok", "hangup", "_tc")}, sort_keys=True, default=str)
+        before = json.dumps({k: v for k, v in st.items() if k not in ("runs", "tok", "last_tok", "hangup") and not k.startswith("_")}, sort_keys=True, default=str)
         try:
             st, act = R.step(policy, st, ev, tool_ev, NOW, cv)
         except Exception as e:
@@ -242,8 +245,9 @@ def run_scenario(R, policy, name, knobs, oas_path, idq):
             break
         t = act["type"]
         if ev and ev.get("st") == "partial":
-            after = json.dumps({k: v for k, v in st.items() if k not in ("runs", "tok", "last_tok", "hangup", "_tc", "_last_ask")}, sort_keys=True, default=str)
-            if t != "say_exact" or after != json.dumps({k: v for k, v in json.loads(before).items() if k != "_last_ask"}, sort_keys=True, default=str):
+            # the business state must not change; reducer-private bookkeeping (keys starting with "_") is not compared
+            after = json.dumps({k: v for k, v in st.items() if k not in ("runs", "tok", "last_tok", "hangup") and not k.startswith("_")}, sort_keys=True, default=str)
+            if t != "say_exact" or after != before:
                 fails.append("partial event changed state or did not just say a line")
         text = (act.get("text") or act.get("farewell") or act.get("hint") or "")
         # invariant 2: no empty say
@@ -271,7 +275,13 @@ def run_scenario(R, policy, name, knobs, oas_path, idq):
             readback_yes = True
         cust._last_q = str(st.get("q"))
         if t == "call_tool":
-            tool, args = act["tool"], dict(act.get("args") or {})
+            tool, raw = act["tool"], dict(act.get("args") or {})
+            # the reducer may write canonical names or the OAS field names of policy.tool_args: read both
+            table = (policy.get("tool_args") or {}).get(tool) or {}
+            args = dict(raw)
+            for c, f in table.items():
+                if c not in args and f in raw:
+                    args[c] = raw[f]
             # invariant 3: no write without a confirmed read-back answered yes
             if tool == "create_promise":
                 if not readback_yes:

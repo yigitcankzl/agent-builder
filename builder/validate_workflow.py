@@ -17,6 +17,11 @@ validate(wf, rp, oas_path, unstable_quotes=()) -> list of problems (empty = pass
  8 no double braces in code strings, no null values, no agent_config
  9 no unstable unmapped rule compiled into the workflow
 10 the reducer interface: every fixed sentence key present, who_rules in the contract vocabulary
+11 one tool_args table: policy.tool_args == arg_map(OAS) and the baked placeholders are w_<tool>_<OAS field>
+12 every required OAS request field is bound
+13 tool_results: every response path exists in the OAS response schema, and the core facts are bound
+14 every enum value the agent may send (slots, product types, identity fields, note reasons, outcomes, queues) is exact
+15 event and who lines are speakable: no instruction prose
 """
 import argparse, json, os, re, sys
 
@@ -222,6 +227,77 @@ def validate(wf, rp, oas_path, unstable_quotes=()):
             errs.append(f"10: who_rules[{i}].who {w.get('who')!r} not in {WHO_VOCAB}")
         if w.get("party", "") not in PARTY_VOCAB:
             errs.append(f"10: who_rules[{i}].party {w.get('party')!r} not in {PARTY_VOCAB}")
+    # 11 one source of truth for tool args: the policy's tool_args == arg_map(OAS), and every baked placeholder of a
+    #    tool node is exactly w_<tool>_<OAS field> for the field the table names (what the reducer writes)
+    ta = rp.get("tool_args")
+    if ta is None:
+        errs.append("11: the policy has no tool_args table")
+    else:
+        for name, spec in tools.items():
+            expect = {c: f for f, c in arg_map(name, spec)[0].items() if c not in CALL_VARS}
+            if name != "close_call" and ta.get(name, {}) != expect:
+                errs.append(f"11: tool_args[{name}] {ta.get(name)} != arg_map {expect}")
+            node = nodes.get("t_" + name)
+            if not node or name == "close_call":
+                continue
+            body = ((node["pre_actions"][0]["function"]["parameters"]["properties"].get("body") or {}).get("properties") or {})
+            for c, f in (ta.get(name) or {}).items():
+                want = "{{w_" + name + "_" + f + "}}"
+                if (body.get(f) or {}).get("default") != want:
+                    errs.append(f"11: t_{name}.{f} bakes {(body.get(f) or {}).get('default')!r}, the reducer writes {want}")
+    # 12 every required request field of every generated tool node is bound (canonical role or call variable)
+    for name, spec in tools.items():
+        if "t_" + name in nodes:
+            for f in arg_map(name, spec)[1]:
+                errs.append(f"12: required OAS field {name}.{f} is not bound; the tool must be blocked")
+    # 13 response paths: every fact the reducer reads exists in the OAS response schema
+    from builder.oas_bindings import path_exists
+    for tool, facts in (rp.get("tool_results") or {}).items():
+        for fact, path in facts.items():
+            if not path_exists(oas_path, tool, path):
+                errs.append(f"13: tool_results.{tool}.{fact} = {path!r} is not in the OAS response schema")
+    for tool, fact in (("verify_identity", "verified_all"), ("get_account", "products"), ("get_account", "id"),
+                       ("get_account", "past_due"), ("get_account", "days_late")):
+        if "t_" + tool in nodes and fact not in (rp.get("tool_results") or {}).get(tool, {}):
+            errs.append(f"13: tool_results.{tool}.{fact} is missing")
+    # 14 every enum value the agent may send is an exact OAS member: slots, product types, identity fields (unless
+    #    blocked), note reasons, outcomes/reasons of tables, events and who rules, queues
+    enum = lambda tool, f: (tools.get(tool, {}).get("props", {}).get(f) or {}).get("enum")
+    e_out, e_rsn, e_q, e_n = enum("close_call", "outcome"), enum("close_call", "reason"), enum("transfer_to_agent", "queue"), enum("add_note", "reason")
+    for k, v in ((rp.get("closing") or {}).get("slots") or {}).items():
+        if v and e_out and v.get("outcome") not in e_out:
+            errs.append(f"14: closing.slots.{k}.outcome {v.get('outcome')!r} not in the OAS enum")
+        if v and e_rsn and v.get("reason") and v.get("reason") not in e_rsn:
+            errs.append(f"14: closing.slots.{k}.reason {v.get('reason')!r} not in the OAS enum")
+    types = None
+    for path, ops in oas.get("paths", {}).items():
+        if path.strip("/").endswith("get_account"):
+            from builder.oas_bindings import _resp_schema
+            arr = [(v.get("items") or {}).get("properties") or {} for v in (_resp_schema(oas, "get_account").get("properties") or {}).values() if (v or {}).get("type") == "array"]
+            types = next((p.get("type", {}).get("enum") for p in arr if p.get("type")), None)
+    for t in ((rp.get("products") or {}).get("floor_by_type") or {}):
+        if types and t not in types:
+            errs.append(f"14: product type {t!r} not in the OAS get_account enum")
+    for q in (rp.get("identity") or {}).get("questions") or []:
+        if not q.get("blocked") and enum("verify_identity", "field") and q.get("field") not in enum("verify_identity", "field"):
+            errs.append(f"14: identity field {q.get('field')!r} not in the OAS enum and not blocked")
+    for coll in ("events", "who_rules"):
+        for e in rp.get(coll) or []:
+            if e.get("blocked"):
+                continue
+            if e.get("outcome") and e_out and e["outcome"] not in e_out:
+                errs.append(f"14: {coll} outcome {e['outcome']!r} not in the OAS enum")
+            if e.get("note_reason") and e_n and e["note_reason"] not in e_n:
+                errs.append(f"14: {coll} note_reason {e['note_reason']!r} not in the OAS enum")
+    for k, q in ((rp.get("transfer") or {}).get("queue_map") or {}).items():
+        if e_q and q not in e_q:
+            errs.append(f"14: transfer.queue_map.{k} {q!r} not in the OAS enum")
+    # 15 event lines are speakable: no instruction prose in any events[].say / who_rules[].say
+    from builder.policy_bridge import INSTRUCTION
+    for coll in ("events", "who_rules"):
+        for e in rp.get(coll) or []:
+            if e.get("say") and INSTRUCTION.search(str(e["say"])):
+                errs.append(f"15: {coll} {e.get('topic') or e.get('who')} say is instruction prose: {str(e['say'])[:60]!r}")
     # 9 unstable unmapped
     # only where unmapped rules are compiled: the policy's unmapped_rules (reducer input) and the free-talk prompts.
     # (A short generic phrase like "Ask once more." can legitimately appear elsewhere, e.g. a fixed sentence.)

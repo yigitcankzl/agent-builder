@@ -119,7 +119,9 @@ def _api_node(tool, spec, target, args_prefix=None, extra_mapping=()):
         c = amap.get(arg)
         if c is None:
             continue            # an optional OAS field with no canonical source is left out (a required one is an error)
-        var = c if c in CALL_VARS else f"{args_prefix or 'w_' + tool}_{c}"
+        # the reducer writes w_<tool>_<OAS field> from the policy's tool_args table (same table as here); close_call's
+        # outcome/reason come from the hub's close_outcome / close_reason
+        var = c if c in CALL_VARS else (f"{args_prefix}_{c}" if args_prefix else f"w_{tool}_{arg}")
         body[arg] = {"type": sch.get("type", "string"), "default": "{{" + var + "}}"}
     return {"name": "t_" + tool, "node_type": "api_request", "passthrough": True, "passthrough_default_transition": target,
             "on_enter": {"type": "silent"},
@@ -252,9 +254,8 @@ def generate(rp, oas_path):
           "talk_hint": "", "close_outcome": who0.get("outcome") or "", "close_reason": who0.get("reason") or ""}
     for t in used:
         tv["w_go_" + t] = "done"
-        for c in CANONICAL.get(t, []):
-            if c not in CALL_VARS:
-                tv[f"w_{t}_{c}"] = ""
+        for f in ((rp.get("tool_args") or {}).get(t) or {c: f for f, c in arg_map(t, tools[t])[0].items() if c not in CALL_VARS}).values():
+            tv[f"w_{t}_{f}"] = ""
     wf = {"initial_node": "greet", "system_prompt": sysp, "nodes": nodes, "global_nodes": {}, "test_variables": tv}
     GENERATED_FROM.update(hub=hub_from, ev=ev_src)
     if "close_call" in tools:

@@ -54,10 +54,17 @@ WHO_NORMAL = {"handoff": dict(who="handoff", party=""), "misdialled": dict(who="
               "deceased": dict(who="other", party="deceased"), "other": dict(who="other", party="relative"),
               "unclear": dict(who="unclear", party=""), "busy": dict(who="busy", party=""),
               "callback": dict(who="other", party="relative", effect_kind="callback")}
+OPENING = {"wrong_person": ("other", "relative"), "wrong_number": ("other", "wrong_number"), "deceased": ("other", "deceased"),
+           "unclear": ("unclear", ""), "busy_voicemail": ("busy", ""), "handoff": ("handoff", "")}
 V3_ALWAYS = ("decline", "purpose")          # §11.6: always present in the generated grammar
+TOPIC_ORDER = ("hardship", "dispute", "paid", "restructure", "human", "scam", "robot", "unknown_info", "stop", "decline",
+               "purpose", "change_promise", "terms")
+# instruction prose that must never be spoken as a line (an extractor writing what to do instead of what to say)
+INSTRUCTION = re.compile(r"\b(one (short )?sentence of|then offer|say that|tell the customer|close as|call `|offer to connect|"
+                         r"do not argue|make no|ask (once|for)|explain once)\b", re.I)
 # The fixed sentence keys every bridged policy carries (reducer interface); missing -> contract default or "" + note
 FIXED_SENTENCES = ("confirm_who", "pay_today", "debt_intro", "id_fail", "no_other_terms", "change_in_app", "farewell",
-                   "continue_line", "safe_repeat", "text_message")
+                   "continue_line", "safe_repeat", "text_message", "recorded")
 DEFAULT_SENTENCES = {"continue_line": "Go on, please.", "safe_repeat": "Sorry, could you say that again?"}
 DEFAULT_HONESTY = ["recorded", "scheduled", "transferred", "booked", "confirmed"]
 # §11.5 defaults (source=default); a brief value overrides where it states one
@@ -168,7 +175,7 @@ CONTRACT_DATE_SAY = {("on_non_business_day", "say"): "<NAMED> is not a business 
                      ("on_before_earliest", "say"): "That date has already passed. Which day from today on would work for you?",
                      ("on_invalid", "say"): "Sorry, which exact date do you mean?"}
 CONTRACT_SENTENCES = {"no_other_terms": "I am sorry, there are no other terms.", "change_in_app": "You can change it in the mobile app.",
-                      "farewell": "Thank you, goodbye."}
+                      "farewell": "Thank you, goodbye.", "recorded": "Your promise is recorded."}
 # Generic instruction forms of a brief ("Say that you are ...", "Tell the customer to ...") -> the sentence they ask
 # for, by a fixed grammatical rewrite of the brief's own words (no new wording).
 DERIVE = {"debt_intro": (r"\bsay (?:that )?you are (calling from [^,;]+)", lambda m: "I am " + m.group(1)),
@@ -205,16 +212,21 @@ def _map_sentence_keys(p):
     sent, notes = p.setdefault("sentences", {}), []
     forms = [("confirm_who", lambda t: re.search(r"\{\w+\}", t) and t.rstrip().endswith("?")),
              ("pay_today", lambda t: t.rstrip().endswith("?") and re.search(r"\bpay\b", t, re.I) and re.search(r"\btoday\b", t, re.I)),
+             ("recorded", lambda t: not t.rstrip().endswith("?") and re.search(r"\b(recorded|saved|registered|logged)\b", t, re.I)),
              ("text_message", lambda t: not t.rstrip().endswith("?") and re.search(r"confirm", t, re.I)
               and re.search(r"\b(text|sms|email|message|sent|send|receive)\b", t, re.I)),
              ("farewell", lambda t: re.search(r"\b(goodbye|bye)\b", t, re.I))]
+    used = {v.get("mapped_from") for v in sent.values() if isinstance(v, dict) and v.get("mapped_from")}
+    used |= {k for k in FIXED_SENTENCES if isinstance(sent.get(k), dict) and sent[k].get("text")}
     for key, form in forms:
         if isinstance(sent.get(key), dict) and sent[key].get("text"):
             continue
-        hits = [(k, v) for k, v in sent.items() if k not in FIXED_SENTENCES and isinstance(v, dict) and v.get("text") and form(v["text"])]
-        if hits:
+        hits = [(k, v) for k, v in sent.items() if k not in FIXED_SENTENCES and k not in used and isinstance(v, dict)
+                and v.get("text") and form(v["text"])]
+        if hits:   # one extractor sentence fills one key only, so the same line is never spoken twice
             k, v = hits[0]
             sent[key] = dict(v, mapped_from=k)
+            used.add(k)
             notes.append(f"sentence {key} <- extractor id {k!r}")
     return notes
 
@@ -318,6 +330,12 @@ def to_reducer(policy, oas_path, stable_unmapped=None):
     slots = {"unclear": row(*WHO_CUES["unclear"]), "declined": row("declin\\w*"), "id_failed": row("fail\\w*"),
              "busy": row("busy", "voicemail"), "callback_failed": row("no callback"),
              "write_failed": row("service\\w*", "error")}
+    # promise / paid slots: reason-less rows told apart by their `when` text (a success row vs an already-paid row)
+    nulls = [r for r in live if not r["reason"]]
+    paid_row = next((r for r in nulls if re.search(r"\b(paid|settled|already)\b", str(r.get("when", "")) + " " + str(r["outcome"]), re.I)), None)
+    promise_row = next((r for r in nulls if r is not paid_row and re.search(r"\b(promise|arrangement|recorded|saved|agreed)\w*", str(r.get("when", "")) + " " + str(r["outcome"]), re.I)), None) \
+        or next((r for r in nulls if r is not paid_row), None)
+    slots.update(promise=promise_row, paid=paid_row)
     cl["slots"] = {k: ({"outcome": v["outcome"], "reason": v["reason"]} if v else None) for k, v in slots.items()}
     # ---- identity: a required field outside the enum is BLOCKED; it is never skipped silently (safety rule 2)
     idn = p.setdefault("identity", {})
@@ -360,8 +378,22 @@ def to_reducer(policy, oas_path, stable_unmapped=None):
             qmap[sit] = v
     pre = [v for i, q in enumerate(tr.get("pre_verification_queues") or [])
            if (v := resolve(f"writes.transfer.pre_verification_queues[{i}]", q, "transfer_to_agent.queue", e_q))]
-    p["transfer"] = {"queue_map": qmap, "pre_verification_queues": pre,
-                     "source": w.get("source") or DEFAULT}
+    hr = p.get("human_request") or {}
+    if hr.get("applies_before_verification") and hr.get("queue"):
+        v = resolve("human_request.queue", hr["queue"], "transfer_to_agent.queue", e_q)
+        if v and v not in pre:
+            pre.append(v)
+    # queue_map keys are contract topics (restructure, human, hardship); the brief's own labels are mapped by name
+    qtopic = {}
+    for label, q in qmap.items():
+        kind, t = _topic_of({"topic": label})
+        qtopic[t if kind == "topic" else label] = q
+    if hr.get("queue") and "human" not in qtopic:
+        v = resolve("human_request.queue", hr["queue"], "transfer_to_agent.queue", e_q)
+        if v:
+            qtopic["human"] = v
+    p["transfer"] = {"queue_map": qtopic, "pre_verification_queues": pre,
+                     "source": (hr.get("source") or []) + (w.get("source") or []) or DEFAULT}
     if not tr.get("pre_verification_queues"):
         notes.append("transfer.pre_verification_queues not stated by the brief: empty (no transfer before verification)")
     nt = w.setdefault("notes", {})
@@ -382,6 +414,24 @@ def to_reducer(policy, oas_path, stable_unmapped=None):
     if (p.get("multi_product") or {}).get("applies"):
         tools["create_promise"]["on_fail"] = "continue"   # multi-product: that product fails with a note, the call continues
     p["tools"] = tools
+    # tool_args: the ONE table (computed by generator.arg_map) that both the generator (baked placeholders) and the
+    # reducer (written w_<tool>_<OAS field> variables) read. customer_id is the call variable, not in the table.
+    from builder.generator import CALL_VARS, arg_map, oas_tools
+    ta = {}
+    for tool, spec in oas_tools(oas_path).items():
+        amap, unmapped_req, _ = arg_map(tool, spec)
+        ta[tool] = {c: f for f, c in amap.items() if c not in CALL_VARS}
+        for f in unmapped_req:
+            mism.append({"policy_path": f"tool_args.{tool}", "value": f, "field": f"{tool}.body", "oas_enum": None,
+                         "action": "block (no canonical role for this required OAS field)"})
+    p["tool_args"] = ta
+    # tool_results: where the reducer reads each fact in the tool responses (exact OAS response fields)
+    from builder.oas_bindings import tool_results
+    tr_, missing = tool_results(oas_path, p)
+    p["tool_results"] = tr_
+    for tool, fact in missing:
+        mism.append({"policy_path": f"tool_results.{tool}.{fact}", "value": fact, "field": f"{tool}.response", "oas_enum": None,
+                     "action": "block (no unique OAS response field for this fact)"})
     # ---- events onto the contract topics, brief order = precedence
     evs, who, unknown = [], [], []
     for ev in p.get("events") or []:
@@ -392,9 +442,36 @@ def to_reducer(policy, oas_path, stable_unmapped=None):
             who.append(dict(ev, brief_topic=ev.get("topic"), **WHO_NORMAL[val]))
         else:
             unknown.append(ev.get("topic"))
+    # a fixed topic checklist from the extractor (every contract topic answered) replaces the free event list
+    tc = p.get("topic_checklist")
+    if isinstance(tc, dict) and tc:
+        order = [e_["topic"] for e_ in evs] + [t for t in TOPIC_ORDER if t not in [e_["topic"] for e_ in evs]]
+        evs, absent = [], []
+        for t in order:
+            it = tc.get(t) or {}
+            if t not in TOPIC_ORDER or t in [e_["topic"] for e_ in evs]:
+                continue
+            if not it.get("present"):
+                absent.append(t)
+                continue
+            evs.append({"topic": t, "brief_topic": t, "precedence": len(evs), "say": it.get("say", ""), "effect": it.get("effect", ""),
+                        "outcome": it.get("outcome") or "", "reason": it.get("reason") or "", "note_reason": it.get("note_reason") or "",
+                        "source": it.get("source") or DEFAULT})
+        p["topics_absent"] = absent
+        for i, ev in enumerate(evs):   # the checklist's tool values go through the same exact-enum rule
+            if ev.get("note_reason") and e_n and ev["note_reason"] not in e_n:
+                ev["note_reason"] = resolve(f"topic_checklist.{ev['topic']}.note_reason", ev["note_reason"], "add_note.reason", e_n) or ""
+            if ev.get("reason") and _enum(oas, "close_call", "reason") and ev["reason"] not in _enum(oas, "close_call", "reason"):
+                ev["reason"] = resolve(f"topic_checklist.{ev['topic']}.reason", ev["reason"], "close_call.reason", _enum(oas, "close_call", "reason")) or ""
     for t in V3_ALWAYS:
         if not any(e_["topic"] == t for e_ in evs):
             evs.append({"topic": t, "brief_topic": None, "precedence": len(evs), "source": DEFAULT})
+    # an event's `say` is speakable text: the brief's exact words (found in its own quotes) or empty, never effect prose
+    for ev in evs:
+        s_ = str(ev.get("say") or "").strip()
+        quotes = " ".join(str(x.get("quote") if isinstance(x, dict) else x) for x in (ev.get("source") or []))
+        if s_ and (_norm(s_.strip('"')) not in _norm(quotes) or INSTRUCTION.search(s_)):
+            ev["say_dropped"], ev["say"] = s_, ""
     # outcomes/reasons carried by event and who rules are sent to close_call too: same enum rule, same block
     for coll, name in ((evs, "events"), (who, "who_rules")):
         for i, ev in enumerate(coll):
@@ -404,6 +481,28 @@ def to_reducer(policy, oas_path, stable_unmapped=None):
                 ev["blocked"] = ev["outcome"] is None
                 if ev["outcome"] is None:
                     ev.pop("outcome")
+    # opening situations: a fixed checklist from the extractor (all six ids answered) beats the events-derived set
+    os_ = p.get("opening_situations")
+    if isinstance(os_, dict) and os_:
+        who, checklist = [], {}
+        for sid, (wv, party) in OPENING.items():
+            it = os_.get(sid) or {}
+            checklist[sid] = bool(it.get("present"))
+            if not it.get("present"):
+                continue
+            rule = {"who": wv, "party": party, "brief_topic": sid, "say": it.get("say", ""), "source": it.get("source") or DEFAULT,
+                    "effect_kind": {"callback": "callback"}.get(it.get("effect"), "") or ("no_callback" if "no_callback" in str(it.get("reason")) else "")}
+            o, r = it.get("outcome"), it.get("reason")
+            if o:
+                ov = resolve(f"opening_situations.{sid}.outcome", o, "close_call.outcome", e_out) if e_out else o
+                if ov:
+                    rule["outcome"] = ov
+                else:
+                    rule["blocked"], rule["brief_outcome"] = True, o
+            if r:
+                rule["reason"] = r
+            who.append(rule)
+        p["who_checklist"] = checklist
     p["events"], p["who_rules"] = evs, who
     if unknown:
         notes.append(f"event topics with no contract topic (kept out of the reducer, for review): {unknown}")
