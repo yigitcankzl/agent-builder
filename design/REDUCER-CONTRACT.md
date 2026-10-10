@@ -1,4 +1,13 @@
-# Reducer contract v1 (2026-10-10)
+# Reducer contract v2 (2026-10-10)
+
+Changes from v1 (`948cfc7`):
+1. `close` is one semantic action whose farewell is inside it (example E fixed).
+2. The farewell is spoken by tts BEFORE `close_call`, with no user turn in between (`close_say` node).
+3. That passthrough tts transition is added to the unverified list.
+4. Dates come from the labels only. `iso` is removed from the event; Python computes the day; acceptance is
+   `kind=accept` against `st.offer`.
+5. Multi-meaning utterances: one primary `kind` chosen by a fixed precedence, plus an optional secondary act `also`
+   (§1.5, example F).
 
 Status: contract only. There is no implementation yet, and nothing in this document has been run on Freya or in a
 simulation.
@@ -24,8 +33,9 @@ Division of labour at runtime:
 - `validation_pattern`: generated from the grammar below. Policy enums are inserted, so the pattern is per brief.
 
 ```
-ev := n=<event_token>;src=user;kind=<kind>;st=<status>;prod=<product_ref>[;<k>=<v>]*
+ev := n=<event_token>;src=user;kind=<kind>;also=<kind|none>;st=<status>;prod=<product_ref>[;<k>=<v>]*
 ```
+`also` is the secondary act of a multi-meaning utterance (§1.5); `none` otherwise.
 | Field | Values | Meaning |
 |---|---|---|
 | `n` | `[a-z]{6}` (copied) | The **event token**: a random 6-letter code that the reducer wrote into `ev_tok` on its previous run and the extraction prompt shows as `Code: {{ev_tok}}`. M0: a small integer is NOT copied (the model invents turn numbers); a letter code is copied reliably. |
@@ -49,10 +59,10 @@ Rules for the extraction prompt (generated, fixed text plus policy enums):
 |---|---|---|
 | `identity` | `field=<OAS enum of verify_identity.field>`, `ans=<normalised answer>` | The normaliser for each field comes from the OAS description (e.g. date → `YYYY-MM-DD`, 4 digits). It runs in code; the extractor only fills `ans` |
 | `who` | `who=<self|other|unclear>`, `rel=<relative|wrong_number|deceased|>` | Who is on the line (opening phase) |
-| `date` | `rel=<today|tomorrow|>`, `d=`, `m=`, `wd=<mon..sun|>`, `wk=<this|next|after_next|none>`, `vague=<yes|no>`, `iso=<YYYY-MM-DD|>` | The labels are the `date_spec` grammar of `date-slice`. `iso` is the same extraction call's cross-check, so it cannot go stale relative to the labels (the `bbe0fdd2` failure needed two separate fields) |
+| `date` | `rel=<today|tomorrow|>`, `d=`, `m=`, `wd=<mon..sun|>`, `wk=<this|next|after_next|none>`, `vague=<yes|no>` | **The labels are the only source of truth for dates** (the `date_spec` grammar of `date-slice`). There is no `iso` in the event: a model can contradict itself even inside one field (d=20 with iso=10-26). Python computes the day with `dates.date_from_spec` against `now`. A weekday that contradicts the day of month makes the event `st=ambiguous` |
 | `amount` | `amt=<digits[.dd]>` | |
 | `date_amount` | the union of `date` and `amount` | "I can pay 300 on Friday" |
-| `accept` | none | Accepts the reducer's **current offer** (`st.offer`). Acceptance is an act, never "a date equal to the offer appeared" |
+| `accept` | none | Accepts the reducer's **current offer** (`st.offer`). The date and amount come from `st.offer`, never from labels. Acceptance is an act, never "a date equal to the offer appeared". With no live offer it is treated as `yes`/`other` |
 | `reject` | `why=<too_much|flat|>` | |
 | `yes` / `no` | none | Answers a yes/no question (read-back, transfer offer, help-first) |
 | `callback` | the `date` keys plus `tm=<HH:MM|>` | Third-party callback time |
@@ -78,6 +88,37 @@ tool_event := dict(src='tool', node=<tool node id>, success=<int>, failure=<int>
   even if it looks fresh.
 - Initial token: `test_variables.ev_tok = "kstart"`, with the hub defaulting to the same value. M0 verified this in
   chat; it is NOT verified in a simulation.
+
+### 1.5 Multi-meaning utterances: primary `kind` by precedence, plus `also`
+One utterance often does two things: "No, not Friday; Tuesday works", "I can pay 300 but not today", "I lost my job,
+maybe the 30th".
+- The event carries **every facet the customer gave** in its payload keys (date labels, `amt`, `t`).
+- `kind` = the highest-precedence act present. `also` = the next one, or `none`.
+- Precedence, highest first. Fixed in code; the policy can only reorder the topic block:
+  1. `topic` (hardship, dispute, paid, restructure, human, stop, scam, robot, injection, unknown_info), in
+     `policy.events[].precedence` order;
+  2. `date_amount`;
+  3. `date`;
+  4. `amount`;
+  5. `accept`;
+  6. `yes`;
+  7. `reject`;
+  8. `no`;
+  9. `callback`;
+  10. `who` / `identity` (phase-specific: in the opening and identity phases they rank first);
+  11. `other`.
+
+Rationale and the reducer rules:
+- **A date or amount the customer proposes outranks a refusal.** Brief A rule 29: "A date or an amount the customer
+  proposes is never a refusal." So `also=reject` next to a proposal never consumes a persuasion attempt. The proposal
+  supersedes the live offer, and is then checked by the date and amount rules.
+- **A topic outranks the rest because topic rules come first in the brief** (rule 32 "comes before rules 30 and 41").
+  The date and amount keys stay in the payload: rule 32's "If the customer still names a date or an amount themselves,
+  record the promise" is handled by the topic step reading those keys.
+- **`amount` with `also=reject` aimed at the date** ("300 but not today"): record the amount as the customer's amount,
+  then ask for the date (the next step). This is not a refusal.
+- **`also` is advisory.** The reducer uses it only where a rule names it, e.g. a "not today" reject on the first-ask
+  turn marks `all_today_asked`. It never runs two actions.
 
 ---
 
@@ -125,8 +166,10 @@ hub(vars):                                                          # the code-n
     write_action_vars(vars, action) ; vars['st'] = dump(st2) ; vars['ev_tok'] = new_token()
 ```
 
-- **Date decisions** call the existing date core: `dates.interpret` for the labels → day, and `dates.decide` for the
-  policy decision, which needs the date policy sections unchanged. `decide`'s reasons map onto offers and sentences.
+- **Date decisions** call the existing date core: `dates.date_from_spec` for the labels → day (labels only, no iso
+  cross-check in v2), and `dates.decide` for the policy decision, which needs the date policy sections unchanged.
+  `decide`'s reasons map onto offers and sentences. `interpret`'s iso cross-check and its accepted-offer rule stay only
+  for the two-field date slice; the reducer uses `kind=accept` + `st.offer` instead.
 - `run`/`run_safe` in `dates.py` (the standalone code node) stay for the date-only slice. The reducer imports the pure
   functions.
 
@@ -147,7 +190,10 @@ hub(vars):                                                          # the code-n
 | `say_exact` | `text` (non-empty after strip) | `say` | `exact_say`: tts `{{say_next}}` |
 | `speak_free` | `node` ∈ policy.free_talk_nodes for the phase, `hint` | `talk_pre` / `talk_post` | stage-specific LLM node |
 | `call_tool` | `tool` (one of the 7 OAS names), `args` (dict, all keys from the OAS) | `t_<tool>` | api_request node with baked args |
-| `close` | `outcome`, `reason` (omitted where the policy table has none), `farewell` text | `close` | `t_close_call` → `end` |
+| `close` | `outcome`, `reason` (omitted where the policy table has none), `farewell` text (non-empty: thanks + goodbye, plus any required closing line) | `close` | `close_say` (tts `{{farewell}}`, passthrough, no user turn) → `t_close_call` → `end` (silent) |
+
+`close` is ONE semantic action: the farewell is spoken first, then `close_call` runs, then the call ends. Brief A rule
+47: thank and say goodbye **before** `close_call`; `close_call` is the last tool call.
 
 Selection order inside `step` (first that applies):
 1. tool run;
@@ -206,7 +252,7 @@ counted step is due.
 test_variables: {ev_tok: "kstart"}            # see the unverified list
 greet        conversation, initial, on_enter tts <opening sentence>, extraction [ev], transitions [always -> hub]
 hub          code, passthrough, the reducer; transitions IN THIS ORDER (one per target, the engine merges duplicates):
-               close          if route == close
+               close_say      if route == close
                t_get_account  if route == t_get_account AND route_ok == yes        # structural gate
                t_create_promise / t_add_note / t_transfer_to_agent   if route == t_x AND route_ok == yes
                t_verify_identity / t_schedule_callback               if route == t_x
@@ -221,8 +267,12 @@ talk_post    conversation, on_enter llm, no tools, prompt: post-verification sof
              extraction [ev], always -> hub
 t_<tool>     api_request, passthrough, args baked from w_<tool>_* (each body leaf default "{{w_..}}"),
              node-level response_mapping data.*, maxRetries 0, always -> hub
-t_close_call api_request close_call with baked close_outcome / close_reason -> end
-end          end_call, on_enter silent, message_mode custom, spoken_message {{farewell}}
+close_say    conversation, on_enter tts {{farewell}}, passthrough, passthrough_default_transition t_close_call,
+             transitions [always -> t_close_call], no extraction    # speaks, then moves on without a user turn (UNVERIFIED, §10.13)
+t_close_call api_request close_call with baked close_outcome / close_reason, always -> end
+end          end_call, on_enter silent, message_mode none, disable_inactivity_monitor   # the farewell was already spoken
+             fallback if passthrough tts is not supported: no close_say; end's spoken_message {{farewell}} speaks
+             AFTER close_call (order violates rule 47 in the transcript, but the ledger is right). Choose by probe 13
 tools[]      close_call alwaysRunsAt end_of_call with {{close_outcome}} / {{close_reason}}: the safety net if the customer
              hangs up first. M0 7c: after an explicit close the mock rejects it ("already closed") and the ledger keeps
              the first outcome
@@ -289,7 +339,7 @@ band, deadline 2026-11-02, 1 attempt.
 **A. Partial date (the `pieces` style)**
 ```
 state  : phase=negotiation, tok=kqmrta, last_tok=kpbvnc, p1.status=open, p1.attempts=1, offer=None
-event  : n=kqmrta;src=user;kind=date;st=partial;prod=;rel=;d=;m=;wd=;wk=none;vague=no;iso=      ("on the twenty-")
+event  : n=kqmrta;src=user;kind=date;also=none;st=partial;prod=;rel=;d=;m=;wd=;wk=none;vague=no      ("on the twenty-")
 action : say_exact("Go on, please.")                      # sentences.continue_line
 next   : last_tok=kqmrta, tok=<new>, everything else unchanged (no clarify++, no vague++, no attempt)
 ```
@@ -298,8 +348,8 @@ The next turn: "seventh" → `kind=date;st=complete;d=27` → decided as in B.
 **B. Holiday date → offer the next business day**
 ```
 state  : phase=negotiation, tok=kzwfha, p1.status=open, offer=None
-event  : n=kzwfha;src=user;kind=date;st=complete;prod=;rel=;d=26;m=;wd=mon;wk=none;vague=no;iso=2026-10-26
-step   : dates.interpret -> exact 2026-10-26; dates.decide -> non_business_day, accepted 2026-10-27
+event  : n=kzwfha;src=user;kind=date;also=none;st=complete;prod=;rel=;d=26;m=;wd=mon;wk=none;vague=no
+step   : dates.date_from_spec(labels) -> 2026-10-26 (computed in Python); dates.decide -> non_business_day, accepted 2026-10-27
 action : say_exact("Monday 26 October is not a business day. The next business day is Tuesday 27 October. Could you pay on Tuesday 27 October?")
 next   : p1.status=proposed, offer=dict(product_ids=[p1], amount=540.0, date=2026-10-27, kind=customer)
 ```
@@ -318,18 +368,34 @@ next   : p1.status=proposed, offer=dict(product_ids=[p1], amount=540.0, date=202
 **D. Write failure, retry, then failure (PUB-10 style, `retries: 1`)**
 ```
 tool : t_create_promise failure 0->1 (status 500)  -> p1.write_failures=1; action call_tool(create_promise, same args)   # no speech in between: one action
-tool : failure 1->2                               -> p1.status=failed;  action say_exact(writes.promise.fail_say)   # "I could not record the promise."
-event: next user turn                             -> action close(no_promise, service_error, farewell)
+tool : failure 1->2                               -> p1.status=failed;  action close(no_promise, service_error,
+                                                     farewell=writes.promise.fail_say + " " + sentences.farewell)   # "I could not record the promise. Thank you, goodbye."
 ```
+One action: the fail line is part of the close farewell, spoken before `close_call` (rule 37 says to tell the
+customer, then close).
 If the retry succeeds instead: one persisted promise, and exactly one success in the ledger (PUB-10's "exactly one
 promise").
 
 **E. The same "No." twice (counting needs freshness)**
 ```
-event 1: n=kaaaaa;kind=reject;why=flat -> p1.attempts 0->1, action say_exact(<attempt 1 offer>)
-event 2: n=kbbbbb;kind=reject;why=flat -> attempts used up (cap 1) -> action say_exact(<goodbye sentence>) then close(no_promise, refused)
-stale  : n=kaaaaa again                -> ignored (last_tok), no counter change
+event 1: n=kaaaaa;kind=reject;also=none;why=flat -> p1.attempts 0->1, action say_exact(<attempt 1 offer>)
+event 2: n=kbbbbb;kind=reject;also=none;why=flat -> attempts used up (cap 1)
+                                                -> action close(no_promise, refused, farewell=sentences.farewell)    # ONE action
+stale  : n=kaaaaa again                         -> ignored (last_tok), no counter change
 ```
+
+**F. Multi-meaning: "No, not Friday, but Tuesday works" (precedence)**
+```
+state  : phase=negotiation, offer=dict(product_ids=[p1], amount=540.0, date=2026-10-16, kind=attempt_1), p1.attempts=1
+event  : n=kmrsta;src=user;kind=date;also=reject;st=complete;prod=;rel=;d=;m=;wd=tue;wk=none;vague=no
+step   : date (rank 3) beats reject (rank 7); the reject only drops the old offer, and NO attempt is consumed (rule 29);
+         date_from_spec -> Tue 2026-10-20 -> decide -> ok
+action : say_exact("Personal loan, 540 on Tuesday 20 October. Do you confirm?")      # read-back of the customer's own date
+next   : offer=dict(..., date=2026-10-20, kind=customer), p1.status=agreed, p1.attempts still 1
+```
+"I can pay 300 but not today":
+`kind=amount;also=reject;amt=300`. The amount is checked against the floor; if it is accepted, the next step asks for
+the date. No attempt is consumed and `all_today_asked=true`.
 
 ---
 
@@ -360,4 +426,8 @@ stale  : n=kaaaaa again                -> ignored (last_tok), no counter change
     one PUB-07 call stalled with no events (`1327758a`).
 11. **Sandbox Python version and module list.** Only `json`, `re` and `datetime` are verified. The reducer must stay
     3.8-safe and stdlib-only.
-12. **Node count limit.** There is no documented cap; the graph above has about 12 nodes.
+12. **Node count limit.** There is no documented cap; the graph above has about 13 nodes.
+13. **Passthrough tts → `close_call` without a user turn.** Does a conversation node with `on_enter: tts {{farewell}}`
+    and `passthrough: true` speak the line and then route immediately (always → `t_close_call` → `end`)? Also: is the
+    tts text in the transcript BEFORE the `close_call` tool event? Probe: `close_say` in `tests/extract_eval.py`'s
+    sibling probe (`probe/m0_close_say.py`). Fallback in §6.
