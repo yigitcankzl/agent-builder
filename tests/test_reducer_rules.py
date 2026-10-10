@@ -504,7 +504,45 @@ def offer_echo_accepts():
     return True
 
 
+def multi_date_rules():
+    """raw-2 live: (surface PUB-11 6d842b96) one summed amt (935) for three products went to every product -> each
+    product keeps its own amount, a product refused on our offers revives on the customer's all-products date, names
+    are distinct; (PUB-11) a holiday named for all products is said before the read-back. A write answered 200 with
+    ok:false is a failure, never 'recorded'."""
+    import json
+    pol = json.load(open(os.path.join(ROOT, "tests/generated/rehearsal/raw-2.reducer_policy.json")))
+    cv = dict(customer_id="c_r11", first_name="Sofia", last_name="Almeida", title="Ms", now=NOW)
+    acc = [dict(product_id="p1", type="credit_card", past_due=220.0, days_late=9, minimum_payment=66.0),
+           dict(product_id="p2", type="personal_loan", past_due=640.0, days_late=9, instalment_amount=213.0),
+           dict(product_id="p3", type="car_loan", past_due=75.0, days_late=3, instalment_amount=25.0)]
+    st = R.init_state(pol, cv)
+    st, a = say(pol, st, "kind=who;also=none;st=complete;prod=;who=self;party=")
+    st, a = say(pol, st, "kind=identity;also=none;st=complete;prod=;field=date_of_birth;ans=1987-06-03;y=1987")
+    st, a = tool(pol, st, dict(verified=True, all_verified=False, wrong_answers_left=3))
+    st, a = say(pol, st, "kind=identity;also=none;st=complete;prod=;field=phone_last4;ans=2288")
+    st, a = tool(pol, st, dict(verified=True, all_verified=True, wrong_answers_left=3))
+    st, a = tool(pol, st, dict(products=acc))
+    names = [pd["name"] for pd in st["_pd"]]
+    check(len(set(names)) == 3, f"distinct product names: {names}")
+    s0 = R.json.loads(R.json.dumps(st))
+    st, a = say(pol, st, "kind=reject;also=none;st=complete;prod=all;why=flat")
+    st, a = say(pol, st, "kind=reject;also=none;st=complete;prod=;why=flat;rel=;d=;m=;wd=wed;wk=none;vague=no")
+    st, a = say(pol, st, "kind=date;also=amount;st=complete;prod=all;rel=;d=20;m=10;wd=tue;wk=none;vague=no;amt=935;y=2026")
+    check(st["q"] == "readback" and all(x in a["text"] for x in ("220.00", "640.00", "75.00")) and "935" not in a["text"], f"own amounts: {a}")
+    st, a = say(pol, s0, "kind=date;also=reject;st=complete;prod=all;rel=;d=19;m=10;wd=mon;wk=none;vague=no")
+    check(st["q"] == "readback" and "not a business day" in a["text"] and "20 October" in a["text"], f"the holiday said before the read-back: {a}")
+    # a write answered 200 with ok:false is a failure: retried, never 'recorded'
+    st, a = say(pol, st, "kind=yes;also=none;st=complete;prod=")
+    check(a["type"] == "call_tool" and a["tool"] == "create_promise", f"the first write: {a}")
+    p = st["pending"]
+    st, a = R.step(pol, st, None, dict(node=p["node"], success=p["snap_success"] + 1, failure=p["snap_failure"], status_code=200,
+                                       ok="false", data=dict(ok=False, error="rejected")), NOW, cv)
+    check(a["type"] == "call_tool" and a["tool"] == "create_promise" and "recorded" not in json.dumps(a), f"ok:false -> retry: {a}")
+    return True
+
+
 if __name__ == "__main__":
+    print("multi-product dates: own amounts, revive, holiday said, ok:false fails (raw-2 live):", multi_date_rules())
     print("the open offer's own amount/date accepts (biz-1 PUB-07):", offer_echo_accepts())
     print("hedged denial re-asks the name:", hedged_denial())
     print("close_call rejected -> one retry:", close_rejected())
