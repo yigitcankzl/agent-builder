@@ -121,6 +121,14 @@ def test_runtime_vars():
     check(v["date_route"] == "say" and "Tuesday 27 October" in v["say_next"] and "Monday 26 October" in v["say_next"], v["say_next"])
     E.run_safe(v, p)
     check(v["date_state"] == "same", "same extraction twice -> same")
+    # live failure (sim dd5bdf3c): customer accepts the offered 27th, date_iso follows, date_spec keeps the old 26th
+    v["date_iso"] = "2026-10-27"
+    E.run_safe(v, p)
+    check(v["date_status"] == "ok" and v["date_record"] == "2026-10-27" and v["date_route"] == "cont", ("accept offer", v))
+    # but a disagreement that is not the offered date is still unclear
+    v["date_iso"] = "2026-10-29"
+    E.run_safe(v, p)
+    check(v["date_status"] == "unclear", ("mismatch not an offer", v))
     v2 = {"now": "garbage", "date_iso": "x"}
     E.run_safe(v2, p)
     check(v2["date_status"] == "error" and v2["date_route"] == "cont", "never raises")

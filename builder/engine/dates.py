@@ -105,9 +105,11 @@ def date_from_spec(today, spec, policy):
     return None, 'none'
 
 
-def resolve(today, days_late, date_iso, date_spec, vague_count, policy):
+def resolve(today, days_late, date_iso, date_spec, vague_count, policy, last_offer=None):
     """Pure decision -> dict(status, named, record, deadline).
-    status: ok | non_business | after_deadline | past | vague | vague_final | unclear | none."""
+    status: ok | non_business | after_deadline | past | vague | vague_final | unclear | none.
+    last_offer: the date the agent last proposed (ISO). A customer accepting it changes date_iso but names nothing new,
+    so date_spec keeps its old labels; that disagreement is an acceptance, not an unclear date."""
     deadline = deadline_for(today, days_late, policy)
     cand, kind = date_from_spec(today, parse_spec(date_spec), policy)
     try:
@@ -115,6 +117,8 @@ def resolve(today, days_late, date_iso, date_spec, vague_count, policy):
     except ValueError:
         iso = None
     res = lambda st, named=None, rec=None: dict(status=st, named=named, record=rec, deadline=deadline)
+    if iso is not None and last_offer and iso.isoformat() == str(last_offer)[:10] and iso != cand:
+        cand, kind = iso, 'exact'
     if kind == 'invalid' or (kind == 'exact' and iso is not None and iso != cand):
         return res('unclear')
     if kind == 'none' and iso is not None:
@@ -155,7 +159,8 @@ def run(vars, policy):
     today = datetime.date.fromisoformat(str(vars.get(policy.get('now_var', 'now')))[:10])
     days_late = int(float(vars.get(policy.get('days_late_var', 'days_late')) or 0))
     vague_count = int(vars.get('date_vague_count') or 0)
-    r = resolve(today, days_late, vars.get('date_iso'), vars.get('date_spec'), vague_count, policy)
+    r = resolve(today, days_late, vars.get('date_iso'), vars.get('date_spec'), vague_count, policy,
+                last_offer=vars.get('date_record') or '')
     st = r['status']
     if st == 'vague':
         vars['date_vague_count'] = str(vague_count + 1)
