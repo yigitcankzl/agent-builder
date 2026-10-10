@@ -593,6 +593,14 @@ def normalise(ev, st):
         e['kind'] = 'callback'
     if e.get('kind') == 'other' and st['q'] == 'confirm_name':
         e['kind'], e['who'] = 'who', 'unclear'
+    # §1.5: in the opening a stated speaker ranks above any topic but injection (PUB-02 live: 'No, I'm her husband.
+    # What is this about?' came as t=purpose;also=who;who=other and was re-asked into an unclear close); in the security
+    # questions an answer ranks above any topic but injection. The topic stays as also_t (an answer topic is answered).
+    if e.get('kind') == 'topic' and e.get('t') != 'injection':
+        if st['phase'] == 'opening' and e.get('who') in ('self', 'other', 'unclear', 'handoff', 'busy'):
+            e['kind'], e['also_t'], e['also'] = 'who', e.get('t'), 'topic'
+        elif st['phase'] == 'identity' and str(e.get('ans') or '').strip() and str(st.get('q') or '').startswith('id_'):
+            e['kind'], e['also_t'], e['also'] = 'identity', e.get('t'), 'topic'
     a = e.get('also_t') or e.get('also')
     # only hardship (A32: before persuasion and restructuring) and injection outrank the primary event through also=;
     # any other also-topic never outranks a date / amount / accept / yes (a proposal is never a refusal, A29)
@@ -628,7 +636,17 @@ def step(policy, st, event, tool_event, now, call_vars=None):
                                        no_delta=True), today, cv)
     else:
         ev = normalise(event, st)
+        info = ev.get('also_t') if ev and ev.get('kind') != 'topic' and ev.get('also_t') in TOPIC_INFO else None
+        if info:       # PUB-04: a date (or any event) plus "are you a robot?": the event once, the answer line first
+            ev = dict(ev, also='none', also_t='')
         act = on_user(policy, st, ev, today, cv) if ev else resay(st)
+        if info:
+            line = info_line(policy, st, info)
+            if line:
+                st['_info_next'] = ((st.get('_info_next') or '') + ' ' + line).strip()
+    if st.get('_info_next') and act.get('type') in ('say_exact', 'close'):   # an answer line waits for a spoken line
+        key = 'text' if act['type'] == 'say_exact' else 'farewell'
+        act = dict(act, **dict([(key, (st.pop('_info_next') + ' ' + (act.get(key) or '')).strip())]))
     if act.get('type') == 'say_exact' and not str(act.get('text') or '').strip():
         act = dict(type='say_exact', text=sentence(policy, 'safe_repeat', D_SAFE))
     # never loop on one tts line: the same words more than RESAY_CAP + 1 times in a row break the loop by stage
@@ -1329,6 +1347,15 @@ def attach_hooks(policy, st, act):
     return dict(act, text=act['text'].strip() + ' ' + add)
 
 
+def info_line(policy, st, t):
+    """The answer line of an answer topic (robot, scam, unknown_info: the brief's say; terms: the no-other-terms line
+    at most once, never 'I am sorry' unless the brief says it)."""
+    if t == 'terms':
+        st['_terms_n'] = st.get('_terms_n', 0) + 1
+        return brief_sentence(policy, 'no_other_terms', D_NO_TERMS) if st['_terms_n'] == 1 else ''
+    return (event_row(policy, t) or dict()).get('say') or ''
+
+
 def loop_break(policy, st, today, cv):
     """The on-cap action of every open question (contract default; never free talk, never a tts loop).
     Before verification: a permitted transfer for a help-first loop, else a safe close on the stage's slot.
@@ -1386,11 +1413,7 @@ def topic_event(policy, st, ev, today, cv):
             act = dict(act, farewell=line + ' ' + act['farewell'])
         return act
     if t in TOPIC_INFO:
-        if t == 'terms':     # the no-other-terms line at most once, never "I am sorry" unless the brief says it
-            st['_terms_n'] = st.get('_terms_n', 0) + 1
-            line = brief_sentence(policy, 'no_other_terms', D_NO_TERMS) if st['_terms_n'] == 1 else ''
-        else:
-            line = (event_row(policy, t) or dict()).get('say') or ''
+        line = info_line(policy, st, t)
         if st['phase'] == 'opening':
             return reask_name(policy, st, cv, line)
         if st.get('verified') == 'yes' and ev.get('also') in SUBSTANTIVE:

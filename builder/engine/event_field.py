@@ -65,6 +65,8 @@ def field(vocab):
         "also=none;st=complete;prod=;rel=tomorrow;d=;m=;wd=;wk=none;vague=no;tm=11:00\n"
         "code kvmlqs, an answering machine or voicemail greeting -> n=kvmlqs;src=user;kind=who;also=none;st=complete;prod=;"
         "who=unclear;party=\n"
+        "code kbhwzt, in the opening 'No, I'm her husband. What is this about?' -> n=kbhwzt;src=user;kind=who;also=none;"
+        "st=complete;prod=;who=other;party=relative\n"
         "code kndrqa, at a read-back the customer says 'that is not what I agreed' -> n=kndrqa;src=user;kind=no;also=none;"
         "st=complete;prod=\n"
         "code khsnmw, 'could you take 200 as a discount' -> n=khsnmw;src=user;kind=topic;also=amount;st=complete;prod=;t=terms;"

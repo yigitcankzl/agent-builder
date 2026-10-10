@@ -188,7 +188,58 @@ def pub06_and_malformed():
     return True
 
 
+def answer_and_event():
+    """PUB-04 live (f65d8706): a date and 'are you a robot?' in one message, in both orders. The robot line is said
+    first, the date is processed exactly once (same state as the date alone: attempts, counters, offer)."""
+    for name, pol in POL.items():
+        robot = (R.event_row(pol, "robot") or {}).get("say") or ""
+        check(robot, f"{name}: policy has a robot line")
+        for date_body in ("kind=date;%s;st=complete;prod=;rel=;d=16;m=10;wd=;wk=none;vague=no",
+                          "kind=date;%s;st=complete;prod=;rel=;d=6;m=11;wd=;wk=none;vague=no",     # after the deadline
+                          "kind=date;%s;st=complete;prod=;rel=;d=17;m=10;wd=;wk=none;vague=no"):   # a Saturday
+            st0, _ = to_statement(pol)
+            st0, _ = say(pol, st0, "kind=no;also=none;st=complete;prod=")     # an open attempt
+            ref_st, ref = say(pol, R.json.loads(R.json.dumps(st0)), date_body % "also=none")
+            for body in (date_body % "also=robot",
+                         "kind=topic;also=date;st=complete;prod=;t=robot;" + (date_body % "x").split(";st=complete;prod=;")[1]):
+                st, a = say(pol, R.json.loads(R.json.dumps(st0)), body)
+                check(a["type"] == ref["type"] == "say_exact" and a["text"] == (robot + " " + ref["text"]),
+                      f"{name} {body}: {a} vs {ref}")
+                for k in ("products", "counters", "offer", "q", "readback"):
+                    check(st[k] == ref_st[k], f"{name} {body}: {k} differs: {st[k]} vs {ref_st[k]}")
+        # an identity answer plus the robot question: the line waits for the next spoken line
+        st = R.init_state(pol, CV)
+        st, a = say(pol, st, "kind=who;also=none;st=complete;prod=;who=self;party=")
+        st, a = say(pol, st, "kind=identity;also=robot;st=complete;prod=;field=date_of_birth;ans=1990-01-01")
+        check(a["type"] == "call_tool", f"{name}: identity still verified: {a}")
+        st, a = tool(pol, st, dict(verified=True, all_verified=False, wrong_answers_left=3))
+        check(a["text"].startswith(robot), f"{name}: robot answer after the tool: {a}")
+    return True
+
+
+def pub02_live():
+    """PUB-02 live (07083f88): 'No, this is her husband. What is this call...' labelled t=purpose;also=who;who=other;
+    party=relative twice. The speaker ranks first in the opening: the callback question, no close, nothing disclosed.
+    Also: an identity answer labelled as a topic in the security questions is still the answer."""
+    for name, pol in POL.items():
+        cv = dict(customer_id="c_p2", first_name="Ana", last_name="Costa", title="Ms", now=NOW)
+        st = R.init_state(pol, cv)
+        st["tok"] = "kstart"
+        e = R.parse_event("n=kstart;src=user;kind=topic;also=who;st=complete;prod=;t=purpose;who=other;party=relative", st, TOPICS)
+        st, a = R.step(pol, st, e, None, NOW, cv)
+        check(a["type"] == "say_exact" and st["phase"] == "third_party" and "when" in a["text"].lower(), f"{name} PUB-02: {a}")
+        for w in ("debt", "payment", "overdue", "collections"):
+            check(w not in a["text"].lower(), f"{name} PUB-02 disclosed '{w}': {a}")
+        st = R.init_state(pol, CV)
+        st, a = say(pol, st, "kind=who;also=none;st=complete;prod=;who=self;party=")
+        st, a = say(pol, st, "kind=topic;also=identity;st=complete;prod=;t=purpose;field=date_of_birth;ans=1990-01-01")
+        check(a["type"] == "call_tool" and a["tool"] == "verify_identity", f"{name}: identity answer under a topic label: {a}")
+    return True
+
+
 if __name__ == "__main__":
+    print("PUB-02 live: speaker first in the opening:", pub02_live())
+    print("answer topic + event, both orders (PUB-04):", answer_and_event())
     print("PUB-06 minimum-this-Friday + malformed events:", pub06_and_malformed())
     for name, pol in POL.items():
         print("live fixes (PUB-05 precedence, stale, terms once, robot+date):", name, live_fixes(pol, name))
