@@ -25,7 +25,8 @@ import freya
 from builder.engine import event_field as EF
 
 STATE = os.path.join(ROOT, "tests", ".eval-agents.json")
-VOCAB = {"topics": ["hardship", "dispute", "paid", "restructure", "human", "stop", "scam", "robot", "injection", "unknown_info", "other"],
+VOCAB = {"topics": ["injection", "hardship", "dispute", "paid", "restructure", "human", "stop", "decline", "purpose", "scam",
+                    "robot", "unknown_info", "other"],
          "identity_fields": ["date_of_birth", "phone_last4"]}
 DATE_KEYS = ("rel", "d", "m", "wd", "wk", "vague")
 AMOUNT_KEYS = ("amt",)
