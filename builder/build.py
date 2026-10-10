@@ -107,6 +107,36 @@ MAIN_CAP_S = 15 * 60 + 90       # the main path's own cap; the rest of --budget-
 L3_SIGNALS = {"EXTRACT", "S2", "S5"}     # main-path failures the L3 writer may cover (never S0, S1 abort or GUARD: a late main build is never replaced)
 
 
+def _repro():
+    """What a re-run needs to reproduce this build: the code commit, the pinned model, the runtime."""
+    import platform, subprocess
+    from builder.policy_extract import MODEL
+
+    def git(*a):
+        try:
+            return subprocess.run(["git", "-C", ROOT, *a], capture_output=True, text=True, timeout=10).stdout.strip()
+        except Exception:
+            return ""
+    return {"commit": git("rev-parse", "HEAD") or "unknown", "branch": git("rev-parse", "--abbrev-ref", "HEAD"),
+            "dirty": bool(git("status", "--porcelain", "--untracked-files=no")), "model": MODEL,
+            "python": platform.python_version(), "argv": sys.argv[1:]}
+
+
+def _assumptions(rp, brep, result):
+    """The defaults the build used, what it could not place, and every open question - the trace's first block."""
+    rp, brep = rp or {}, brep or {}
+    notes = brep.get("notes") or []
+    return {"contract_defaults_used": [n for n in notes if "default" in n.lower()][:40],
+            "not_implemented_unplaced_hooks": [f"{u.get('why')}: {u.get('quote')}" for u in rp.get("unplaced_hooks") or []],
+            "not_implemented_unmapped_rules": [u.get("quote") for u in rp.get("unmapped_rules") or []],
+            "not_implemented_unmapped_topics": [f"{u.get('topic')}: {u.get('quote')}" for u in rp.get("unmapped_topics") or []],
+            "api_mismatch": [f"{m.get('field')} {m.get('value')!r}: {m.get('action')}" for m in brep.get("api_mismatch") or []],
+            "tools_blocked": [f"{t}: {v.get('why')}" for t, v in (rp.get("tool_status") or {}).items() if v.get("status") == "blocked"],
+            "examiner": (result or {}).get("examiner"),
+            "signals": [(result or {}).get("signal")] if (result or {}).get("signal") else [],
+            "s1_sources": (result or {}).get("s1") or []}
+
+
 def _save(freya_client, slot, wf, out_dir, trace, result, candidate):
     """The ONE save of a build (main or L3 candidate): save_workflow + export, traced."""
     if freya_client is None:
@@ -132,7 +162,10 @@ def build(briefs, openapi, slot=None, freya_client=None, out_dir="submission", t
     result = {"slot": slot, "trace": trace.path, "fallback_required": False}
     fb = [None]
 
+    state = {}      # the latest bridged policy and bridge report, for the assumptions block
+
     def finish(reason=None, code=0, signal=None, **extra):
+        trace.log("assumptions", **_assumptions(state.get("rp"), state.get("brep"), result))
         if not reason and fb[0]:
             fb[0].cancel()
             trace.log("fallback_selection", candidate="main", l3="cancelled")
@@ -168,6 +201,7 @@ def build(briefs, openapi, slot=None, freya_client=None, out_dir="submission", t
         return finish(f"engine not loaded: {e}", 3, "S0", next="fix the clone (no fallback)")
 
     trace.log("start", slot=slot, briefs=[os.path.basename(b.rstrip("/")) for b in briefs], runs=runs, budget_s=budget_s)
+    trace.log("reproducibility", **_repro())
     try:     # S0 before any model call: a clone without a loadable engine stops in seconds, not after extraction
         for mod, name in (("builder.engine.reducer", "hub_source"), ("builder.engine.event_field", "ev_field")):
             if not _load(mod, name):
@@ -248,6 +282,7 @@ def build(briefs, openapi, slot=None, freya_client=None, out_dir="submission", t
     wf = rp = None
     for k, pol in enumerate(attempt_order[:2]):
         rp, brep = to_reducer(pol, openapi, stable, brief_text)
+        state.update(rp=rp, brep=brep)
         trace.log("bridge", attempt=k + 1, api_mismatch=brep["api_mismatch"], notes=brep["notes"], schema_errors=brep["errors"],
                   topics=brep["events"], identity_blocked=(rp.get("identity") or {}).get("blocked"), hangup_default=rp.get("hangup_default"))
         mism = brep["api_mismatch"]
@@ -266,6 +301,7 @@ def build(briefs, openapi, slot=None, freya_client=None, out_dir="submission", t
             if any(r.get("accepted") for r in res.values()):
                 pol = apply_reextraction(pol, mism, res)
                 rp, brep = to_reducer(pol, openapi, stable, brief_text)
+                state.update(rp=rp, brep=brep)
                 trace.log("bridge", attempt="1-reextracted", api_mismatch=brep["api_mismatch"], notes=brep["notes"],
                           identity_blocked=(rp.get("identity") or {}).get("blocked"))
         try:

@@ -14,7 +14,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from builder.engine.date_policy import AMOUNT_RULES, DATE_RULES, bad_quotes, core_missing, validate
 from builder.oas import load_oas
 
-MODEL = os.environ.get("POLICY_MODEL", "")          # empty: the CLI's default model
+MODEL = os.environ.get("POLICY_MODEL", "claude-opus-5-5")   # pinned for reproducibility; POLICY_MODEL overrides
 TEXT_EXT = (".md", ".txt", ".eml", ".csv", ".json", ".yaml", ".yml")
 
 SCHEMA = r"""
