@@ -105,13 +105,16 @@ def tool_results(oas_path, policy, brief_text=None):
         need(tool, "ok", _pick(lv, ok_pred))
         if tool == "verify_identity":
             bools = [(p, v) for p, v in lv if _kind(v) == "boolean" and "verif" in p.lower()]
-            ve = None if bools else _verified_enum(lv, brief_text)
-            if ve:      # a string status: the reducer compares it with verified_value (contract decision, quote kept)
-                out.setdefault(tool, {}).update(verified_all="data." + ve[0], verified_this="data." + ve[0],
-                                                verified_value=ve[1], verified_quote=ve[2][:200])
+            is_all = lambda p, k, v: k.startswith("all") or ".all" in p
+            this_b = _pick(bools, lambda p, k, v: not is_all(p, k, v))
+            ve = None if this_b else _verified_enum(lv, brief_text)
+            if ve:      # a string status (contract decision): the reducer compares that path with verified_value
+                out.setdefault(tool, {}).update(verified_this="data." + ve[0], verified_value=ve[1], verified_quote=ve[2][:200])
+                all_b = _pick(bools, is_all)
+                out[tool]["verified_all"] = "data." + (all_b or ve[0])
             else:
-                need(tool, "verified_all", _pick(bools, lambda p, k, v: k.startswith("all") or ".all" in p) or _pick(bools, lambda p, k, v: True))
-                need(tool, "verified_this", _pick(bools, lambda p, k, v: not (k.startswith("all") or ".all" in p)))
+                need(tool, "verified_all", _pick(bools, is_all) or _pick(bools, lambda p, k, v: True))
+                need(tool, "verified_this", this_b)
             need(tool, "wrong_left", _pick(lv, lambda p, k, v: _kind(v) == "integer" and re.search(r"left|remain", k)))
             hint = _pick(lv, lambda p, k, v: "hint" in k)
             if hint:
