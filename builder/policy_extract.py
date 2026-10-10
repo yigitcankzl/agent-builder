@@ -73,9 +73,8 @@ Rules:
    winning and losing file, why, and the quote of the overriding text. Rules the newer file does not mention stay.
 4. Tool API: use the exact enum strings from the tool API below for tool fields (identity field, transfer queue, note
    reason, outcome, product type keys in products.*_by_type). Map prose wording and internal codes (a code list) to
-   the enum string with the SAME meaning. Never map to an enum value that means something else (for example a year
-   alone is not a full date; a postcode is not a phone number): then keep a short snake_case name of the material's own
-   term. When the material itself states an exact API value (in backticks, or an API column of a code list), keep that
+   the enum string with the SAME meaning. Never map to an enum value whose meaning differs even partly (a part of a
+   value is not the whole value): then keep a short snake_case name of the material's own term. When the material itself states an exact API value (in backticks, or an API column of a code list), keep that
    exact string even if the tool API below lists a different one; the build checks enums afterwards.
 5. closing.table lists every outcome/reason pair the material allows (reason null where none is sent).
 6. deadline.bands: one entry per band, with the persuasion attempts allowed in that band in `attempts`.
