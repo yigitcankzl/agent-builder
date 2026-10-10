@@ -42,9 +42,18 @@ if __name__ == "__main__":
     if sys.argv[1] == "--call":
         print(export(sys.argv[2], sys.argv[3], sys.argv[4]))
     else:
-        r = json.load(open(sys.argv[1]))
-        run = sys.argv[2] if len(sys.argv) > 2 else os.path.splitext(os.path.basename(sys.argv[1]))[0]
-        for rows in r.get("all_rows") or [r["rows"]]:
+        every = "--all" in sys.argv               # passes too (results/<run>/passes/), for the judge lint
+        args = [a for a in sys.argv[1:] if a != "--all"]
+        r = json.load(open(args[0]))
+        run = args[1] if len(args) > 1 else os.path.splitext(os.path.basename(args[0]))[0]
+        reps = r.get("all_rows") or [r["rows"]]
+        for k, rows in enumerate(reps):
             for row in rows:
-                if not row["pass"] and row.get("call_id"):
-                    print(export(row["call_id"], row["id"], run, row["failed"], row))
+                if row.get("call_id") and (every or not row["pass"]):
+                    path = export(row["call_id"], row["id"], run if len(reps) == 1 else f"{run}-rep{k + 1}", row["failed"], row)
+                    if row["pass"]:
+                        dst = path.replace(os.sep + "fails" + os.sep, os.sep + "passes" + os.sep)
+                        os.makedirs(os.path.dirname(dst), exist_ok=True)
+                        os.replace(path, dst)
+                        path = dst
+                    print(path)
