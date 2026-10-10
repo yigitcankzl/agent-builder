@@ -896,27 +896,6 @@ def identity_gate(p, brief_text):
     return g
 
 
-def bind_session_placeholders(p, brief_text):
-    """A placeholder in a spoken line that is not a declared call variable is bound to the session variable named by the
-    usual convention <x>_name (biz-1: {company} -> {company_name}) when the brief itself uses the word x; the variable
-    is added to meta.call_vars and noted as an assumption. Anything else is left for the placeholder lint (dropped)."""
-    cv = p.setdefault("meta", {}).setdefault("call_vars", {})
-    allowed = set(cv) | set(cv.values()) | set(CALL_ROLES)
-    texts = [v for v in (p.get("sentences") or {}).values() if isinstance(v, dict) and v.get("text")]
-    names = {m.group(1) for v in texts for m in _PH.finditer(v["text"]) if m.group(1) not in allowed}
-    notes = []
-    for x in sorted(names):
-        target = x if x.endswith("_name") else x + "_name"
-        if target in allowed or not re.search(r"\b" + re.escape(x.replace("_", " ")) + r"\b", str(brief_text or ""), re.I):
-            continue
-        cv[target] = target
-        allowed.add(target)
-        for v in texts:
-            v["text"] = re.sub(r"\{\{?\s*" + re.escape(x) + r"\s*\}?\}", "{" + target + "}", v["text"])
-        notes.append(f"ASSUMPTION: placeholder {{{x}}} bound to the session variable {target} (convention <x>_name; not declared by the brief)")
-    return notes
-
-
 def tool_status(p, oas_path):
     """{tool: {status: enabled|blocked|absent, why}}: a tool is blocked when the brief cannot call it with OAS values: identity
     blocked (verify_identity), a canonical write role with no OAS property, no queue that binds (transfer), no outcome
@@ -947,10 +926,65 @@ def tool_status(p, oas_path):
     return out
 
 
+# extractor sentence ids that name a contract key in other words -> the key the reducer reads
+SENTENCE_ALIASES = {"confirm_arrangement": "confirm_readback", "readback": "confirm_readback", "read_back": "confirm_readback",
+                    "confirm_promise": "confirm_readback", "confirm_details": "confirm_readback", "readback_question": "confirm_readback",
+                    "goodbye": "farewell", "closing": "farewell", "close": "farewell", "greeting": "opening", "intro": "opening",
+                    "identity_check": "confirm_who", "confirm_identity": "confirm_who", "who_check": "confirm_who",
+                    "ask_pay_today": "pay_today", "first_ask": "pay_today", "sms": "text_message", "sms_confirmation": "text_message",
+                    "promise_recorded": "recorded", "saved": "recorded", "condolences": "condolence"}
+
+
+def read_sentence_keys():
+    """The sentence keys something actually speaks: every literal key the reducer reads (sentence / brief_sentence /
+    sentences.get), the generator's greet/farewell/safe-repeat keys and the bridge's fixed keys."""
+    import inspect
+    from builder.engine import reducer
+    src = inspect.getsource(reducer)
+    keys = set(re.findall(r"(?:brief_)?sentence\(policy, '(\w+)'", src)) | set(re.findall(r"\bsq\.get\('(\w+)'\)", src))
+    return keys | {"opening", "greeting", "intro", "farewell", "farewell_generic", "goodbye", "safe_repeat", "confirm_who"} | set(FIXED_SENTENCES)
+
+
+def sentence_coverage(p):
+    """Every sentence the brief quotes must reach the call: a key that is read, the source of a mapped key, or a hook /
+    another read sentence with the same text. Anything else is NOT SPOKEN: a loud ASSUMPTION (the brief's exact
+    wording would be dropped silently)."""
+    sent = p.get("sentences") or {}
+    read = read_sentence_keys()
+    spoken = {str(v.get("text") or "").strip() for k, v in sent.items() if k in read and isinstance(v, dict)}
+    spoken |= {str(h.get("text") or "").strip() for h in p.get("hooks") or []}
+    # lines spoken by other policy parts: event / who-rule lines, the identity gate and the opening checks
+    spoken |= {str(e.get(f) or "").strip() for c in ("events", "who_rules", "extra_topics", "opening_checks")
+               for e in p.get(c) or [] if isinstance(e, dict) for f in ("say", "ask", "text")}
+    gate = (p.get("identity") or {}).get("gate") or {}
+    spoken |= {str(gate.get(f) or "").strip() for f in ("ask", "callback_ask")}
+    mapped = {v.get("mapped_from") for v in sent.values() if isinstance(v, dict)}
+    notes = []
+    for k, v in sent.items():
+        if k in read or k in mapped or not isinstance(v, dict) or not str(v.get("text") or "").strip():
+            continue
+        if all(isinstance(q, dict) and q.get("file") == "default" for q in v.get("source") or [{"file": "default"}]):
+            continue
+        t = v["text"].strip()
+        if any(t and (t in x or x in t) for x in spoken if x):
+            continue
+        v["not_spoken"] = True
+        notes.append(f"ASSUMPTION NOT SPOKEN: brief sentence {k!r} ({t[:70]!r}) lands on no key the agent reads")
+    return notes
+
+
 def _map_sentence_keys(p):
-    """Map the extractor's own sentence ids onto the fixed keys by the sentence's form (its text is kept verbatim)."""
+    """Map the extractor's own sentence ids onto the fixed keys: by name (SENTENCE_ALIASES), then by the sentence's
+    form (its text is kept verbatim)."""
     sent, notes = p.setdefault("sentences", {}), []
-    forms = [("confirm_who", lambda t: re.search(r"\{\w+\}", t) and t.rstrip().endswith("?")),
+    for k, key in SENTENCE_ALIASES.items():
+        v = sent.get(k)
+        if isinstance(v, dict) and v.get("text") and not (isinstance(sent.get(key), dict) and sent[key].get("text")):
+            sent[key] = dict(v, mapped_from=k)
+            notes.append(f"sentence {key} <- extractor id {k!r} (alias)")
+    forms = [("confirm_readback", lambda t: t.rstrip().endswith("?") and re.search(r"\bconfirm\b", t, re.I) and not re.search(r"\{\w+\}", t)
+              and not re.search(r"\b(name|speaking|date of birth|digits)\b", t, re.I)),
+             ("confirm_who", lambda t: re.search(r"\{\w+\}", t) and t.rstrip().endswith("?")),
              ("pay_today", lambda t: t.rstrip().endswith("?") and re.search(r"\bpay\b", t, re.I) and re.search(r"\btoday\b", t, re.I)),
              ("recorded", lambda t: not t.rstrip().endswith("?") and re.search(r"\b(recorded|saved|registered|logged)\b", t, re.I)
               and not re.search(r"\b(call|conversation)s? (is|are|will be|may be|is being) (being )?recorded\b", t, re.I)),
@@ -1457,6 +1491,7 @@ def to_reducer(policy, oas_path, stable_unmapped=None, brief_text=None):
             hnotes.append(f"sentence {sid}: honesty rewrite -> {txt!r}")
     p["hooks"], p["unplaced_hooks"] = hooks, unplaced
     hnotes += saved_line(p)
+    hnotes += sentence_coverage(p)
     notes += hnotes + [f"hook {u['id']} UNPLACED ({u['why']}): {u['quote'][:80]!r}" for u in unplaced]
     words =[x.lower() for x in (p.get("honesty_words") or {}).get("words") or []]
     if words and not any(x in DEFAULT_HONESTY for x in words):
@@ -1482,7 +1517,6 @@ def to_reducer(policy, oas_path, stable_unmapped=None, brief_text=None):
         p.setdefault("identity", {})["gate"] = gate
         notes.append(f"identity.gate: {gate['ask']!r}, on no {gate['on_no']!r}")
     p["tool_status"] = tool_status(p, oas_path)
-    notes += bind_session_placeholders(p, brief_text)
     if re.search(r"\b(do not|don't|never)\s+(say|mention|disclose|reveal|tell)\w*\s+(that\s+)?(you are|it is|you're)\s+(an?\s+)?"
                  r"(ai|assistant|digital assistant|bot|robot|automated|virtual)", str(brief_text or ""), re.I):
         p.setdefault("meta", {})["assistant_disclosure_forbidden"] = True

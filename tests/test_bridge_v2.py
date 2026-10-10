@@ -441,13 +441,28 @@ def close_enum():
           "validator 14 catches a non-enum extra_topics reason")
 
 
+def sentence_keys():
+    print("== the brief's sentences land on keys the agent reads; only real call variables are spoken")
+    p = copy.deepcopy(BASE)
+    p["sentences"] = dict(p.get("sentences") or {},
+                          confirm_arrangement={"text": "Do you confirm this arrangement?", "source": src("x")},
+                          odd_line={"text": "Our offices close at noon on Fridays.", "source": src("y")},
+                          confirm_who={"text": "Am I speaking with {first_name} {last_name}, the contact for {company}?", "source": src("z")})
+    rp, rep = B.to_reducer(p, OAS, [], "Say: Am I speaking with {first_name} {last_name}, the contact for {company}?")
+    check(rp["sentences"]["confirm_readback"]["text"] == "Do you confirm this arrangement?", "confirm_arrangement -> confirm_readback (alias)")
+    check(any("NOT SPOKEN" in n and "odd_line" in n for n in rep["notes"]), "a quoted sentence no key reads is a loud NOT SPOKEN note")
+    g = generate(rp, OAS)["nodes"]["greet"]["on_enter"]["text"]
+    check("company" not in g and "{{first_name}}" in g, f"an undeclared placeholder is not bound by convention: {g!r}")
+    check("company_name" not in str((rp.get("meta") or {}).get("call_vars")), "call_vars stay the brief's own")
+
+
 def gap2_exact():
     q = {"field": "postcode", "format": "postcode", "format_evidence": {"source": src("Send the postcode exactly as said, letters and digits.")}}
     check(B.answer_format(q)[0] == "free", "'exactly as said' wins over the postcode format -> free")
 
 
 if __name__ == "__main__":
-    for g in (gap1, gap2, gap2_exact, gap3, gap4, regressions, derive_fixes, integration_fixes, honesty, bank_names, placeholders, too_much, rehearsal, assistant_disclosure, synthetic_fixes, close_enum):
+    for g in (gap1, gap2, gap2_exact, gap3, gap4, regressions, derive_fixes, integration_fixes, honesty, bank_names, placeholders, too_much, rehearsal, assistant_disclosure, synthetic_fixes, close_enum, sentence_keys):
         g()
     print("RESULT:", "PASS" if not fails else f"FAIL ({len(fails)})")
     sys.exit(1 if fails else 0)

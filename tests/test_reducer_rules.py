@@ -382,7 +382,7 @@ def identity_chatter():
         st, a = say(pol, st, "kind=who;also=none;st=complete;prod=;who=self;party=")
         for _ in range(R.ID_OTHER_CAP + 1):
             st, a = say(pol, st, "kind=other;also=none;st=none;prod=")
-        check(a["type"] == "close" and (a["outcome"], a["reason"]) == tuple(v["unclear"]), f"{name}: hard cap -> unclear: {a}")
+        check(a["type"] == "close" and (a["outcome"], a["reason"]) == tuple(R.id_unfinished(pol)), f"{name}: hard cap -> not verified (unfinished): {a}")
         st = R.init_state(pol, CV)
         st, a = say(pol, st, "kind=who;also=none;st=complete;prod=;who=self;party=")
         for _ in range(2):
@@ -438,7 +438,76 @@ def ev_bank_shapes():
     return True
 
 
+def close_rejected():
+    """Live nightmare-1 PUB-09: the mock rejected close_call ('this outcome needs one of these reasons: ...') and the
+    ledger was left empty. A rejected close is retried once with an allowed reason (contract-closest by family), then
+    the call ends; an accepted close ends at once; never a loop. Through the hub string."""
+    pol = POL["A"]
+    st = to_readback(pol)
+    st["q"], st["phase"] = "pay_today", "negotiation"
+    st, a = say(pol, st, "kind=topic;also=none;st=complete;prod=;t=stop")
+    st, a = say(pol, st, "kind=topic;also=none;st=complete;prod=;t=stop")
+    while a["type"] == "call_tool":
+        st, a = tool(pol, st, dict(ok=True))
+    check(a["type"] == "close", f"a close to reject: {a}")
+    code = compile(R.hub_source(pol), "hub", "exec")
+    base = dict(CV, st=R._dump(dict(st, _close_snap=[0, 0])))
+    v = dict(base, t_close_call_success_count=1, t_close_call_failure_count=0,
+             close_call_data=R.json.dumps(dict(ok=False, error="this outcome needs one of these reasons: dispute, hardship, service_error")))
+    exec(code, dict(vars=v))
+    check(v["route"] == "close_retry" and v["close_outcome"] == a["outcome"] and v["close_reason"] in ("dispute", "hardship", "service_error"),
+          f"one retry with an allowed reason: {v.get('route')} {v.get('close_outcome')} {v.get('close_reason')}")
+    v2 = dict(v, t_close_call_success_count=2)
+    exec(code, dict(vars=v2))
+    check(v2["route"] == "end", f"rejected again -> end, no loop: {v2.get('route')}")
+    v3 = dict(base, t_close_call_success_count=1, t_close_call_failure_count=0, close_call_data=R.json.dumps(dict(ok=True)))
+    exec(code, dict(vars=v3))
+    check(v3["route"] == "end", f"accepted -> end: {v3.get('route')}")
+    v4 = dict(base, t_close_call_success_count=0, t_close_call_failure_count=1, close_call_data="")
+    exec(code, dict(vars=v4))
+    check(v4["route"] == "close_retry" and v4["close_outcome"] == a["outcome"], f"an HTTP failure: one retry: {v4.get('route')}")
+    return True
+
+
+def hedged_denial():
+    """Fork 5 retest: 'I don't think so' to the name question came as wrong_number. The prompt now reserves
+    party=wrong_number for a clear statement; a hedged denial is who=unclear: the name is re-asked once, worded
+    differently, and the call is not closed."""
+    for name, pol in POL.items():
+        st = R.init_state(pol, CV)
+        st, a = say(pol, st, "kind=who;also=none;st=complete;prod=;who=unclear;party=")
+        check(a["type"] == "say_exact" and a["text"].startswith(R.D_JUST_CHECK) and st["phase"] == "opening", f"{name}: hedged -> re-ask: {a}")
+        st, a = say(pol, st, "kind=who;also=none;st=complete;prod=;who=other;party=wrong_number")
+        check(a["type"] == "close", f"{name}: a clear wrong number closes: {a}")
+    return True
+
+
+def offer_echo_accepts():
+    """biz-1 live PUB-07 (a6c54fef): offered 540 on Tuesday 20 October, 'Yes, I can pay the full 540' came as
+    kind=amount;amt=540 and the offer was re-proposed. The open offer's own amount, date, or date and amount is an
+    acceptance -> read-back. A different amount is still a proposal."""
+    for name, pol in POL.items():
+        st0 = to_readback(pol)
+        st0["q"], st0["phase"] = "pay_today", "negotiation"
+        st0["products"][0]["status"], st0["products"][0]["offer"] = "open", None
+        st0, a = say(pol, st0, "kind=no;also=none;st=complete;prod=")
+        o = st0["offer"]
+        check(st0["q"] == "offer" and o, f"{name}: an open offer: {a}")
+        y, m, d = o["date"].split("-")
+        for body in ("kind=amount;also=none;st=complete;prod=;amt=%s" % o["amount"],
+                     "kind=date;also=accept;st=complete;prod=;rel=;d=%d;m=%d;wd=;wk=none;vague=no" % (int(d), int(m)),
+                     "kind=date;also=amount;st=complete;prod=;rel=;d=%d;m=%d;wd=;wk=none;vague=no;amt=%s" % (int(d), int(m), o["amount"])):
+            x, a = say(pol, R.json.loads(R.json.dumps(st0)), body)
+            check(x["q"] == "readback" and "Do you confirm" in a["text"], f"{name}: {body} accepts: {a}")
+        x, a = say(pol, R.json.loads(R.json.dumps(st0)), "kind=amount;also=none;st=complete;prod=;amt=%s" % (float(o["amount"]) - 10))
+        check(x["q"] != "readback", f"{name}: a different amount is a proposal: {a}")
+    return True
+
+
 if __name__ == "__main__":
+    print("the open offer's own amount/date accepts (biz-1 PUB-07):", offer_echo_accepts())
+    print("hedged denial re-asks the name:", hedged_denial())
+    print("close_call rejected -> one retry:", close_rejected())
     print("ev bank shapes (date+amount, no, call time, quoted amount):", ev_bank_shapes())
     print("opening: account topics imply the customer (nightmare PUB-09 live):", opening_self_topics())
     print("identity chatter is not a refusal (clean-1 surface PUB-07):", identity_chatter())

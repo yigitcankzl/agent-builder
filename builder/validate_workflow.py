@@ -186,7 +186,11 @@ def validate(wf, rp, oas_path, unstable_quotes=()):
     if "t_create_promise" in nodes and not any(re.search(r"confirm", k + " " + t, re.I) for k, t in sent.items()):
         errs.append("5: no confirmation sentence in the policy before writes")
     # 6 closes
-    if [k for k, n in nodes.items() if "end" in _targets(n)] != ["t_close_call"]:
+    # the hub may also end, but only on route == end (after a close_call came back rejected: the close-retry path)
+    hub_end = [t for t in (nodes.get("hub") or {}).get("transitions") or [] if t.get("target_node") == "end"]
+    hub_end_ok = all([(c.get("variable"), c.get("operator"), c.get("operand")) for c in _flat_conds(t.get("condition"))]
+                     == [("route", "equals", "end")] for t in hub_end)
+    if [k for k, n in nodes.items() if "end" in _targets(n) and not (k == "hub" and hub_end_ok)] != ["t_close_call"]:
         errs.append(f"6: end is entered from {[k for k, n in nodes.items() if 'end' in _targets(n)]}, must be only t_close_call")
     if _targets(nodes.get("close_say", {})) and set(_targets(nodes["close_say"])) != {"t_close_call"}:
         errs.append("6: close_say must lead only to t_close_call")

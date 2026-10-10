@@ -122,6 +122,52 @@ def fail_twice(rep, got):
     return out
 
 
+def close_retry_cases():
+    """The end of the call with a close_call the bank rejects, on a freshly generated workflow (the generator's
+    close-retry edges): accepted -> end; rejected once -> one retry with an allowed reason and no second farewell;
+    rejected twice -> end, no loop; HTTP 500 once -> one retry; a stale close_ok never triggers a retry."""
+    from builder.generator import generate
+    oas_path = os.path.join(ROOT, "tests/generated/walk/openapi.json")
+    out = []
+    for cid in ("PUB-05", "PUB-01"):
+        c = dict((x["id"], x) for x in FIX["cases"])[cid]
+        rp = json.load(open(os.path.join(ROOT, "tests/e2e-hon/submission", ("brief-a" if c["policy"] == "A" else "brief-ab") + ".policy.json")))
+        wf = generate(rp, oas_path)
+        evs = [s["event"] for s in c["steps"] if s["source"] == "user"]
+        allowed = ["refused", "dispute", "service_error"]      # a mock never rejects a reason it lists
+        for name, plan, cv in (("accepted", [(200, dict(ok=True))], {}),
+                               ("rejected once", [(200, dict(ok=False, error="this outcome needs one of these reasons: " + ", ".join(allowed)))], {}),
+                               ("rejected twice", [(200, dict(ok=False, error="rejected"))] * 2, {}),
+                               ("HTTP 500 once", [(500, dict(error="injected"))], {}),
+                               ("stale close_ok=false", [(200, dict(ok=True))], dict(close_ok="false"))):
+            q = list(plan)
+            base = bank_for(c)
+
+            def bank(tool, body, q=q, base=base):
+                if tool == "close_call" and q:
+                    return q.pop(0)
+                return base(tool, body)
+            rep = walk(wf, OAS, dict(c["call_variables"], **cv), evs, bank)
+            probs = list(rep["errors"])
+            graph = [x for x in rep["calls"] if x["tool"] == "close_call" and x["node"] == "t_close_call"]
+            want = {"accepted": 1, "rejected once": 2, "rejected twice": 2, "HTTP 500 once": 2, "stale close_ok=false": 1}[name]
+            if len(graph) != want:
+                probs.append("graph close_call sent %d times, expected %d" % (len(graph), want))
+            if not rep["ended"]:
+                probs.append("the call did not reach end")
+            if rep["entered"].count("close_say") != 1:
+                probs.append("close_say (the farewell) entered %d times" % rep["entered"].count("close_say"))
+            if name == "rejected once" and len(graph) == 2 and graph[0]["body"].get("reason") and graph[1]["body"].get("reason") not in allowed:
+                probs.append("retried reason %r is not one the error allows" % graph[1]["body"].get("reason"))
+            if len(graph) == 2 and graph[1]["body"].get("outcome") != graph[0]["body"].get("outcome"):
+                probs.append("the retry changed the outcome")
+            life = [x for x in rep["calls"] if x["tool"] == "close_call" and x["node"] != "t_close_call"]
+            if life and graph and life[-1]["body"] != graph[-1]["body"]:
+                probs.append("the lifecycle close_call sends %s, the graph's last close %s" % (life[-1]["body"], graph[-1]["body"]))
+            out.append(("%s close %s" % (cid, name), probs, [(x["node"], x["status_code"], x["body"].get("outcome"), x["body"].get("reason")) for x in rep["calls"] if x["tool"] == "close_call"]))
+    return out
+
+
 def mutations():
     """The walker must catch planted wiring bugs (each on a copy of the A workflow, PUB-01)."""
     import copy
@@ -206,6 +252,11 @@ if __name__ == "__main__":
         bad += bool(probs)
         print(("PASS" if not probs else "FAIL") + " %s  calls=%s" % (name, [(x["tool"], x["status_code"]) for x in rep["calls"]]))
         for p in probs[:10]:
+            print("      ", p[:260])
+    for name, probs, closes in close_retry_cases():
+        bad += bool(probs)
+        print(("PASS" if not probs else "FAIL") + " %s  closes=%s" % (name, closes))
+        for p in probs[:6]:
             print("      ", p[:260])
     print("graph walk:", "all clean" if not bad else "%d case(s) with problems" % bad)
     for name, probs, robust in mutations():

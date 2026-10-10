@@ -241,6 +241,9 @@ DROP_EMPTY_REASON = ("try:\n    b = config.get('body')\n    if isinstance(b, dic
                      "            b.pop('reason', None)\nexcept Exception:\n    pass\n")
 
 
+CLOSE_RETRY = True      # a rejected close_call is retried once by the hub (graph_walk cases in tests/test_graph_walk.py)
+
+
 def hub_reset_code(tools):
     lines = ["try:", "    vars['route'] = 'stale'"]
     lines += [f"    if str(vars.get('w_go_{t}') or '') != 'go':\n        vars['w_go_{t}'] = 'done'" for t in tools]
@@ -330,11 +333,23 @@ def generate(rp, oas_path):
     for t in used:
         nodes["t_" + t] = _api_node(t, tools[t], "hub")
     if "close_call" in tools:
-        cc = _api_node("close_call", tools["close_call"], "end", args_prefix="close")
+        cc = _api_node("close_call", tools["close_call"], "end", args_prefix="close",
+                       extra_mapping=[{"path": "data.ok", "variable": "close_ok"}] if CLOSE_RETRY else ())
         # the graph's close node too: a promise/paid close sends no reason ('' would break a reason enum)
         cc["pre_actions"][0]["pre_process_code"] = DROP_EMPTY_REASON
+        if CLOSE_RETRY:
+            # a rejected close (an HTTP error or ok: false) goes back to the hub, which retries it once (route
+            # close_retry) or ends (route end); an accepted close ends here as before
+            cc["transitions"] = [{"target_node": "hub_reset", "description": "close_call rejected", "condition": {"logic": "or", "conditions": [
+                {"variable": "w_go_close_call", "operator": "equals", "operand": "error"},
+                {"variable": "t_close_call_failure_count", "operator": "greater_than", "operand": 0},
+                {"variable": "close_ok", "operator": "equals", "operand": "false"},
+                {"variable": "close_ok", "operator": "equals", "operand": "False"}]}}, _always("end")]
         nodes["t_close_call"] = cc
     hub_edges = [{"target_node": "close_say", "description": "close", "condition": _cond(("route", "close"))}]
+    if CLOSE_RETRY and "close_call" in tools:      # after a rejected close: retry without a second farewell, or end
+        hub_edges += [{"target_node": "t_close_call", "description": "close retry", "condition": _cond(("route", "close_retry"))},
+                      {"target_node": "end", "description": "end after the close", "condition": _cond(("route", "end"))}]
     if "transfer_to_agent" in used:
         pre_ok = bool((rp.get("transfer") or {}).get("pre_verification_queues"))
         alts = [{"logic": "and", "conditions": [{"variable": "route", "operator": "equals", "operand": "t_transfer_to_agent"},
