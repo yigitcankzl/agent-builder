@@ -153,7 +153,7 @@ def one(freya, wf_id, row):
             "s": round(time.time() - t0, 1), "lines": lines}
 
 
-def live(limit=None, conc=3):
+def live(limit=None, conc=3, sel_name="selection.jsonl", out_name="results.jsonl"):
     freya = _env()
     running = sims(freya)
     if running:
@@ -162,8 +162,8 @@ def live(limit=None, conc=3):
     print("dry run:", freya.validate_workflow("ev-bank", wf))
     ids = freya.save_workflow("ev-bank", wf, os.path.join(ROOT, "tests", ".platform-agents.json"))
     freya.save_workflow("ev-bank", wf, os.path.join(ROOT, "tests", ".platform-agents.json"))    # 2nd save sets the event model for chat
-    sel = [json.loads(l) for l in open(os.path.join(D, "selection.jsonl"))][:limit]
-    out = os.path.join(D, "results.jsonl")
+    sel = [json.loads(l) for l in open(os.path.join(D, sel_name))][:limit]
+    out = os.path.join(D, out_name)
     done = {json.loads(l)["id"] for l in open(out)} if os.path.exists(out) else set()
     todo = [r for r in sel if r["id"] not in done]
     with cf.ThreadPoolExecutor(conc) as ex, open(out, "a") as f:
@@ -180,7 +180,7 @@ def live(limit=None, conc=3):
         for fu in cf.as_completed(list(futs)):
             res = fu.result(); f.write(json.dumps(res) + "\n"); f.flush()
             print(("ok " if not res.get("diff") and not res.get("error") else "BAD"), res["id"], res["trap"], res.get("raw") or res.get("error"), flush=True)
-    report()
+    report(out_name, out_name.replace(".jsonl", ".md").replace("results", "report"))
 
 
 def rescore(labels, src="results.jsonl", dst="results_rescored.jsonl"):
@@ -228,4 +228,5 @@ if __name__ == "__main__":
     elif cmd == "rescore": rescore(sys.argv[2])
     elif cmd == "live":
         a = sys.argv[2:]
-        live(int(a[a.index("--limit") + 1]) if "--limit" in a else None, int(a[a.index("--conc") + 1]) if "--conc" in a else 3)
+        opt = lambda k, d: a[a.index(k) + 1] if k in a else d
+        live(int(opt("--limit", 0)) or None, int(opt("--conc", 3)), opt("--sel", "selection.jsonl"), opt("--out", "results.jsonl"))
