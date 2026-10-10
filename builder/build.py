@@ -120,7 +120,7 @@ def _save(freya_client, slot, wf, out_dir, trace, result, candidate):
 
 
 def build(briefs, openapi, slot=None, freya_client=None, out_dir="submission", trace_dir="traces", runs=2,
-          budget_s=25 * 60, extractor=extract, fallback=None):
+          budget_s=25 * 60, extractor=extract, fallback=None, examiner=None):
     """fallback: None, or a factory (briefs, openapi, log) -> an object with start/cancel/wait (fallback_llm.Fallback).
     It starts as soon as the sources are readable and is used only when the main path ends on an L3 signal."""
     t0 = time.time()
@@ -187,7 +187,9 @@ def build(briefs, openapi, slot=None, freya_client=None, out_dir="submission", t
         trace.log("fallback_started", candidate="llm")
     # 1. extraction runs, in parallel
     policies = []
-    with cf.ThreadPoolExecutor(runs) as ex:
+    with cf.ThreadPoolExecutor(runs + 1) as ex:
+        # the independent examiner (sees only the sources and the OAS) runs in parallel with the extractions
+        exam_f = ex.submit(examiner, briefs, openapi, trace, deadline) if examiner else None
         futs = [ex.submit(extractor, briefs, openapi, None, True, trace, deadline) for _ in range(runs)]
         for i, f in enumerate(futs, 1):
             try:
@@ -217,6 +219,20 @@ def build(briefs, openapi, slot=None, freya_client=None, out_dir="submission", t
         if still:
             lvl = "L3" if any(m.split(".")[0] in ("identity", "closing") for m in still) else "L2"
             return finish(f"core sections missing after re-extraction: {still}", 2, "S2", core_missing=still, next=lvl)
+    if exam_f is not None:     # Q1: compare with the examiner; each disagreement re-checked once (quotes, memo order)
+        try:
+            answers = exam_f.result()
+            trace.log("examiner", answered=sorted(answers))
+            if time.time() < deadline - 120:
+                from builder.examiner import reconcile
+                policies[0], erep = reconcile(policies[0], briefs, openapi, answers, trace, deadline, log=trace.log)
+            else:
+                from builder.examiner import disagreements
+                erep = {"disagreements": len(disagreements(policies[0], answers)), "skipped": "no time for the re-check"}
+            trace.log("examiner_result", **erep)
+            result["examiner"] = erep
+        except Exception as e:
+            trace.log("examiner", error=str(e)[:300])
     sigs = [core_signature(p) for p in policies]
     agree = len(set(sigs)) == 1
     trace.log("core_agreement", runs=len(policies), agree=agree,
@@ -309,6 +325,7 @@ def main():
     ap.add_argument("--out-dir", default=os.path.join(ROOT, "submission"))
     ap.add_argument("--trace-dir", default=os.path.join(ROOT, "traces"))
     ap.add_argument("--no-l3", action="store_true", help="do not start the L3 fallback writer (local tests)")
+    ap.add_argument("--no-examiner", action="store_true", help="do not run the independent examiner")
     a = ap.parse_args()
     *briefs, openapi = a.inputs
     if not briefs or not openapi.endswith(".json") or "paths" not in json.load(open(openapi)):
@@ -322,7 +339,12 @@ def main():
     if not a.no_l3:
         from builder import fallback_llm
         fallback = lambda b, o, log: fallback_llm.Fallback(b, o, log=log)
-    r = build(briefs, openapi, a.slot, client, a.out_dir, a.trace_dir, a.runs, int(a.budget_min * 60), fallback=fallback)
+    exam = None
+    if not a.no_examiner:
+        from builder.examiner import examine
+        exam = lambda b, o, sink, dl: examine(b, o, sink, dl)
+    r = build(briefs, openapi, a.slot, client, a.out_dir, a.trace_dir, a.runs, int(a.budget_min * 60), fallback=fallback,
+              examiner=exam)
     print(json.dumps({k: v for k, v in r.items()}, default=str))
     sys.exit(r["exit_code"])
 
