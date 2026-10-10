@@ -263,7 +263,10 @@ def validate(wf, rp, oas_path, unstable_quotes=()):
                 continue
             if not path_exists(oas_path, tool, path):
                 errs.append(f"13: tool_results.{tool}.{fact} = {path!r} is not in the OAS response schema")
-    for tool, fact in (("verify_identity", "verified_all"), ("get_account", "products"), ("get_account", "id"),
+    vi = (rp.get("tool_results") or {}).get("verify_identity") or {}
+    if "t_verify_identity" in nodes and not (vi.get("verified_all") or vi.get("verified_this")):
+        errs.append("13: tool_results.verify_identity has neither verified_all nor verified_this")
+    for tool, fact in (("get_account", "products"), ("get_account", "id"),
                        ("get_account", "past_due"), ("get_account", "days_late")):
         if "t_" + tool in nodes and fact not in (rp.get("tool_results") or {}).get(tool, {}):
             errs.append(f"13: tool_results.{tool}.{fact} is missing")

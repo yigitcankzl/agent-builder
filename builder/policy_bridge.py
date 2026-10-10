@@ -624,6 +624,36 @@ def callback_who_rules(p):
     return notes
 
 
+def tool_status(p, oas_path):
+    """{tool: {status: enabled|blocked|absent, why}}: a tool is blocked when the brief cannot call it with OAS values: identity
+    blocked (verify_identity), a canonical write role with no OAS property, no queue that binds (transfer), no outcome
+    that binds (close_call). One blocked value alone does not block a tool that can still send its other values."""
+    from builder.generator import CANONICAL, CALL_VARS, oas_tools
+    tools = oas_tools(oas_path)
+    ta = p.get("tool_args") or {}
+    out = {}
+    for t in CANONICAL:
+        if t not in tools:
+            out[t] = {"status": "absent", "why": "not in the OAS"}
+            continue
+        miss = [c for c in CANONICAL[t] if c not in CALL_VARS and c not in (ta.get(t) or {})]
+        why = None
+        if t == "verify_identity" and (p.get("identity") or {}).get("blocked"):
+            why = "identity blocked: " + ", ".join(map(str, (p["identity"]["blocked"] or {}).get("fields") or []))
+        elif miss and t != "close_call":
+            why = "no OAS property for role(s) " + ", ".join(miss)
+        elif t == "transfer_to_agent":
+            tr = p.get("transfer") or {}
+            if not (tr.get("queue_map") or tr.get("pre_verification_queues")):
+                why = "no brief queue binds to the OAS queue field"
+        elif t == "close_call":
+            live = [r for r in (p.get("closing") or {}).get("table") or [] if not r.get("blocked")]
+            if not live:
+                why = "no brief outcome binds to the OAS outcome field"
+        out[t] = {"status": "blocked" if why else "enabled", "why": why or ""}
+    return out
+
+
 def _map_sentence_keys(p):
     """Map the extractor's own sentence ids onto the fixed keys by the sentence's form (its text is kept verbatim)."""
     sent, notes = p.setdefault("sentences", {}), []
@@ -766,6 +796,13 @@ def to_reducer(policy, oas_path, stable_unmapped=None, brief_text=None):
             r["brief_outcome"] = r["outcome"]
             r["outcome"] = resolve(f"closing.table[{i}].outcome", r["outcome"], "close_call.outcome", e_out)
             r["blocked"] = r["outcome"] is None
+    e_rsn = _enum(oas, "close_call", "reason")
+    for i, r in enumerate(table):     # a reason the OAS reason enum lacks: exact or sourced alias, else the row is blocked
+        if e_rsn and r.get("reason") and r["reason"] not in e_rsn:
+            r["brief_reason"] = r["reason"]
+            r["reason"] = resolve(f"closing.table[{i}].reason", r["reason"], "close_call.reason", e_rsn)
+            if r["reason"] is None:
+                r["blocked"] = True
     by_outcome = {}
     for r in table:
         if not r.get("blocked"):
@@ -870,7 +907,7 @@ def to_reducer(policy, oas_path, stable_unmapped=None, brief_text=None):
     p["tools"] = tools
     # tool_args: the ONE table (computed by generator.arg_map) that both the generator (baked placeholders) and the
     # reducer (written w_<tool>_<OAS field> variables) read. customer_id is the call variable, not in the table.
-    from builder.generator import arg_map, arg_roles, oas_tools
+    from builder.generator import CALL_VARS, CANONICAL, arg_map, arg_roles, oas_tools
     ta, composed = {}, {}
     for tool, spec in oas_tools(oas_path).items():
         amap, unmapped_req, _ = arg_map(tool, spec)
@@ -879,6 +916,9 @@ def to_reducer(policy, oas_path, stable_unmapped=None, brief_text=None):
         for f in unmapped_req:
             mism.append({"policy_path": f"tool_args.{tool}", "value": f, "field": f"{tool}.body", "oas_enum": None,
                          "action": "block (no canonical role for this required OAS field)"})
+        for role in [c for c in CANONICAL.get(tool, []) if c not in CALL_VARS and c not in ta[tool]]:
+            mism.append({"policy_path": f"tool_args.{tool}.{role}", "value": role, "field": f"{tool}.{role}", "oas_enum": None,
+                         "action": "block (the canonical role has no request property; no other property stands in)"})
     p["tool_args"] = ta
     if composed:
         p["composed_fields"] = composed
@@ -1026,6 +1066,8 @@ def to_reducer(policy, oas_path, stable_unmapped=None, brief_text=None):
     p["unmapped_rules"] = [{k: u.get(k) for k in ("rule_id", "quote", "file", "phase_guess", "kind_guess")} for u in (stable_unmapped or [])]
     p.pop("unmapped", None)
     p["api_mismatch"] = mism
+    p["tool_status"] = tool_status(p, oas_path)
+    notes += [f"tool {t} BLOCKED: {v['why']}" for t, v in p["tool_status"].items() if v["status"] == "blocked"]
     report = {"api_mismatch": mism, "notes": notes, "errors": validate(p),
               "events": [(e_["brief_topic"], e_["topic"]) for e_ in evs], "who": [(x["brief_topic"], x["who"]) for x in who]}
     return p, report

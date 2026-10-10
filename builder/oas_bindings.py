@@ -104,16 +104,23 @@ def tool_results(oas_path, policy, brief_text=None):
         lv = leaves(s)
         need(tool, "ok", _pick(lv, ok_pred))
         if tool == "verify_identity":
-            bools = [(p, v) for p, v in lv if _kind(v) == "boolean" and "verif" in p.lower()]
+            # the verification booleans: named for verifying / passing / matching (never the generic ok/success flag)
+            bools = [(p, v) for p, v in lv if _kind(v) == "boolean" and re.search(r"verif|pass|match|correct", p, re.I)
+                     and p.split(".")[-1] not in ("ok", "success")]
             is_all = lambda p, k, v: k.startswith("all") or ".all" in p
             this_b = _pick(bools, lambda p, k, v: not is_all(p, k, v))
             ve = None if this_b else _verified_enum(lv, brief_text)
+            all_b = _pick(bools, is_all)
+            # verified_all binds only to its OWN field ('all...'): a single per-answer flag is never also read as 'all
+            # verified' (that would end identity after the first right answer); with no all-field it is omitted
             if ve:      # a string status (contract decision): the reducer compares that path with verified_value
                 out.setdefault(tool, {}).update(verified_this="data." + ve[0], verified_value=ve[1], verified_quote=ve[2][:200])
-                all_b = _pick(bools, is_all)
-                out[tool]["verified_all"] = "data." + (all_b or ve[0])
+                if all_b:
+                    out[tool]["verified_all"] = "data." + all_b
+            elif this_b and not all_b:
+                out.setdefault(tool, {})["verified_this"] = "data." + this_b
             else:
-                need(tool, "verified_all", _pick(bools, is_all) or _pick(bools, lambda p, k, v: True))
+                need(tool, "verified_all", all_b)
                 need(tool, "verified_this", this_b)
             need(tool, "wrong_left", _pick(lv, lambda p, k, v: _kind(v) == "integer" and re.search(r"left|remain", k)))
             hint = _pick(lv, lambda p, k, v: "hint" in k)

@@ -126,8 +126,8 @@ if __name__ == "__main__":
     sv = dump(os.path.join(tmp, "status.json"), status_variant(plain, "verified when every answer so far is correct"))
     rp3, _ = to_reducer(copy.deepcopy(POLICY), sv, [])
     t3 = rp3["tool_results"]["verify_identity"]
-    check(t3.get("verified_value") == "verified" and t3.get("verified_all") == "data.status" and t3.get("verified_quote"),
-          f"string status with a describing OAS -> verified_value + quote: {t3}")
+    check(t3.get("verified_value") == "verified" and t3.get("verified_this") == "data.status" and "verified_all" not in t3
+          and t3.get("verified_quote"), f"string status with a describing OAS -> verified_this + verified_value + quote, no all-field: {t3}")
     check(not [e for e in validate(generate(rp3, sv), rp3, sv) if e.startswith("13")], "validator 13 accepts verified_value")
     sv2 = dump(os.path.join(tmp, "status2.json"), status_variant(plain, "the outcome of the check"))
     rp4, rep4 = to_reducer(copy.deepcopy(POLICY), sv2, [])
