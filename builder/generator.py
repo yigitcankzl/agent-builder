@@ -88,7 +88,28 @@ def arg_map(tool, spec):
             m[cands[0]] = c
             left_c.remove(c)
             left_f.remove(cands[0])
+    # structural binding by the field's schema shape, only when exactly one remaining field fits
+    for c in list(left_c):
+        fit = SHAPES.get(c)
+        cands = [f for f in left_f if fit and fit(f, props[f] or {})]
+        if len(cands) == 1:
+            m[cands[0]] = c
+            left_c.remove(c)
+            left_f.remove(cands[0])
     return m, [f for f in left_f if f in req], left_c
+
+
+def _is_date(f, s):
+    return s.get("format") == "date" or "yyyy" in str(s.get("description", "")).lower() or bool(re.search(r"(date|_on$|day)", f))
+
+
+SHAPES = {"product_id": lambda f, s: f.endswith("_id") and s.get("type", "string") == "string" and not s.get("enum"),
+          "amount": lambda f, s: s.get("type") in ("number", "integer"),
+          "date": _is_date,
+          "time": lambda f, s: "hh:mm" in str(s.get("description", "")).lower() or "time" in f,
+          "field": lambda f, s: bool(s.get("enum")), "queue": lambda f, s: bool(s.get("enum")),
+          "reason": lambda f, s: bool(s.get("enum")) or "reason" in f, "outcome": lambda f, s: bool(s.get("enum")),
+          "answer": lambda f, s: s.get("type", "string") == "string" and not s.get("enum") and not _is_date(f, s)}
 
 
 def _api_node(tool, spec, target, args_prefix=None, extra_mapping=()):
@@ -130,6 +151,19 @@ def _soft_rules(rp, phase):
     return ("\nSoft rules from the brief:\n- " + "\n- ".join(rules)) if rules else ""
 
 
+def _compose_opening(meta):
+    """Self-introduction from the policy meta, without repeating the bank name if the description already has it."""
+    desc = (meta.get("agent_self_description") or "digital assistant").strip().rstrip(".")
+    bank = (meta.get("bank_name") or "").strip()
+    who = desc if (not bank or bank.lower() in desc.lower()) else f"{desc} of {bank}"
+    return f"Hello, this is {who if who.lower().startswith(('a ', 'an ', 'the ')) or bank.lower() in who.lower() else 'the ' + who}."
+
+
+def _call_var_placeholders(text, call_vars):
+    """{name}-style placeholders in a brief sentence -> the call-variable placeholders the engine substitutes."""
+    return re.sub(r"\{(\w+)\}", lambda m: "{{" + str(call_vars.get(m.group(1), m.group(1))) + "}}", text or "")
+
+
 def hub_reset_code(tools):
     lines = ["try:", "    vars['route'] = 'stale'"]
     lines += [f"    if str(vars.get('w_go_{t}') or '') != 'go':\n        vars['w_go_{t}'] = 'done'" for t in tools]
@@ -145,8 +179,11 @@ def generate(rp, oas_path):
     who0 = hd.get("before_who") or {}
     safe = _text(rp, "safe_repeat") or "Sorry, could you say that again?"
     farewell = _text(rp, "farewell", "farewell_generic", "goodbye") or "Thank you. Goodbye."
-    opening = _text(rp, "opening") or (
-        f"Hello, this is the {meta.get('agent_self_description') or 'digital assistant'} of {meta.get('bank_name') or 'the bank'}.").strip()
+    opening = _text(rp, "opening", "greeting", "intro") or _compose_opening(meta)
+    # the reducer counts the name question as already asked by greet (contract §12 choice 2): greet must say it
+    who_q = _call_var_placeholders(_text(rp, "confirm_who"), meta.get("call_vars") or {})
+    if who_q and who_q not in opening:
+        opening = (opening.rstrip() + " " + who_q).strip()
     id_enum = (tools.get("verify_identity", {}).get("props", {}).get("field") or {}).get("enum") or []
     ev, ev_src = ev_field(rp, id_enum)
     hub_src, hub_from = hub_code(rp)

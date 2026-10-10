@@ -46,7 +46,18 @@ WHO_CUES = {"handoff": ("hand", "handoff", "passes the phone", "gets the custome
             "other": ("someone else", "third party", "relative"), "unclear": ("unclear", "ambiguous"),
             "busy": ("busy", "voicemail", "answering machine"),   # v3.1: callback or t=stop, closing slot `busy`
             "callback": ("callback",)}
+# who_rules -> the contract vocabulary: who in {self, other, unclear, handoff, busy}; party in {relative,
+# wrong_number, deceased} (contract §1.2 payload words); callback / no_callback live in `effect`, never in `who`.
+WHO_VOCAB = ("self", "other", "unclear", "handoff", "busy")
+PARTY_VOCAB = ("relative", "wrong_number", "deceased", "")
+WHO_NORMAL = {"handoff": dict(who="handoff", party=""), "misdialled": dict(who="other", party="wrong_number"),
+              "deceased": dict(who="other", party="deceased"), "other": dict(who="other", party="relative"),
+              "unclear": dict(who="unclear", party=""), "busy": dict(who="busy", party=""),
+              "callback": dict(who="other", party="relative", effect_kind="callback")}
 V3_ALWAYS = ("decline", "purpose")          # §11.6: always present in the generated grammar
+# The fixed sentence keys every bridged policy carries (reducer interface); missing -> contract default or "" + note
+FIXED_SENTENCES = ("confirm_who", "pay_today", "debt_intro", "id_fail", "no_other_terms", "change_in_app", "farewell",
+                   "continue_line", "safe_repeat", "text_message")
 DEFAULT_SENTENCES = {"continue_line": "Go on, please.", "safe_repeat": "Sorry, could you say that again?"}
 DEFAULT_HONESTY = ["recorded", "scheduled", "transferred", "booked", "confirmed"]
 # §11.5 defaults (source=default); a brief value overrides where it states one
@@ -162,7 +173,10 @@ CONTRACT_SENTENCES = {"no_other_terms": "I am sorry, there are no other terms.",
 # for, by a fixed grammatical rewrite of the brief's own words (no new wording).
 DERIVE = {"debt_intro": (r"\bsay (?:that )?you are (calling from [^,;]+)", lambda m: "I am " + m.group(1)),
           "id_fail": (r"\btell (?:the customer|them) to (.+)$", lambda m: "Please " + m.group(1)),
-          "change_in_app": (r"say (?:that )?they can (change .+)$", lambda m: "You can " + m.group(1))}
+          "change_in_app": (r"say (?:that )?they can (change .+)$", lambda m: "You can " + m.group(1)),
+          # verbatim quoted questions in the brief (the words inside the quotes are kept exactly)
+          "pay_today": (r"[\"“]([^\"”]*\bpay\b[^\"”]*\btoday\?)[\"”]", lambda m: m.group(1)),
+          "confirm_who": (r"[\"“]([^\"”]*\{\w+\}[^\"”]*\?)[\"”]", lambda m: m.group(1))}
 
 
 def _all_quotes(p, stable):
@@ -184,6 +198,25 @@ def _walk_sources(x):
     elif isinstance(x, list):
         for v in x:
             yield from _walk_sources(v)
+
+
+def _map_sentence_keys(p):
+    """Map the extractor's own sentence ids onto the fixed keys by the sentence's form (its text is kept verbatim)."""
+    sent, notes = p.setdefault("sentences", {}), []
+    forms = [("confirm_who", lambda t: re.search(r"\{\w+\}", t) and t.rstrip().endswith("?")),
+             ("pay_today", lambda t: t.rstrip().endswith("?") and re.search(r"\bpay\b", t, re.I) and re.search(r"\btoday\b", t, re.I)),
+             ("text_message", lambda t: not t.rstrip().endswith("?") and re.search(r"confirm", t, re.I)
+              and re.search(r"\b(text|sms|email|message|sent|send|receive)\b", t, re.I)),
+             ("farewell", lambda t: re.search(r"\b(goodbye|bye)\b", t, re.I))]
+    for key, form in forms:
+        if isinstance(sent.get(key), dict) and sent[key].get("text"):
+            continue
+        hits = [(k, v) for k, v in sent.items() if k not in FIXED_SENTENCES and isinstance(v, dict) and v.get("text") and form(v["text"])]
+        if hits:
+            k, v = hits[0]
+            sent[key] = dict(v, mapped_from=k)
+            notes.append(f"sentence {key} <- extractor id {k!r}")
+    return notes
 
 
 def _derived_sentences(p, stable):
@@ -356,7 +389,7 @@ def to_reducer(policy, oas_path, stable_unmapped=None):
         if kind == "topic":
             evs.append(dict(ev, topic=val, brief_topic=ev.get("topic"), precedence=len(evs)))
         elif kind == "who":
-            who.append(dict(ev, who=val, brief_topic=ev.get("topic")))
+            who.append(dict(ev, brief_topic=ev.get("topic"), **WHO_NORMAL[val]))
         else:
             unknown.append(ev.get("topic"))
     for t in V3_ALWAYS:
@@ -378,7 +411,17 @@ def to_reducer(policy, oas_path, stable_unmapped=None):
     sent = p.setdefault("sentences", {})
     for sid, text in DEFAULT_SENTENCES.items():
         sent.setdefault(sid, {"text": text, "verbatim": True, "max_times": 99, "source": DEFAULT})
+    notes += _map_sentence_keys(p)
     notes += _derived_sentences(p, stable_unmapped or [])
+    for sid in FIXED_SENTENCES:
+        if sid not in sent:
+            sent[sid] = {"text": "", "verbatim": True, "max_times": 99, "source": DEFAULT}
+            notes.append(f"sentence {sid}: the brief has none; empty (the reducer's fallback applies)")
+    for w in p.get("who_rules") or []:   # callback / no_callback rows carry the effect, never a who value
+        if re.search(r"\bno.?callback\b", json.dumps(w).lower()):
+            w["effect_kind"] = "no_callback"
+        elif "callback" in json.dumps(w).lower() and not w.get("effect_kind"):
+            w["effect_kind"] = "callback"
     notes += _date_templates(p)
     words = [x.lower() for x in (p.get("honesty_words") or {}).get("words") or []]
     if words and not any(x in DEFAULT_HONESTY for x in words):

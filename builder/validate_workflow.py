@@ -16,6 +16,7 @@ validate(wf, rp, oas_path, unstable_quotes=()) -> list of problems (empty = pass
  7 no empty exact-say path: tts texts and their test_variables defaults are non-empty
  8 no double braces in code strings, no null values, no agent_config
  9 no unstable unmapped rule compiled into the workflow
+10 the reducer interface: every fixed sentence key present, who_rules in the contract vocabulary
 """
 import argparse, json, os, re, sys
 
@@ -210,10 +211,24 @@ def validate(wf, rp, oas_path, unstable_quotes=()):
     if "agent_config" in wf:
         errs.append("8: agent_config must be left out")
     errs += [f"8: null at {p}" for p in _nulls(wf)]
+    # 10 reducer interface: the fixed sentence keys and the who vocabulary
+    from builder.policy_bridge import FIXED_SENTENCES, PARTY_VOCAB, WHO_VOCAB
+    sent_all = rp.get("sentences") or {}
+    for sid in FIXED_SENTENCES:
+        if not isinstance(sent_all.get(sid), dict) or not isinstance(sent_all[sid].get("text"), str):
+            errs.append(f"10: fixed sentence key {sid!r} missing")
+    for i, w in enumerate(rp.get("who_rules") or []):
+        if w.get("who") not in WHO_VOCAB:
+            errs.append(f"10: who_rules[{i}].who {w.get('who')!r} not in {WHO_VOCAB}")
+        if w.get("party", "") not in PARTY_VOCAB:
+            errs.append(f"10: who_rules[{i}].party {w.get('party')!r} not in {PARTY_VOCAB}")
     # 9 unstable unmapped
-    blob = json.dumps(wf)
+    # only where unmapped rules are compiled: the policy's unmapped_rules (reducer input) and the free-talk prompts.
+    # (A short generic phrase like "Ask once more." can legitimately appear elsewhere, e.g. a fixed sentence.)
+    compiled = {u.get("quote") for u in rp.get("unmapped_rules") or []}
+    prompts = " ".join(str(n.get("task_message", "")) for k, n in nodes.items() if k.startswith("talk_"))
     for q in unstable_quotes:
-        if q and json.dumps(q)[1:-1] in blob:
+        if q and (q in compiled or ("- " + q) in prompts or (len(q) >= 25 and q in prompts)):
             errs.append(f"9: unstable unmapped rule compiled: {q[:60]!r}")
     return errs
 

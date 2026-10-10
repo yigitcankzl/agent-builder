@@ -60,6 +60,8 @@ Use {"file": "default", "quote": ""} ONLY when the material says nothing at all 
              "precedence": [str], "reason_omitted_for": [str], "source": Q},
  "sentences": {"<id>": {"text": "<exact required wording>", "verbatim": true, "max_times": int, "source": Q}},
  "honesty_words": {"words": [str], "source": Q},
+ "aliases": [{"field": "<tool>.<field>", "brief_value": "<the material's own code or word>", "api_value": "<tool API value>",
+              "source": Q}],   <- every explicit mapping the material states (e.g. one row of a code list)
  "superseded": [{"rule": "<policy path>", "old_value": any, "new_value": any, "winner_file": str, "loser_file": str,
                  "why": str, "source": Q}],
  "unmapped": [{"rule_id": str, "quote": str, "file": str, "phase_guess": str, "kind_guess": str}]
@@ -85,7 +87,10 @@ Rules:
    exact string even if the tool API below lists a different one; the build checks enums afterwards.
 5. closing.table lists every outcome/reason pair the material allows (reason null where none is sent).
 6. deadline.bands: one entry per band, with the persuasion attempts allowed in that band in `attempts`.
-7. sentences: every sentence the material requires the agent to say word for word (quoted wording), with a short id.
+7. sentences: every sentence the material requires the agent to say word for word (quoted wording). Use these ids
+   when they apply: confirm_who (the question that checks who is on the line), pay_today (the first ask to pay
+   today), text_message (the line said after a recorded promise), farewell, debt_intro, id_fail, no_other_terms,
+   change_in_app; any other required sentence gets its own short id. A later file that changes a sentence wins.
 8. Any rule you cannot place in a section goes to `unmapped` with its exact quote. Do not drop rules. Do NOT put in
    `unmapped` the rules every agent of this kind enforces anyway: one promise per product; record only after a clear
    yes; the close tool is the last tool call; say goodbye before closing; a tool result decides success.
