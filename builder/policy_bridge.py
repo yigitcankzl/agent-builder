@@ -209,7 +209,7 @@ def _walk_sources(x):
 
 _SAY = re.compile(r"\b(?:say|tell (?:the customer|them|the caller))(?: that)? (.+)$", re.I)
 _OFFER = re.compile(r"\boffer to (connect (?:them|the customer) with .+)$", re.I)
-_CUT = re.compile(r"\s*(?:[,;.]|\band (?:then |also )?(?:continue|close|take|call|ask|make|do not|end)\b|\bthen\b|\(rule)", re.I)
+_CUT = re.compile(r"\s*(?:[,;.]|\band (?:then |also )?(?:continue|close|take|call|ask|make|do not|end|offer)\b|\bthen\b|\(rule)", re.I)
 
 
 def _person(text):
@@ -252,9 +252,12 @@ def speakable(quotes):
 # ---- gap 1: required sentences as hooks with timing ------------------------------------------------------------
 HOOK_POINTS = ("opening", "after_debt", "on_refusal", "on_no_promise", "before_close", "on_promise_recorded")
 _HOOK_VERB = re.compile(r"\b(?:say|tell|inform|warn|remind|mention|disclose|explain|state)"
-                        r"(?: (?:the customer|the caller|customers|them|him|her))?(?: (that))? (.+)$", re.I)
+                        r"(?: (?:the customer|the caller|the person|the policyholder|customers|them|him|her))?(?: (that))? (.+)$", re.I)
+_TELL_TO = re.compile(r"\btell (?:the customer|the caller|the person|the policyholder|them|him|her) to ([^.;]+)", re.I)
+# a quote tied to a situation (if/when/after/below ... or a 'Situation:' label): its line belongs to that situation
+_SITUATIONAL = re.compile(r"\b(if|when|whenever|after|before|below|above|unless|once|until|while|during|instead|otherwise)\b|^[^.:]{2,60}:|`", re.I)
 _QUOTED = re.compile(r"[\"“]([^\"”]{6,}?[.?!])[\"”]")
-_NOT_A_LINE = re.compile(r"^(nothing|no |not |why |it\b|this sentence|one (short )?sentence|a sentence|goodbye|"
+_NOT_A_LINE = re.compile(r"^(nothing|no |not |why |it\b|so\b|this sentence|one (short )?sentence|a sentence|goodbye|"
                          r"thank|the past.due|how many|the product|the amount|the debt)", re.I)
 
 
@@ -266,6 +269,9 @@ def hook_lines(quote):
     m = re.search(r"\bthank (?:the customer|them|the caller) for ([^.;]+)", q, re.I)
     if m and 2 <= len(m.group(1).split()) <= 15:     # 'thank the customer for X' -> 'Thank you for X.'
         return "Thank you for " + _person(m.group(1))[0].lower() + _person(m.group(1))[1:].rstrip(".") + "."
+    m = _TELL_TO.search(q)
+    if m and 2 <= len(m.group(1).split()) <= 20 and "`" not in m.group(1):
+        return "Please " + m.group(1).strip().rstrip(".") + "."
     quoted = _QUOTED.findall(q)
     if quoted and re.search(r"\b(say|ask|tell|read|use|sentence|line|words?)\b", q, re.I):
         return " ".join(x.strip() for x in quoted)
@@ -319,6 +325,16 @@ def _hook_condition(cond, p, types):
     return ";".join(out), None
 
 
+def _reducer_lines():
+    """The contract-default lines the reducer itself speaks (its module-level D_* strings, read-only): a hook that only
+    repeats one of them is a duplicate."""
+    try:
+        from builder.engine import reducer as _r
+    except Exception:
+        return set()
+    return {_norm(v) for k, v in vars(_r).items() if k.startswith("D_") and isinstance(v, str) and "<" not in v and "{" not in v}
+
+
 def build_hooks(p, types):
     """policy.hooks (extractor: point, condition, quote) -> (hooks, unplaced, notes). A hook keeps the point the material
     gives; an unsure or invalid point, an invalid condition, or no speakable rewrite -> unplaced (never moved). A hook
@@ -335,6 +351,7 @@ def build_hooks(p, types):
     for ev in (p.get("events") or []) + list(((p.get("topic_checklist") or {}).values())):
         if isinstance(ev, dict) and ev.get("say"):
             spoken.add(_norm(ev["say"]))
+    spoken |= _reducer_lines()
     spoken.discard("")
     src_quotes.discard("")
     hooks, unplaced, notes = [], [], []
@@ -352,7 +369,8 @@ def build_hooks(p, types):
         if _norm(text) in spoken or (_norm(quote) in src_quotes and not point == "opening"):
             notes.append(f"hook {hid}: already spoken by a sentence or an event line, dropped")
             continue
-        if point in ("unsure", None, "") and text and not cond and not problem and not item["expects_answer"]:
+        if point in ("unsure", None, "") and text and not cond and not problem and not item["expects_answer"] \
+                and not _SITUATIONAL.search(quote):
             item["point"], point = "before_close", "before_close"   # a timeless statement: said once, in the goodbye
             item["placed"] = "no moment given"
             notes.append(f"hook {hid}: placed at before_close (no moment given): {text[:60]!r}")

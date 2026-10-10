@@ -74,6 +74,19 @@ def gap1():
     check(by.get("confirm", {}).get("expects_answer") is True, "a confirmation question is emitted with expects_answer")
     check("dup" not in by, "a line the text_message sentence already says is dropped")
     check(all(set(h) >= {"id", "point", "condition", "text", "expects_answer", "quote"} for h in rp["hooks"]), "hook field contract")
+    # the e2e8 rebuild bolted situation lines onto the goodbye: an unsure line tied to a situation stays unplaced
+    sit = [{"id": f"s{i}", "point": "unsure", "condition": None, "expects_answer": False, "source": src(q)} for i, q in enumerate((
+        'If the person says the customer has died, say "I am sorry for your loss.", ask nothing else.',
+        "If it fails again, say you could not record it and close as `no_promise` / `service_error`.",
+        "Below the floor, say it cannot be recorded and offer the floor once.",
+        "One date for every product: record that product on its own deadline and say so in the read-back."))]
+    sit.append({"id": "overdue", "point": "unsure", "condition": None, "expects_answer": False,
+                "source": src("Say that the rest stays overdue.")})
+    rp_s, _ = bridged(hooks=sit)
+    check(not [h for h in rp_s["hooks"] if h["id"].startswith("s")], "situation lines are never placed at before_close")
+    check(not [h for h in rp_s["hooks"] if h["id"] == "overdue"], "a line the reducer already says (the rest stays overdue) is dropped")
+    check(B.hook_lines("Tell the person to use the mobile app or write to us.") == "Please use the mobile app or write to us.",
+          "tell the person to X -> Please X.")
     wf = generate(rp, OAS)
     greet = wf["nodes"]["greet"]["on_enter"]["text"]
     check("recorded" in greet and greet.count("digital assistant") == 1, f"greet carries the recording clause once: {greet!r}")

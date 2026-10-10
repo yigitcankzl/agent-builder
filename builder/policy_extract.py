@@ -146,7 +146,10 @@ Rules:
     material gives: opening (the first sentence of the call), after_debt (right after the debt is stated),
     on_refusal (when the customer refuses to pay), on_no_promise (before a call ends with no promise),
     before_close (in the goodbye), on_promise_recorded (after a promise is recorded). If the material does not say
-    when, or the moment is none of these, use "unsure"; never guess a moment. `condition` only when the material
+    when, or the moment is none of these, use "unsure"; never guess a moment. Do NOT list a line that belongs to a
+    situation another section already handles (a relative, a death, a scam or robot question, hardship, a human
+    request, an identity refusal, a date or amount rule, the floor offer, the read-back, a tool failure, the goodbye):
+    those sections carry it. Use "unsure" only for a statement the material gives no moment or situation for. `condition` only when the material
     limits the rule to one band, one product type or one outcome. expects_answer = true when the agent must wait for
     the customer's answer (a confirmation question). The build rewrites the quote into the spoken line; you only give
     the quote.
