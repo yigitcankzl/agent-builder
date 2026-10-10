@@ -123,6 +123,14 @@ if __name__ == "__main__":
         print(f"      hangup_default {json.dumps({k: v for k, v in rp['hangup_default'].items() if k != 'source'})}, "
               f"pre-verification queues {rp['transfer']['pre_verification_queues']}, notes enabled {rp['writes']['notes']['enabled']}, "
               f"who {[x[1] for x in rep['who']]}")
+    print("\n== 3b. contract topics extracted per run (brief-sourced only; defaults excluded)")
+    for b in BRIEFS:
+        sets = []
+        for p in runs(b):
+            rp, _ = to_reducer(p, OAS)
+            sets.append(sorted({e_["topic"] for e_ in rp["events"] if e_.get("brief_topic")}))
+        always = sorted(set(sets[0]).intersection(*sets[1:]))
+        print(f"   {b}: stable {always}" + ("" if all(s == sets[0] for s in sets) else f" | per run {sets}"))
     print("\n== 4. persuasion plan (attempts.plan) per run")
     for b in BRIEFS:
         for i, p in enumerate(runs(b), 1):
