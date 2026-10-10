@@ -197,12 +197,24 @@ def score(case, res):
 
 def report(cases, results):
     unmeasured = [r["id"] for r in results if r.get("unmeasured")]
-    rows = [(c, r, score(c, r)) for c, r in zip(cases, results) if not r.get("unmeasured")]
+    all_rows = [(c, r, score(c, r)) for c, r in zip(cases, results) if not r.get("unmeasured")]
+    exact = lambda s: s["extracted"] and s["kind_ok"] and s["st_ok"] and s["fields_ok"]
+    fam = {}
+    for c, r, s in all_rows:
+        f = (c.get("tags") or [""])[0] or "-"
+        fam.setdefault(f, [0, 0])
+        fam[f][0] += exact(s); fam[f][1] += 1
+    print(f"\nmeasured {len(all_rows)} / {len(results)}; unmeasured (HTTP error, not re-sent): {len(unmeasured)} {unmeasured}")
+    print("PER FAMILY (exact match: kind, st and every expected field)")
+    for f in sorted(fam):
+        print(f"   {f:28} {fam[f][0]}/{fam[f][1]}")
+    deb_rows = [(c, r, s) for c, r, s in all_rows if c.get("debatable")]
+    print(f"DEBATABLE (reported separately, not in the gates): {sum(exact(s) for _, _, s in deb_rows)}/{len(deb_rows)} exact")
+    for c, r, s in deb_rows:
+        if not exact(s):
+            print(f"   {c['id']}: raw={r.get('raw')!r} expected={c['expected']} call={r.get('call_id')}")
+    rows = [(c, r, s) for c, r, s in all_rows if not c.get("debatable")]
     n = len(rows)
-    print(f"\nmeasured {n} / {len(results)}; unmeasured (HTTP error, not re-sent): {unmeasured}")
-    deb = [c["id"] for c, r, s in rows if c.get("debatable") and not (s["kind_ok"] and s["st_ok"] and s["fields_ok"])]
-    if deb:
-        print("debatable cases that did not match (counted in the metrics; review separately):", deb)
     pct = lambda a, b: f"{a}/{b}" + (f" ({100 * a / b:.0f}%)" if b else "")
     da = [s for _, _, s in rows if s["date_amount_case"]]
     pn = [s for _, _, s in rows if s["partial_none_case"]]
@@ -230,7 +242,7 @@ def report(cases, results):
               [k for k in ("state_change_violation", "identity_skip", "wrong_trigger") if s[k]]
         if bad or not s["extracted"]:
             print(f"  {c['id']}: {bad or ['not_extracted']} raw={r.get('raw')!r} expected={c['expected']} call={r.get('call_id')} http={r.get('http_errors')}")
-    return m, gates, rows
+    return m, gates, all_rows
 
 
 if __name__ == "__main__":
