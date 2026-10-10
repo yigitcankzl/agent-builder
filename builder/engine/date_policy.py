@@ -94,7 +94,16 @@ def validate(policy, brief_text=None):
 #  "superseded":  [{rule, old_value, new_value, winner_file, loser_file, why, source}]
 #  "unmapped":    [{rule_id, quote, file, phase_guess, kind_guess}]                 never fails the build
 # A source item is a quote string or {file, quote}; {file: "default"} marks a default used because the brief is silent.
+#  "attempts":    {plan: {<band name>: [{date_rule, amount_rule, source}]},    one entry per attempt of that band
+#                  flat_refusal_uses_attempt, proposal_never_refusal, no_repeat_refused_offer, stop_when_exhausted:
+#                  each {value: bool, source}}
+#  writes.transfer.pre_verification_queues [queue]; writes.notes.enabled bool
 CORE = ("identity", "products", "deadline", "closing")
+# Generic persuasion vocabulary (contract §7 attempts). Extend only with generic options, never brief values.
+DATE_RULES = ("last_business_day_this_week",   # rolls to the last business day of next week if today is that day
+              "deadline", "today", "next_business_day", "customer_named")
+AMOUNT_RULES = ("full", "floor", "floor_if_too_much_else_full", "same_as_previous")
+ATTEMPT_FLAGS = ("flat_refusal_uses_attempt", "proposal_never_refusal", "no_repeat_refused_offer", "stop_when_exhausted")
 
 
 def _src_items(src):
@@ -157,6 +166,23 @@ def _check_sections(policy):
     cl = policy.get("closing")
     if isinstance(cl, dict) and not all(isinstance(r, dict) and r.get("outcome") for r in cl.get("table") or []):
         errs.append("closing.table rows need an outcome")
+    at = policy.get("attempts")
+    if isinstance(at, dict):
+        bands = {b.get("name"): b for b in policy.get("deadline", {}).get("bands", [])}
+        for band, steps in (at.get("plan") or {}).items():
+            if band not in bands:
+                errs.append(f"attempts.plan has unknown band {band!r}")
+            elif isinstance(bands[band].get("attempts"), int) and len(steps) != bands[band]["attempts"]:
+                errs.append(f"attempts.plan[{band}] has {len(steps)} steps, band allows {bands[band]['attempts']}")
+            for s in steps:
+                if s.get("date_rule") not in DATE_RULES:
+                    errs.append(f"attempts.plan[{band}] date_rule {s.get('date_rule')!r} not in {DATE_RULES}")
+                if s.get("amount_rule") not in AMOUNT_RULES:
+                    errs.append(f"attempts.plan[{band}] amount_rule {s.get('amount_rule')!r} not in {AMOUNT_RULES}")
+        for f in ATTEMPT_FLAGS:
+            v = at.get(f)
+            if v is not None and not (isinstance(v, dict) and isinstance(v.get("value"), bool)):
+                errs.append(f"attempts.{f} must be {{value: bool, source}}")
     cb = (policy.get("writes") or {}).get("callback")
     if isinstance(cb, dict):
         for k in ("start", "end"):

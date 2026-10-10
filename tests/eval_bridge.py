@@ -20,8 +20,32 @@ EV = os.path.join(ROOT, "tests", "policy_eval")
 BRIEFS = ["brief-a", "brief-ab", "mut-01", "mut-02", "mut-03", "mut-04", "mut-05", "raw-a"]
 
 
+RUN_DIRS = [d for d in sys.argv[1:] if not d.startswith("-")] or [EV, os.path.join(EV, "run3")]
+
+
 def runs(name):
-    return [json.load(open(os.path.join(EV, name + ".policy.json"))), json.load(open(os.path.join(EV, "run3", name + ".policy.json")))]
+    """One policy per run directory (default: run 2 and run 3; or pass the run directories as arguments)."""
+    out = []
+    for d in RUN_DIRS:
+        f = os.path.join(d, name + ".policy.json")
+        out.append(json.load(open(f if os.path.exists(f) else os.path.join(d, name + ".json"))))
+    return out
+
+
+# Independent expectations for the persuasion plan: brief A from Cursor's reducer README (choice 8: attempt 1 =
+# last business day of this week, full or the floor if already too much; attempt 2 = the floor on the deadline),
+# mut-03 from its fixture (early 0 attempts, late 3; the third attempt is quoted in mut-03.md).
+PLAN_EXPECTED = {
+    "brief-a": {"early": [("last_business_day_this_week", "floor_if_too_much_else_full")],
+                "late": [("last_business_day_this_week", "floor_if_too_much_else_full"), ("deadline", "floor")]},
+    "mut-03": {"early": [],
+               "late": [("last_business_day_this_week", "floor_if_too_much_else_full"), ("deadline", "floor"),
+                        ("last_business_day_this_week", "floor")]}}
+PLAN_EXPECTED["brief-ab"] = PLAN_EXPECTED["brief-a"]
+
+
+def plan_of(p):
+    return {b: [(s.get("date_rule"), s.get("amount_rule")) for s in steps] for b, steps in ((p.get("attempts") or {}).get("plan") or {}).items()}
 
 
 def derive(rp, prod, today):
@@ -74,7 +98,7 @@ if __name__ == "__main__":
     seq = json.load(open(os.path.join(ROOT, "tests", "fixtures", "reducer", "public_sequences.json")))["cases"]
     print("== 1. cross-check against tests/fixtures/reducer/public_sequences.json (fd1409a)")
     for name, pol in (("A", "brief-a"), ("A+B", "brief-ab")):
-        for i, p in enumerate(runs(pol), 2):
+        for i, p in enumerate(runs(pol), 1):
             rp, rep = to_reducer(p, OAS)
             cases = [c for c in seq if c["policy"] == name]
             bad = [m for c in cases for m in cross_check(rp, c, oas)]
@@ -95,6 +119,17 @@ if __name__ == "__main__":
         rp, rep = to_reducer(runs(b)[0], OAS, stable_all[b])
         print(f"   {b}: {len(rep['api_mismatch'])} mismatch, {len(rp['events'])} topics, {len(rp['who_rules'])} who rules, errors {len(rep['errors'])}")
         for m in rep["api_mismatch"]:
-            print(f"      api_mismatch {m['field']}: {m['value']!r}  ({m['quote'][:80]!r})")
+            print(f"      api_mismatch {m['policy_path']} ({m['field']}): {m['value']!r} -> fallback {m['fallback']!r}")
+        print(f"      hangup_default {json.dumps({k: v for k, v in rp['hangup_default'].items() if k != 'source'})}, "
+              f"pre-verification queues {rp['transfer']['pre_verification_queues']}, notes enabled {rp['writes']['notes']['enabled']}, "
+              f"who {[x[1] for x in rep['who']]}")
+    print("\n== 4. persuasion plan (attempts.plan) per run")
+    for b in BRIEFS:
+        for i, p in enumerate(runs(b), 1):
+            got = plan_of(p)
+            flags = {f: (p.get("attempts") or {}).get(f, {}).get("value") for f in ("flat_refusal_uses_attempt", "proposal_never_refusal", "no_repeat_refused_offer", "stop_when_exhausted")}
+            exp = PLAN_EXPECTED.get(b)
+            verdict = "" if exp is None else (" MATCH" if got == exp else f" DIFF expected {exp}")
+            print(f"   {b} run {i}: {got} flags {flags}{verdict}")
         for n in rep["notes"]:
             print("      note:", n[:200])

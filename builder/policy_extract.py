@@ -11,7 +11,7 @@ Nothing from any specific brief is written in this file.
 import argparse, json, os, re, subprocess, sys, time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from builder.engine.date_policy import bad_quotes, core_missing, validate
+from builder.engine.date_policy import AMOUNT_RULES, DATE_RULES, bad_quotes, core_missing, validate
 
 MODEL = os.environ.get("POLICY_MODEL", "")          # empty: the CLI's default model
 TEXT_EXT = (".md", ".txt", ".eml", ".csv", ".json", ".yaml", ".yml")
@@ -40,15 +40,22 @@ Use {"file": "default", "quote": ""} ONLY when the material says nothing at all 
               "floor_by_type": {"<product type>": {"kind": "account_field", "field": str} |
                                 {"kind": "percent_of_past_due", "percent": number, "round": "up" | "down" | "nearest"}},
               "naming_by_type": {"<product type>": "<how to name it>"}, "order": str, "source": Q},
+ "attempts": {"plan": {"<band name as in deadline.bands>": [{"date_rule": DATE_RULE, "amount_rule": AMOUNT_RULE, "source": Q}]},
+              "flat_refusal_uses_attempt": {"value": bool, "source": Q},
+              "proposal_never_refusal": {"value": bool, "source": Q},
+              "no_repeat_refused_offer": {"value": bool, "source": Q},
+              "stop_when_exhausted": {"value": bool, "source": Q}},
  "amounts": {"first_ask": str, "too_much": str, "accept_range": str, "below_floor": str, "source": Q},
  "multi_product": {"applies": bool, "state_all_first": bool, "ask_all_today_once": bool, "one_date_clamp": bool,
                    "one_readback": bool, "source": Q},
  "events": [{"topic": str, "say": str, "effect": str, "note_reason": str, "outcome": str, "reason": str, "source": Q}],
  "writes": {"promise": {"retries": int, "fail_say": str},
-            "notes": {"when": str, "none_if_transfer": bool},
+            "notes": {"enabled": bool, "when": str, "none_if_transfer": bool},
             "callback": {"days": "<e.g. today_or_next_business_day>", "start": "HH:MM", "end": "HH:MM",
                          "inclusive": bool, "after_now": bool},
-            "transfer": {"queue_map": {"<situation>": "<queue enum value>"}}, "source": Q},
+            "transfer": {"queue_map": {"<situation>": "<queue enum value>"},
+                         "pre_verification_queues": ["<queues the material allows BEFORE identity is verified>"]},
+            "source": Q},
  "closing": {"table": [{"outcome": "<API outcome string>", "reason": "<API reason string or null>", "when": str}],
              "precedence": [str], "reason_omitted_for": [str], "source": Q},
  "sentences": {"<id>": {"text": "<exact required wording>", "verbatim": true, "max_times": int, "source": Q}},
@@ -79,7 +86,17 @@ Rules:
 5. closing.table lists every outcome/reason pair the material allows (reason null where none is sent).
 6. deadline.bands: one entry per band, with the persuasion attempts allowed in that band in `attempts`.
 7. sentences: every sentence the material requires the agent to say word for word (quoted wording), with a short id.
-8. Any rule you cannot place in a section goes to `unmapped` with its exact quote. Do not drop rules.
+8. Any rule you cannot place in a section goes to `unmapped` with its exact quote. Do not drop rules. Do NOT put in
+   `unmapped` the rules every agent of this kind enforces anyway: one promise per product; record only after a clear
+   yes; the close tool is the last tool call; say goodbye before closing; a tool result decides success.
+10. attempts.plan: for each band, one entry per persuasion attempt, in order. DATE_RULE is one of: DATE_RULES_LIST.
+    AMOUNT_RULE is one of: AMOUNT_RULES_LIST (floor_if_too_much_else_full = the floor if the customer already said
+    the full amount is too much, else the full amount). Also fill the four attempts flags, each with its quote.
+11. events checklist: look for each of these situations and add an entry for every one the material covers, with
+    the material's own topic name: hardship (illness, job loss, bereavement), dispute, already paid, restructuring or
+    payment plan, asks for a human, asks whether the call is a scam, asks whether it is a robot or AI, a question
+    the agent cannot answer, does not want to talk, refuses to answer a question, asks what the call is about,
+    hands the phone to the customer. Raw material often scatters these over several files: check every file.
 9. Holidays and dates as YYYY-MM-DD. Weekdays as integers with Monday = 0.
 """
 
@@ -185,7 +202,8 @@ def extract(paths, openapi=None, trace_path=None, repair=True):
     trace = Trace(trace_path)
     files, oas = read_files(paths), oas_summary(openapi)
     block = material_block(files, oas)
-    policy = parse_json(call_claude(INSTRUCTIONS + "\nSCHEMA:\n" + SCHEMA + "\n\nMATERIAL:\n" + block, "extract policy from brief", trace))
+    instr = INSTRUCTIONS.replace("DATE_RULES_LIST", " | ".join(DATE_RULES)).replace("AMOUNT_RULES_LIST", " | ".join(AMOUNT_RULES))
+    policy = parse_json(call_claude(instr + "\nSCHEMA:\n" + SCHEMA + "\n\nMATERIAL:\n" + block, "extract policy from brief", trace))
     # runtime variable names are the builder's own wiring convention, not brief content
     policy.setdefault("inputs", {"iso_var": "date_iso", "spec_var": "date_spec", "products_var": "products",
                                  "current_product_var": "current_product_id", "product_id_field": "product_id",
