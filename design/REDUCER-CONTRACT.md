@@ -1,5 +1,6 @@
-# Reducer contract v3.1 (2026-10-10)
+# Reducer contract v3.2 (2026-10-10)
 
+**v3.2 = v3.1 + §14** (event normalisation, prompt fixes, alignment with the policy-extract safety rules).
 **v3.1 = v3 + §13** (topics found by policy extraction, `api_mismatch` at runtime, the attempts plan reference).
 **v3 = v2 + §11 (structural rules) + §12 (decisions on the fixture choices).** Where §11 or §12 conflicts with an
 earlier section, §11/§12 win. Inputs: `ext/kickoff/CONTRACT-GAP.md` (G-numbers below), the M0 risks A and B
@@ -721,3 +722,48 @@ that field before falling back to `map_to`/`block`. That is the builder's job, o
 - §7's `attempts` row and §12 choice 8 are read through that plan. The cap is `len(plan[band])`; an empty plan means
   no persuasion attempts (mut-03: "the early band has no persuasion attempts").
 - Date rules resolve through the date core (`dates.add_business_days`, `deadline_for`, the business-day calendar).
+
+---
+
+## 14. v3.2: event normalisation, prompt fixes, alignment with the policy-extract safety rules
+
+Evidence: the acceptance run `8ce83b3` (`results/EXTRACT-ACCEPT-v31.md`). Raw labels scored 59/67 on kind; after
+normalisation the behaviour matched in 66/67 cases.
+
+### 14.1 Normalisation in the event parser (before `step`, applied to the event only)
+| | Raw event | Normalised to | Applies when |
+|---|---|---|---|
+| (a) | `kind=accept` | `kind=yes` | `st.q` ∈ {`pay_today`, `offer`, `readback`}. In any other `q` both are ignored anyway (§11.1) |
+| (b) | `st=none` with `kind != other` | `st=complete` | always. A real "No." must never be dropped |
+| (c) | `kind=date` (or `date_amount`) | `kind=callback` (the date labels kept; `tm` empty) | `st.phase == third_party` |
+| (d) | `kind=other` | `kind=who;who=unclear` | `st.q == confirm_name` |
+
+Also:
+- A topic name used as a kind (`kind=hardship`) → `kind=topic;t=hardship` (the `event_field.parse` alias).
+- `also` is advisory and is never normalised.
+- The reducer acts only on the normalised event. Both the raw and the normalised event go into the trace.
+
+### 14.2 Prompt fixes (`builder/engine/event_field.py`)
+- "`st=none` only together with `kind=other`."
+- A third-party callback example with a time: "tomorrow around eleven" → `kind=callback;…;rel=tomorrow;tm=11:00`.
+- A topic-over-amount example: "could you take 200 as a discount" → `kind=topic;t=terms;also=amount;amt=200`.
+- The acceptance gate for `kind` is scored after normalisation (14.1); the raw label accuracy is still reported.
+
+### 14.3 Alignment with the policy-extract safety rules (`policy-extract` `eccf11c`, `c662a35`); referenced, not redefined
+- **`api_mismatch`: no fuzzy or closest-name mapping.** Only an exact OAS value or a sourced alias is allowed; anything
+  else is `block`. This **replaces §13.2's `map_to`-by-closest-name.**
+  - The reducer reads the bridge's resolved values. It never sends a value outside the OAS enum.
+  - A blocked tool value takes that tool's `on_fail` path.
+- **A required identity field that is missing from the OAS** → `identity.blocked`. The reducer closes through the
+  identity `on_fail` slot **before any account fact**, and never skips to an unverified state. This **replaces §11.7 /
+  §13.2's "skip that question"** for required fields.
+- **Closing slots** come from `policy.closing.slots`: `unclear`, `declined`, `id_failed`, `busy`, `callback_failed`,
+  `write_failed`. A slot whose value is `null` is not available.
+  - `hangup_default` comes from `policy.hangup_default` (`before_who`, `before_verified`, `after_verified: computed`).
+  - The reducer has no outcome or reason literals of its own.
+- **Bridge format quirks the reducer must accept:**
+  - a `reason` of `"none"` or `null` means no reason;
+  - `events[].topic` is the contract vocabulary and the key the reducer uses;
+  - `events[].brief_topic` is free text and is never matched;
+  - a topic with two rows (hardship: accept or decline support; stop: before or after verification) is told apart by
+    the row's `outcome`.
