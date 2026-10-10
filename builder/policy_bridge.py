@@ -23,7 +23,7 @@ from builder.policy_extract import oas_summary
 DEFAULT = [{"file": "default", "quote": ""}]
 # Generic cue words per contract topic (vocabulary of a collections call, not values of any brief); matched on the
 # topic NAME with word boundaries. Order matters: the first topic whose cue matches wins.
-TOPIC_CUES = {"change_promise": ("change (the )?(recorded )?promise", "change recorded promise", "modify (the )?promise",
+TOPIC_CUES = {"change_promise": ("(change|cancel|modify)( or (change|cancel|modify))? (the |a )?(recorded )?promise", "change (the )?(recorded )?promise", "change recorded promise", "modify (the )?promise",
                                  "cancel (the )?promise", "change promise"),
               "hardship":("hardship", "illness", "job loss", "bereavement", "death in the family"),
               "dispute": ("dispute", "not mine", "never had"),
