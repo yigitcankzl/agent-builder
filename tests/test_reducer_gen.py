@@ -416,7 +416,33 @@ def mixed_verified_and_composed():
     return True
 
 
+# ---------------------------------------------------------------- per-answer flag only: all verified after the last question
+def per_answer_only():
+    pol = copy.deepcopy(POL["A"])
+    pol["tool_results"] = dict(pol.get("tool_results") or {})
+    pol["tool_results"]["verify_identity"] = dict(verified_this="data.answer_ok", wrong_left="data.left")
+    for extra in (dict(), dict(all_verified=True)):      # an unbound all-field in the response is ignored
+        st = R.init_state(pol, CV)
+        st, a = say(pol, st, "kind=who;also=none;st=complete;prod=;who=self;party=")
+        st, a = say(pol, st, "kind=identity;also=none;st=complete;prod=;field=date_of_birth;ans=1990-01-01")
+        st, a = tool(pol, st, dict(answer_ok=True, left=3, **extra))
+        check(a["type"] == "say_exact" and st["identity"]["idx"] == 1 and st["verified"] != "yes",
+              f"first right answer is not all-verified ({extra}): {a}")
+        st, a = say(pol, st, "kind=identity;also=none;st=complete;prod=;field=phone_last4;ans=1234")
+        st, a = tool(pol, st, dict(answer_ok=True, left=3, **extra))
+        check(a["type"] == "call_tool" and a["tool"] == "get_account" and st["verified"] == "yes", f"after the 2nd: {a}")
+    # a bound all-field is still honoured
+    pol["tool_results"]["verify_identity"]["verified_all"] = "data.done"
+    st = R.init_state(pol, CV)
+    st, a = say(pol, st, "kind=who;also=none;st=complete;prod=;who=self;party=")
+    st, a = say(pol, st, "kind=identity;also=none;st=complete;prod=;field=date_of_birth;ans=1990-01-01")
+    st, a = tool(pol, st, dict(answer_ok=True, done=True, left=3))
+    check(a["type"] == "call_tool" and a["tool"] == "get_account", f"bound all-field true on question 1: {a}")
+    return True
+
+
 if __name__ == "__main__":
+    print("per-answer flag only:", per_answer_only())
     print("mixed verified + composed fields:", mixed_verified_and_composed())
     print("verified_value + amount_scale:", status_and_scale())
     print("nested response paths:", nested_paths())
