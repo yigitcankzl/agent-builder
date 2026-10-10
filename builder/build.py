@@ -30,7 +30,8 @@ Exit codes (also `exit_code` in the JSON result; the trace has a `signal` event 
 Signals (FINAL-PLAN section 2): S0 engine not loaded, S1 unreadable source / too little text (warning; abort only
 when nothing is readable), S2 core sections missing after the targeted re-extraction,
 S3 a core response fact (verified flag, products, id, past due, days late) unbound even after the binding assist,
-S5 validator still failing after the repair pass, EXTRACT every extraction run failed, GUARD time guard.
+S5 validator still failing after the repair pass and the L2 degraded build (optional features stripped and
+regenerated when every error is on one; result['degraded'] lists them), EXTRACT every extraction run failed, GUARD time guard.
 """
 import argparse, concurrent.futures as cf, hashlib, json, os, sys, time
 
@@ -333,7 +334,19 @@ def build(briefs, openapi, slot=None, freya_client=None, out_dir="submission", t
         if k == 0 and len(attempt_order) == 1:
             trace.log("repair", note="no second extraction run to repair from")
     else:
-        return finish("workflow still invalid after the repair pass", 2, "S5", next="L2", validator_errors=errs[:10])
+        # L2: every remaining error on an optional feature -> strip those features and regenerate (core never stripped)
+        from builder.degrade import degrade
+        rp2, info = degrade(rp, errs)
+        if rp2 is None:
+            return finish("workflow still invalid after the repair pass (core errors)", 2, "S5", next="L3", validator_errors=errs[:10])
+        wf = generate(rp2, openapi)
+        errs2 = validate(wf, rp2, openapi, [u["quote"] for u in unstable])
+        trace.log("degraded_build", stripped=info, passed=not errs2, errors=errs2[:10])
+        if errs2:
+            return finish("degraded build still invalid", 2, "S5", next="L3", validator_errors=errs2[:10])
+        rp, errs = rp2, []
+        state.update(rp=rp)
+        result["degraded"] = info
     if errs:
         return finish("workflow invalid", 2, "S5", next="L2", validator_errors=errs[:10])
     tool_nodes = [k for k, n in wf["nodes"].items() if n["node_type"] == "api_request"]

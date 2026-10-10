@@ -250,7 +250,8 @@ def hub_reset_code(tools):
 
 def generate(rp, oas_path):
     tools = oas_tools(oas_path)
-    used = [t for t in TOOLS_ORDER if t in tools and not (t == "add_note" and not (rp.get("writes") or {}).get("notes", {}).get("enabled"))]
+    used = [t for t in TOOLS_ORDER if t in tools and not (t == "add_note" and not (rp.get("writes") or {}).get("notes", {}).get("enabled"))
+            and t not in (rp.get("disabled_tools") or [])]       # L2: an optional tool the degraded build dropped
     meta = rp.get("meta") or {}
     hd = rp.get("hangup_default") or {}
     who0 = hd.get("before_who") or {}
