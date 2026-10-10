@@ -34,6 +34,18 @@ D_HINT_MONTH = 'Could you say the month as a word, please?'
 D_HELP_FIRST = 'Can I help you with this first?'
 D_ASK_TIME = 'At what time could I reach them?'
 D_ALL_TODAY = 'Can you pay all of them today?'
+D_SUPPORT = 'I am sorry to hear that. Would you like me to connect you with our <DESK>?'
+D_DESK = 'customer support team'
+
+
+def desk_name(row):
+    """The support desk's name in the brief's own words ("offer the hardship desk" -> hardship desk), read from the row's
+    verbatim source quotes only (the effect is the bridge's paraphrase). Else the contract default."""
+    quotes = ' '.join(str(q.get('quote') or '') for q in (row or dict()).get('source') or [] if isinstance(q, dict))
+    m = re.search(r'\boffer (?:the |our |a )?([a-z][a-z ]{0,30}?\b(?:team|desk|unit|department|line))\b', quotes, re.I)
+    return m.group(1).lower() if m else D_DESK
+
+
 D_PROTECT = 'These questions protect your account.'
 D_REACH = 'When can I reach {title} {last_name}?'
 D_OVERDUE = 'The rest stays overdue.'
@@ -174,9 +186,13 @@ def vocab(policy):
             return pair(row)
         log.append(label + ' missing: unclear slot used')
         return unclear
-    hard = rows('hardship')
-    hard_accept = next((r for r in hard if not _none(r.get('note_reason'))), hard[0] if hard else None)
-    hard_decline = next((r for r in hard if _none(r.get('note_reason'))), hard[-1] if hard else None)
+    hard = [r for r in rows('hardship') if _none(r.get('outcome'))]
+    # accepted = the transfer to the hardship queue (its closing reason is the queue name); declined = any other row
+    hq = queue_for(policy, 'hardship')
+    is_acc = lambda r: bool(hq) and _none(r.get('reason')) == hq
+    acc_row = next((r for r in (policy.get('closing') or dict()).get('table') or [] if is_acc(r)), None)
+    hard_accept = next((r for r in hard if is_acc(r)), acc_row)
+    hard_decline = next((r for r in hard if not is_acc(r)), None)
     stops = rows('stop')
     stop_after = next((r for r in stops if pair(r) != declined), stops[0] if stops else None)
     paid_row = (rows('paid') or [None])[0]
@@ -1102,8 +1118,8 @@ def topic_event(policy, st, ev, today, cv):
         p = st['products'][i]
         if p['status'] == 'proposed':
             p['status'], p['offer'] = 'open', None
-        return ask(st, (row or dict()).get('say') or 'I am sorry to hear that. Would you like me to connect you with our customer support team?',
-                   'support_offer')
+        row = row or next((e for e in policy.get('events') or [] if e.get('topic') == 'hardship'), None)
+        return ask(st, (row or dict()).get('say') or D_SUPPORT.replace('<DESK>', desk_name(row)), 'support_offer')
     if t == 'restructure':
         return transfer(policy, st, 'restructuring', cv)
     if t == 'dispute' and st['q'] in ('readback', 'what_to_change') and st.get('_rb_dispute', 0) < 1:
