@@ -75,7 +75,15 @@ def _event_name(event: dict[str, Any]) -> str:
     if isinstance(tool, dict):
         tool = tool.get("name") or tool.get("function")
     value = tool or event.get("function") or event.get("name")
-    return str(value or "").strip()
+    name = str(value or "").strip()
+    if name != "api_call":
+        return name
+    args = _dict(event.get("args") or event.get("arguments") or event.get("input"))
+    url = args.get("url")
+    if not isinstance(url, str) or not url.strip():
+        return name
+    segment = url.rsplit("/", 1)[-1].split("?", 1)[0].strip()
+    return segment or name
 
 
 def _dict(value: Any) -> dict[str, Any]:
@@ -95,10 +103,27 @@ def _explicit_values(value: Any, key: str) -> list[Any]:
     return found
 
 
+def _status_codes(result: Any) -> list[int]:
+    codes: list[int] = []
+    for value in _explicit_values(result, "status_code"):
+        if isinstance(value, bool):
+            continue
+        if isinstance(value, int):
+            codes.append(value)
+        elif isinstance(value, str) and value.isdigit():
+            codes.append(int(value))
+    return codes
+
+
 def _success(event_type: str, result: Any) -> bool:
     if "error" in event_type or "fail" in event_type:
         return False
     if isinstance(result, str) and re.search(r"\b(?:error|failed|failure|not recorded)\b", result, re.I):
+        return False
+    if any(value not in (None, "", False) for value in _explicit_values(result, "error")):
+        return False
+    codes = _status_codes(result)
+    if codes and not all(200 <= code <= 299 for code in codes):
         return False
     statuses = [str(value).lower() for value in _explicit_values(result, "status")]
     oks = _explicit_values(result, "ok")
@@ -106,6 +131,9 @@ def _success(event_type: str, result: Any) -> bool:
         return False
     if any(value in {"error", "failed", "failure"} for value in statuses):
         return False
+    # A 2xx response with no error field is a successful bank call.
+    if codes:
+        return True
     if any(value is True for value in oks):
         return True
     if any(value in {"success", "succeeded", "complete", "completed", "ok"} for value in statuses):
@@ -115,6 +143,8 @@ def _success(event_type: str, result: Any) -> bool:
 
 def _parse_calls(messages: Sequence[dict[str, Any]]) -> list[ToolCall]:
     pending: dict[str, list[tuple[int, dict[str, Any]]]] = {}
+    # Completions of api_call carry no URL, so they take the name from the matching start.
+    api_order: list[str] = []
     calls: list[ToolCall] = []
     for index, message in enumerate(messages):
         event = _event(message)
@@ -128,11 +158,18 @@ def _parse_calls(messages: Sequence[dict[str, Any]]) -> list[ToolCall]:
         is_start = any(word in event_type for word in ("start", "request", "call"))
         is_end = any(word in event_type for word in ("complete", "result", "response", "error", "fail"))
         has_result = "result" in event or "output" in event or "error" in event
+        is_api = str(event.get("function") or "") == "api_call"
         if is_start and not is_end and not has_result:
             pending.setdefault(name, []).append((index, args))
+            if is_api:
+                api_order.append(name)
             continue
         if is_end or has_result:
             start, started_args = (index, args)
+            if is_api and name == "api_call" and api_order:
+                name = api_order.pop(0)
+            elif is_api and api_order and api_order[0] == name:
+                api_order.pop(0)
             if pending.get(name):
                 start, started_args = pending[name].pop(0)
             raw_result = event.get("result", event.get("output", event.get("error")))

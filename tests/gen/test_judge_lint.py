@@ -210,6 +210,75 @@ class JudgeLintTests(unittest.TestCase):
         self.assertEqual(1, len(tx.calls))
         self.assertEqual([], lint.rule_r1(tx))
 
+    def test_real_freya_api_call_shape(self) -> None:
+        """Bank tools arrive as function api_call. The name is the URL's last segment."""
+        host = "https://freya-bank-mock.freyavoice.workers.dev/v1"
+        promise_ok = {
+            "status": "success",
+            "data": {"ok": True, "promise_id": "pr1"},
+            "message": "Successfully executed POST request",
+            "status_code": 200,
+        }
+        verify_ok = {
+            "status": "success",
+            "data": {"ok": True, "verified": True, "wrong_answers_left": 3, "all_verified": True},
+            "message": "Successfully executed POST request",
+            "status_code": 200,
+        }
+        rejected = {
+            "status": "success",
+            "data": {"ok": False, "error": "this outcome needs one of these reasons: refused, hardship, dispute, service_error"},
+            "message": "Successfully executed POST request",
+            "status_code": 200,
+        }
+
+        def api_start(path: str, body: dict) -> dict:
+            return {
+                "role": "system",
+                "node": "tool",
+                "message": "",
+                "t": 0,
+                "event": {
+                    "event": "function_call_start",
+                    "function": "api_call",
+                    "args": {"url": host + path, "method": "POST", "headers": {"Content-Type": "application/json"}, "body": body},
+                },
+            }
+
+        def api_done(result: dict) -> dict:
+            return {
+                "role": "system",
+                "node": "tool",
+                "message": "",
+                "t": 0,
+                "event": {"event": "function_call_complete", "function": "api_call", "result": result},
+            }
+
+        saved = transcript(
+            api_start("/create_promise?dry_run=1", {"product_id": "p1", "amount": 125.5, "date": "2026-10-22"}),
+            api_done(promise_ok),
+            assistant("Your promise is recorded."),
+        )
+        self.assertEqual(["create_promise"], [call.name for call in saved.calls])
+        self.assertTrue(saved.calls[0].success)
+        self.assertEqual([], lint.rule_r1(saved))
+
+        verified = transcript(
+            api_start("/verify_identity", {"field": "date_of_birth", "answer": "1988-03-14"}),
+            api_done(verify_ok),
+            assistant("Your credit card balance is £50."),
+        )
+        self.assertEqual(["verify_identity"], [call.name for call in verified.calls])
+        self.assertEqual([], lint.rule_r2(verified))
+
+        failed = transcript(
+            api_start("/create_promise", {"product_id": "p1", "amount": 125.5, "date": "2026-10-22"}),
+            api_done(rejected),
+            assistant("Your promise is recorded."),
+        )
+        self.assertFalse(failed.calls[0].success)
+        self.assertEqual(["R1"], [item.rule for item in lint.rule_r1(failed)])
+
     def test_cli_prints_synthetic_fixture(self) -> None:
         export = {
             "case": "SYN-CLI",
