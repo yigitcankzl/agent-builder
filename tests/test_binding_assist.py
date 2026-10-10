@@ -57,9 +57,8 @@ if __name__ == "__main__":
         from builder.validate_workflow import validate
         check(not validate(generate(rp2, oas), rp2, oas), "the assisted policy passes the validator")
         st = run_selftest(rp2, oas)
-        # KNOWN (reported to Fork 3): the reducer does not read days_late from a bound tool_results path (it reads 0 ->
-        # the wrong band); past_due through a bound path is fine. Printed, not failed, until the reducer side lands.
-        print(f"     self-test with 'outstanding'/'age': {st['passed']}/{st['scenarios']} {json.dumps(st.get('failures'))[:200]}")
+        check(st["passed"] == st["scenarios"], f"self-test with a bank answering only 'outstanding'/'age': {st['passed']}/{st['scenarios']}"
+              f" {json.dumps(st.get('failures'))[:200]}")
         d = json.load(open(oas))
         for p_, ops in d["paths"].items():          # past_due renamed only: the self-test must be green
             if p_.endswith("get_account"):

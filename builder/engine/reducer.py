@@ -465,7 +465,7 @@ def _row_paths(policy, r0):
     """A product row with its nested fields (tool_results.get_account item.* paths) copied to the names the reducer
     reads (products.fields roles, the floor field per type). A row without paths is unchanged."""
     paths = (policy.get('tool_results') or dict()).get('get_account') or dict()
-    if not any(str(v).startswith('item.') and '.' in str(v)[5:] for v in paths.values()):
+    if not any(str(v).startswith('item.') for v in paths.values()):   # flat renames (item.age) too, not only nested
         return r0
     r = dict(r0)
     for role in ('id', 'type', 'past_due', 'days_late'):
