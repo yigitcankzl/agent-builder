@@ -548,7 +548,7 @@ def too_much_date(am):
     text = " ".join([str(am.get("too_much") or "")] + ev)
     if re.search(r"\b(on|at|for) the deadline\b", text, re.I):
         return "deadline", "amounts.too_much_date deadline (from the too-much rule's words)"
-    if re.search(r"\btoday\b", text, re.I) and not re.search(r"\bnot today\b", text, re.I):
+    if re.search(r"\btoday\b", text, re.I) and not re.search(r"\b(not|cannot|can.t|never|no)\b[^.;]{0,40}\btoday\b", text, re.I):
         return "today", "amounts.too_much_date today (from the too-much rule's words)"
     return "offer", "amounts.too_much_date offer (no day named for the too-much floor offer: the refused offer's day)"
 
