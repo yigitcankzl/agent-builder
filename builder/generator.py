@@ -97,7 +97,32 @@ def arg_map(tool, spec):
             m[cands[0]] = c
             left_c.remove(c)
             left_f.remove(cands[0])
+    # one date-time field for both a date and a time role (e.g. schedule_callback.when): bound to 'date' here;
+    # arg_roles() gives it both roles and the reducer composes the value (policy.composed_fields)
+    if "date" in left_c and "time" in left_c:
+        dt = [f for f in left_f if _is_datetime(f, props[f] or {})]
+        if len(dt) == 1:
+            m[dt[0]] = "date"
+            left_c = [c for c in left_c if c not in ("date", "time")]
+            left_f.remove(dt[0])
     return m, [f for f in left_f if f in req], left_c
+
+
+def _is_datetime(f, s):
+    return s.get("format") == "date-time" or bool(re.search(r"date.?time|timestamp", f + " " + str(s.get("description", "")), re.I))
+
+
+def arg_roles(tool, spec):
+    """-> ({canonical role: OAS field} without call variables, composed or None). composed = {field: {format, roles}}
+    when one date-time field carries both the date and the time role (contract: the reducer writes ONE
+    w_<tool>_<field> = 'YYYY-MM-DDTHH:MM:00')."""
+    amap, _, left_c = arg_map(tool, spec)
+    roles = {c: f for f, c in amap.items() if c not in CALL_VARS}
+    f = roles.get("date")
+    if f and "time" in CANONICAL.get(tool, []) and "time" not in roles and _is_datetime(f, spec["props"].get(f) or {}):
+        roles["time"] = f
+        return roles, {f"{tool}.{f}": {"format": "date-time", "roles": ["date", "time"]}}
+    return roles, None
 
 
 def _is_date(f, s):

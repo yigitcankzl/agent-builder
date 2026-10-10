@@ -410,7 +410,7 @@ def _account_rows(tool_event, policy=None):
             data = None
     path = tr_path(policy or dict(), 'get_account', 'products')
     if path and isinstance(data, dict) and isinstance(get_path(data, path), list):
-        return [_row_paths(policy, r) for r in get_path(data, path) if isinstance(r, dict)]
+        return [_scale_row(policy, _row_paths(policy, r)) for r in get_path(data, path) if isinstance(r, dict)]
     if isinstance(data, str):
         try:
             data = json.loads(data)
@@ -427,7 +427,37 @@ def _account_rows(tool_event, policy=None):
     if isinstance(data, dict):
         lists = [v for v in data.values() if isinstance(v, list)]
         data = data.get('products') or (lists[0] if lists else None)
-    return [_row_paths(policy or dict(), r) for r in (data or []) if isinstance(r, dict)]
+    return [_scale_row(policy or dict(), _row_paths(policy or dict(), r)) for r in (data or []) if isinstance(r, dict)]
+
+
+def amount_scale(policy):
+    """tool_results.get_account.amount_scale: account amounts in minor units (e.g. 0.01 for cents); absent -> 1."""
+    v = _num(((policy.get('tool_results') or dict()).get('get_account') or dict()).get('amount_scale'))
+    return v if v and v > 0 else 1.0
+
+
+def _scale_row(policy, r0):
+    """Row amounts (past_due, the floor field of its type) to major units; policy amounts (fixed, min_x) are already
+    major units and are never scaled."""
+    k = amount_scale(policy)
+    if k == 1.0:
+        return r0
+    r = dict(r0)
+    fb = ((policy.get('products') or dict()).get('floor_by_type') or dict()).get(str(r.get(pfield(policy, 'type'))))
+    names = [pfield(policy, 'past_due'), 'past_due'] + ([fb['field']] if isinstance(fb, dict) and fb.get('field') else [])
+    for name in set(names):
+        if _num(r.get(name)) is not None:
+            r[name] = round(float(r[name]) * k, 2)
+    return r
+
+
+def api_amount(policy, amount):
+    """A promise amount in the bank's unit: divided by the scale, a whole number for minor units."""
+    k = amount_scale(policy)
+    if k == 1.0:
+        return amount
+    v = float(amount) / k
+    return int(round(v)) if k < 1 else round(v, 2)
 
 
 def _row_paths(policy, r0):
@@ -728,7 +758,13 @@ def step(policy, st, event, tool_event, now, call_vars=None):
         st.pop('_hp', None)
     if act.get('type') == 'call_tool':   # canonical argument roles -> the brief's OAS body fields (bridge tool_args)
         ta = (policy.get('tool_args') or dict()).get(act['tool']) or dict()
-        act = dict(act, args=dict((ta.get(k) or k, v) for k, v in (act.get('args') or dict()).items()))
+        args = dict(act.get('args') or dict())
+        for key, spec in (policy.get('composed_fields') or dict()).items():
+            tool, _, fld = str(key).partition('.')
+            roles = (spec or dict()).get('roles') or []
+            if tool == act['tool'] and roles and all(r in args for r in roles):
+                args[fld] = compose(spec, [args.pop(r) for r in roles])   # one field from several roles, never overwritten
+        act = dict(act, args=dict((ta.get(k) or k, v) for k, v in args.items()))
     update_hangup(policy, st)
     return st, act
 
@@ -827,6 +863,10 @@ def verify_result(policy, st, data, cv):
     if str(data.get('hint') or '') == 'day_month_swapped' and st['_id_hint'] < 1:
         st['_id_hint'] += 1
         return ask(st, D_HINT_MONTH, 'id_' + idt['order'][idt['idx']])
+    vv = tr_path(policy, 'verify_identity', 'verified_value')
+    if vv is not None:      # a string status (e.g. 'verified' | 'failed'); a boolean path (all_verified) still counts
+        yes = lambda x: str(x).lower() == 'true' or str(x) == str(vv)
+        data = dict(data, verified=yes(data.get('verified')), all_verified=yes(data.get('all_verified')))
     verified = str(data.get('verified')).lower() == 'true'
     if verified:
         if str(data.get('all_verified')).lower() == 'true' or idt['idx'] + 1 >= len(idt['order']):
@@ -869,7 +909,8 @@ def next_write(policy, st, cv):
         i = _index(st, pid)
         p = st['products'][i]
         if p['status'] == 'confirmed':
-            st['_last_args'] = dict(customer_id=cid(cv), product_id=pid, amount=p['offer']['amount'], date=p['offer']['date'])
+            st['_last_args'] = dict(customer_id=cid(cv), product_id=pid, amount=api_amount(policy, p['offer']['amount']),
+                                    date=p['offer']['date'])
             return call(st, 'promise', 'create_promise', dict(st['_last_args']), product_id=pid)
     st['phase'] = 'wrapup'
     notes = (policy.get('writes') or dict()).get('notes') or dict()
@@ -1416,6 +1457,15 @@ def info_line(policy, st, t):
         st['_terms_n'] = st.get('_terms_n', 0) + 1
         return brief_sentence(policy, 'no_other_terms', D_NO_TERMS) if st['_terms_n'] == 1 else ''
     return (event_row(policy, t) or dict()).get('say') or ''
+
+
+def compose(spec, vals):
+    """composed_fields: format date-time (date YYYY-MM-DD + time HH:MM -> YYYY-MM-DDTHH:MM:00); otherwise joined by a
+    space."""
+    if str((spec or dict()).get('format')) == 'date-time' and len(vals) == 2:
+        t = str(vals[1])
+        return str(vals[0]) + 'T' + (t if t.count(':') == 2 else t + ':00')
+    return ' '.join(str(v) for v in vals)
 
 
 def loop_break(policy, st, today, cv):

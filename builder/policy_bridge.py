@@ -870,15 +870,18 @@ def to_reducer(policy, oas_path, stable_unmapped=None, brief_text=None):
     p["tools"] = tools
     # tool_args: the ONE table (computed by generator.arg_map) that both the generator (baked placeholders) and the
     # reducer (written w_<tool>_<OAS field> variables) read. customer_id is the call variable, not in the table.
-    from builder.generator import CALL_VARS, arg_map, oas_tools
-    ta = {}
+    from builder.generator import arg_map, arg_roles, oas_tools
+    ta, composed = {}, {}
     for tool, spec in oas_tools(oas_path).items():
         amap, unmapped_req, _ = arg_map(tool, spec)
-        ta[tool] = {c: f for f, c in amap.items() if c not in CALL_VARS}
+        ta[tool], comp = arg_roles(tool, spec)
+        composed.update(comp or {})
         for f in unmapped_req:
             mism.append({"policy_path": f"tool_args.{tool}", "value": f, "field": f"{tool}.body", "oas_enum": None,
                          "action": "block (no canonical role for this required OAS field)"})
     p["tool_args"] = ta
+    if composed:
+        p["composed_fields"] = composed
     # tool_results: where the reducer reads each fact in the tool responses (exact OAS response fields)
     from builder.oas_bindings import tool_results
     tr_, missing = tool_results(oas_path, p, brief_text)

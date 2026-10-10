@@ -30,7 +30,7 @@ validate(wf, rp, oas_path, unstable_quotes=()) -> list of problems (empty = pass
 import argparse, json, os, re, sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from builder.generator import CALL_VARS, GATED, arg_map, oas_tools
+from builder.generator import CALL_VARS, GATED, arg_map, arg_roles, oas_tools
 from builder.oas import load_oas
 
 
@@ -239,7 +239,7 @@ def validate(wf, rp, oas_path, unstable_quotes=()):
         errs.append("11: the policy has no tool_args table")
     else:
         for name, spec in tools.items():
-            expect = {c: f for f, c in arg_map(name, spec)[0].items() if c not in CALL_VARS}
+            expect = arg_roles(name, spec)[0]
             if name != "close_call" and ta.get(name, {}) != expect:
                 errs.append(f"11: tool_args[{name}] {ta.get(name)} != arg_map {expect}")
             node = nodes.get("t_" + name)

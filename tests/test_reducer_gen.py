@@ -329,7 +329,96 @@ def nested_paths():
     return True
 
 
+# ---------------------------------------------------------------- verified_value and amount_scale (tool_results)
+def status_and_scale():
+    """verify_identity reporting a string status (verified_value) and get_account amounts in cents (amount_scale)."""
+    pol = copy.deepcopy(POL["A"])
+    pol["tool_results"] = dict(pol.get("tool_results") or {})
+    pol["tool_results"]["verify_identity"] = dict(verified_this="data.status", verified_all="data.overall",
+                                                   wrong_left="data.left", verified_value="verified")
+    pol["tool_results"]["get_account"] = dict((pol["tool_results"].get("get_account") or {}), amount_scale=0.01)
+    st = R.init_state(pol, CV)
+    st, a = say(pol, st, "kind=who;also=none;st=complete;prod=;who=self;party=")
+    st, a = say(pol, st, "kind=identity;also=none;st=complete;prod=;field=date_of_birth;ans=1990-01-01")
+    st, a = tool(pol, st, dict(status="failed", overall="failed", left=2))
+    check(st["identity"]["wrong"] == 1 and a["type"] == "say_exact", f"'failed' is not verified: {a}")
+    st, a = say(pol, st, "kind=identity;also=none;st=complete;prod=;field=date_of_birth;ans=1990-01-02")
+    st, a = tool(pol, st, dict(status="verified", overall="pending", left=2))
+    check(a["type"] == "say_exact" and st["identity"]["idx"] == 1, f"'verified' moves to question 2: {a}")
+    st, a = say(pol, st, "kind=identity;also=none;st=complete;prod=;field=phone_last4;ans=1234")
+    st, a = tool(pol, st, dict(status="verified", overall="verified", left=2))
+    check(a["type"] == "call_tool" and a["tool"] == "get_account", f"all verified: {a}")
+    st, a = tool(pol, st, dict(products=[dict(product_id="p1", type="personal_loan", past_due=54000, days_late=5,
+                                              instalment_amount=18000)]))
+    check("540.00 past due" in a["text"] and st["_pd"][0]["floor"] == 180.0, f"cents to major units: {a} {st['_pd']}")
+    st, a = say(pol, st, "kind=yes;also=none;st=complete;prod=")
+    check("540.00" in a["text"], f"read-back in major units: {a}")
+    st, a = say(pol, st, "kind=yes;also=none;st=complete;prod=")
+    check(a["type"] == "call_tool" and a["args"]["amount"] == 54000 and isinstance(a["args"]["amount"], int), f"promise in cents: {a}")
+    # policy amounts are major units and are not scaled: min_x 40 accepts 50.00 on a cents account
+    mx = copy.deepcopy(POL["A"]); mx["amounts"] = dict(acceptance=dict(kind="min_x", min=40))
+    mx["tool_results"] = dict(mx.get("tool_results") or {})
+    mx["tool_results"]["get_account"] = dict((mx["tool_results"].get("get_account") or {}), amount_scale=0.01)
+    st, a = to_statement(mx, [dict(product_id="p1", type="personal_loan", past_due=54000, days_late=5, instalment_amount=18000)])
+    st, a = say(mx, st, "kind=no;also=none;st=complete;prod=")
+    st, a = say(mx, st, "kind=amount;also=none;st=complete;prod=;amt=50")
+    check(st["offer"]["amount"] == 50.0 and "cannot" not in a["text"], f"min_x 40 (major) on a cents account: {a}")
+    # absent fields: unchanged
+    check(R.amount_scale(POL["A"]) == 1.0 and R.api_amount(POL["A"], 540.0) == 540.0, "absent scale")
+    return True
+
+
+# ---------------------------------------------------------------- mixed verified shapes, composed request fields
+def mixed_verified_and_composed():
+    # verified_this = a string status, verified_all = a boolean: both count
+    pol = copy.deepcopy(POL["A"])
+    pol["tool_results"] = dict(pol.get("tool_results") or {})
+    pol["tool_results"]["verify_identity"] = dict(verified_this="data.status", verified_all="data.all_verified",
+                                                   wrong_left="data.wrong_answers_left", verified_value="verified")
+    st = R.init_state(pol, CV)
+    st, a = say(pol, st, "kind=who;also=none;st=complete;prod=;who=self;party=")
+    st, a = say(pol, st, "kind=identity;also=none;st=complete;prod=;field=date_of_birth;ans=1990-01-01")
+    st, a = tool(pol, st, dict(status="verified", all_verified=True, wrong_answers_left=3))
+    check(a["type"] == "call_tool" and a["tool"] == "get_account", f"string verified + boolean all_verified: {a}")
+    st = R.init_state(pol, CV)
+    st, a = say(pol, st, "kind=who;also=none;st=complete;prod=;who=self;party=")
+    st, a = say(pol, st, "kind=identity;also=none;st=complete;prod=;field=date_of_birth;ans=1990-01-01")
+    st, a = tool(pol, st, dict(status="failed", all_verified=False, wrong_answers_left=2))
+    check(st["identity"]["wrong"] == 1, f"'failed' + false: wrong: {a}")
+    # composed request field: schedule_callback.when = date + time, one var, PUB-02 flow
+    pol = copy.deepcopy(POL["A"])
+    pol["tool_args"] = dict(pol.get("tool_args") or {}, schedule_callback=dict(date="when", time="when"))
+    pol["composed_fields"] = {"schedule_callback.when": dict(format="date-time", roles=["date", "time"])}
+    cv = dict(customer_id="c_p2", first_name="Ana", last_name="Costa", title="Ms", now=NOW)
+    st = R.init_state(pol, cv)
+    st["tok"] = "kstart"
+    e = R.parse_event("n=kstart;src=user;kind=who;also=none;st=complete;prod=;who=other;party=relative", st, TOPICS)
+    st, a = R.step(pol, st, e, None, NOW, cv)
+    st["last_tok"] = "kstart"
+    st["tok"] = "kcbzzz"
+    e = R.parse_event("n=kcbzzz;src=user;kind=callback;also=none;st=complete;prod=;rel=tomorrow;d=;m=;wd=;wk=none;vague=no;tm=11:00", st, TOPICS)
+    st, a = R.step(pol, st, e, None, NOW, cv)
+    check(a["type"] == "call_tool" and a["tool"] == "schedule_callback" and a["args"].get("when") == "2026-10-15T11:00:00"
+          and "date" not in a["args"] and "time" not in a["args"], f"composed when: {a}")
+    v = dict(cv, ev="n=kstart;src=user;kind=who;also=none;st=complete;prod=;who=other;party=relative")
+    code = compile(R.hub_source(pol), "hub", "exec")
+    exec(code, dict(vars=v))
+    v["ev"] = "n=" + v["ev_tok"] + ";src=user;kind=callback;also=none;st=complete;prod=;rel=tomorrow;d=;m=;wd=;wk=none;vague=no;tm=11:00"
+    exec(code, dict(vars=v))
+    check(v.get("w_schedule_callback_when") == "2026-10-15T11:00:00" and "w_schedule_callback_date" not in v, f"hub vars: {v}")
+    # absent: unchanged
+    st = R.init_state(POL["A"], cv)
+    st["tok"] = "kstart"
+    st, a = R.step(POL["A"], st, R.parse_event("n=kstart;src=user;kind=who;also=none;st=complete;prod=;who=other;party=relative", st, TOPICS), None, NOW, cv)
+    st["last_tok"], st["tok"] = "kstart", "kcbyyy"
+    st, a = R.step(POL["A"], st, R.parse_event("n=kcbyyy;src=user;kind=callback;also=none;st=complete;prod=;rel=tomorrow;d=;m=;wd=;wk=none;vague=no;tm=11:00", st, TOPICS), None, NOW, cv)
+    check(a["args"].get("date") == "2026-10-15" and a["args"].get("time") == "11:00", f"absent composed: {a}")
+    return True
+
+
 if __name__ == "__main__":
+    print("mixed verified + composed fields:", mixed_verified_and_composed())
+    print("verified_value + amount_scale:", status_and_scale())
     print("nested response paths:", nested_paths())
     print("gap 4 date refusal:", date_refusal())
     print("gap 3 floor and acceptance:", floor_acceptance())
