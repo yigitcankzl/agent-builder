@@ -767,3 +767,21 @@ Also:
   - `events[].brief_topic` is free text and is never matched;
   - a topic with two rows (hardship: accept or decline support; stop: before or after verification) is told apart by
     the row's `outcome`.
+
+## §15 Loop breaker (stage-aware, replaces "repeat → free talk")
+
+Every open q has a cap: the same line re-said more than RESAY_CAP (3) times, or one tts line more than RESAY_CAP+1
+times in a row. At the cap `loop_break()` gives the q's on-cap action. Free talk is never the escape.
+
+| stage | q | on cap |
+|---|---|---|
+| before verification | help_first | transfer if the human queue is in pre_verification_queues, else close as below |
+| before verification | third party / callback_time | close on slot callback_failed |
+| before verification | id_* (who=self) | close on slot declined |
+| before verification | anything else (confirm_name, ...) | close on slot unclear |
+| after verification | pay_today / offer / exact_day | the product's next attempt (a non-answer is a no); refusal at the plan cap |
+| after verification | support_offer | the decline path (hardship note, close) |
+| after verification | readback / what_to_change / other | close: precedence, else the refused row |
+
+Test: `loop_caps()` in tests/test_reducer_props.py (22 phase × q starts on two policies): never speak_free, no tts
+loop, the call ends, and pre-verification closes land on the slot above with no account fact.

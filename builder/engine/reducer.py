@@ -396,14 +396,14 @@ def ask(st, text, q):
     return dict(type='say_exact', text=text)
 
 
-RESAY_CAP = 3   # DEFAULT: the same open question re-said this many times in a row, then free talk (never a tts loop)
+RESAY_CAP = 3   # DEFAULT cap for every q: the same open question re-said this many times in a row, then loop_break()
 
 
 def resay(st, prefix=''):
     st['_resay_n'] = st.get('_resay_n', 0) + 1
     if st['_resay_n'] > RESAY_CAP:
         st['_resay_n'] = 0
-        return dict(type='speak_free', node=_talk_node(st), hint='Answer briefly, then ask again: ' + (st.get('_last_ask') or ''))
+        return dict(type='_loop')         # step() turns it into the stage's on-cap action (loop_break)
     text = ((prefix + ' ') if prefix else '') + (st.get('_last_ask') or D_SAFE)
     return dict(type='say_exact', text=text.strip())
 
@@ -514,15 +514,18 @@ def step(policy, st, event, tool_event, now, call_vars=None):
         act = on_user(policy, st, ev, today, cv) if ev else resay(st)
     if act.get('type') == 'say_exact' and not str(act.get('text') or '').strip():
         act = dict(type='say_exact', text=sentence(policy, 'safe_repeat', D_SAFE))
-    # never loop on one tts line: the same words more than RESAY_CAP + 1 times in a row become free talk
+    # never loop on one tts line: the same words more than RESAY_CAP + 1 times in a row break the loop by stage
     if act.get('type') == 'say_exact' and act['text'] != sentence(policy, 'continue_line', D_CONTINUE):
         st['_said_n'] = st.get('_said_n', 0) + 1 if act['text'] == st.get('_said_last') else 1
         st['_said_last'] = act['text']
         if st['_said_n'] > RESAY_CAP + 1:
             st['_said_n'], st['_said_last'] = 0, None
-            act = dict(type='speak_free', node=_talk_node(st), hint='Answer briefly, then ask again: ' + (st.get('_last_ask') or ''))
+            act = dict(type='_loop')
     else:
         st['_said_n'], st['_said_last'] = 0, None
+    if act.get('type') == '_loop':
+        st['_said_n'], st['_said_last'], st['_resay_n'] = 0, None, 0
+        act = loop_break(policy, st, today, cv)
     if act.get('type') == 'call_tool':   # canonical argument roles -> the brief's OAS body fields (bridge tool_args)
         ta = (policy.get('tool_args') or dict()).get(act['tool']) or dict()
         act = dict(act, args=dict((ta.get(k) or k, v) for k, v in (act.get('args') or dict()).items()))
@@ -1003,6 +1006,34 @@ def transfer(policy, st, key, cv):
             p['status'], p['offer'] = 'open', None
     st['_last_args'] = dict(customer_id=cid(cv), queue=queue)
     return call(st, 'transfer', 'transfer_to_agent', dict(st['_last_args']))
+
+
+def loop_break(policy, st, today, cv):
+    """The on-cap action of every open question (contract default; never free talk, never a tts loop).
+    Before verification: a permitted transfer for a help-first loop, else a safe close on the stage's slot.
+    After verification: the next policy step (next attempt / refusal of the product, read-back -> close)."""
+    v, q = V(policy), st.get('q') or 'none'
+    if st['verified'] != 'yes':
+        pre = (policy.get('transfer') or dict()).get('pre_verification_queues') or []
+        if q == 'help_first' and queue_for(policy, 'human') in pre and queue_for(policy, 'human'):
+            return transfer(policy, st, 'human', cv)
+        if st['who'] == 'other' or q == 'callback_time':
+            o, r = v['callback_failed']
+        elif st['who'] == 'self' and q.startswith('id_'):
+            o, r = v['declined']
+        else:
+            o, r = v['unclear']
+        return do_close(policy, st, o, r, D_FAREWELL)
+    if q == 'support_offer':
+        return no_event(policy, st, dict(), today, cv)     # an unanswered support offer is a decline (its policy path)
+    if q in ('offer', 'pay_today', 'exact_day') and st['products']:
+        i = st['cur'] if st['cur'] is not None else (_open_products(st) or [None])[0]
+        if i is not None and st['products'][i]['status'] in ('open', 'proposed'):
+            return start_attempt(policy, st, i, today)   # a non-answer counts as a no: next attempt, refusal at the cap
+    o, r = precedence(policy, st)
+    if not o:
+        o, r = v['refused']
+    return do_close(policy, st, o, r, D_FAREWELL)
 
 
 def _talk_node(st):

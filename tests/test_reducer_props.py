@@ -204,8 +204,79 @@ def no_human_loop():
     return True
 
 
+def loop_caps():
+    """Every phase x q: a customer who never answers (an empty / unparseable turn, again and again) gets the q's on-cap
+    action, never free talk and never a tts loop. Before verification: a permitted transfer or a close on the stage's
+    slot, and never talk_post or an account fact. After verification: next attempt / refusal / close."""
+    A = ACCOUNTS[2]
+    OK = dict(verified=True, all_verified=False, wrong_answers_left=3)
+    ALL = dict(verified=True, all_verified=True, wrong_answers_left=3)
+    WHO, DOB, PH = EVENTS[0], EVENTS[3], EVENTS[4]
+    starts = {   # name -> (events before the silence; a dict is a tool result, expected pre-verification slot)
+        "opening/confirm_name": ([], "unclear"),
+        "opening/help_first": (["kind=topic;also=none;st=complete;prod=;t=human"], None),
+        "third_party/callback_time": ([EVENTS[1]], "callback_failed"),
+        "identity/id_": ([WHO], "declined"),
+        "identity/id_2": ([WHO, DOB, OK], "declined"),
+        "negotiation/pay_today": ([WHO, DOB, OK, PH, ALL, dict(products=A)], None),
+        "negotiation/offer": ([WHO, DOB, OK, PH, ALL, dict(products=A), EVENTS[7]], None),
+        "negotiation/exact_day": ([WHO, DOB, OK, PH, ALL, dict(products=A), EVENTS[7], EVENTS[14]], None),
+        "readback": ([WHO, DOB, OK, PH, ALL, dict(products=A[:1]), EVENTS[6]], None),
+        "readback/what_to_change": ([WHO, DOB, OK, PH, ALL, dict(products=A[:1]), EVENTS[6],
+                                     "kind=topic;also=none;st=complete;prod=;t=dispute"], None),
+        "negotiation/support_offer": ([WHO, DOB, OK, PH, ALL, dict(products=A), EVENTS[19]], None),
+    }
+    n = 0
+    for name, pol in POL.items():
+        v = R.V(pol)
+        for label, (pre, slot) in starts.items():
+            st = R.init_state(pol, CV)
+            seq = list(pre) + [""] * 60
+            run, last, j = 0, None, 0
+            for body in seq:
+                if st["phase"] == "closed":
+                    break
+                j += 1
+                if st.get("pending"):
+                    p = st["pending"]
+                    data = body if isinstance(body, dict) else dict(products=A) if p["op"] == "account" else ALL
+                    te = dict(node=p["node"], success=p["snap_success"] + 1, failure=p["snap_failure"], status_code=200, ok="true", data=data)
+                    st, act = R.step(pol, st, None, te, NOW, CV)
+                    if isinstance(body, dict):
+                        continue
+                    if not body:
+                        continue
+                else:
+                    if isinstance(body, dict):
+                        raise AssertionError(f"{name} {label}: setup expected a pending tool")
+                    st["tok"] = "kq" + "abcdefghjkmn"[j % 12] * 2 + "abcdefghjkmn"[(j // 12) % 12] * 2
+                    ev = R.parse_event("n=" + st["tok"] + ";src=user;" + body, st, TOPICS) if body else None
+                    st, act = R.step(pol, st, ev, None, NOW, CV)
+                    if ev:
+                        st["last_tok"] = st["tok"]
+                    if body:
+                        continue
+                tag = f"{name} {label}: {act}"
+                check(act["type"] != "speak_free", "loop escaped into free talk: " + tag)
+                key = act.get("text") if act["type"] == "say_exact" else None
+                run = run + 1 if key and key == last else 1
+                last = key
+                check(run <= R.RESAY_CAP + 1, "tts loop: " + tag)
+                if st["verified"] != "yes" and act["type"] == "say_exact":
+                    for row in A:
+                        check(R.money(row["past_due"]) not in act["text"], "account fact before verification: " + tag)
+                if act["type"] == "call_tool" and act["tool"] == "transfer_to_agent":
+                    break
+            check(st["phase"] == "closed" or (st.get("pending") or dict()).get("op") == "transfer", f"{name} {label}: never ended")
+            if slot and st["phase"] == "closed":
+                check((st["outcome"], st["reason"]) == tuple(v[slot]), f"{name} {label}: closed {st['outcome']}/{st['reason']} != {slot} {v[slot]}")
+            n += 1
+    return n
+
+
 if __name__ == "__main__":
     print("human loop without pre-verification queue: ends", no_human_loop())
+    print("loop caps: on-cap action for", loop_caps(), "phase x q starts")
     n = int(sys.argv[1]) if len(sys.argv) > 1 else 3000
     print("invariants: ok over", props(n), "random calls")
     k = replay_hub()
