@@ -176,6 +176,47 @@ if __name__ == "__main__":
                     2, 1500, boom, fallback=FakeL3)
         check(r12["exit_code"] == 2 and r12["signal"] == "S1" and not FakeL3.made, "S1 (nothing readable): L3 never starts")
         print("ok L3: nothing readable -> L3 not started")
+        # S7 smoke hook (BUILDER_SMOKE=1, a client with api/get_call): pass -> L3 cancelled after the smoke; fail -> L3 replaces
+        import builder.smoke as SM
+
+        class SmokeFreya(MockFreya):
+            def api(self, *a):
+                return {}
+
+            def get_call(self, cid):
+                return {}
+        real_run, real_sims = SM.run, SM.running_sims
+        os.environ["BUILDER_SMOKE"] = "1"
+        try:
+            SM.running_sims = lambda f: []
+            SM.run = lambda *a, **k: {"ok": True, "skipped": False, "signal": None, "reason": ""}
+            FakeL3.made.clear()
+            fr4 = SmokeFreya()
+            r13 = build([os.path.join(ROOT, "briefs", "brief-a.md")], OAS, "smoke-ok", fr4, os.path.join(tmp, "s13"), os.path.join(tmp, "tr"),
+                        2, 1500, saved_extractor("brief-a"), fallback=FakeL3)
+            check(r13["exit_code"] == 0 and len(fr4.saved) == 1 and FakeL3.made[0].cancelled and r13["smoke"][0]["ok"], r13)
+            print("ok S7: smoke passed -> one save, L3 cancelled after the smoke")
+            SM.run = lambda *a, **k: {"ok": False, "skipped": False, "signal": "S7", "reason": "no reply"}
+            fr5 = SmokeFreya()
+            r14 = build([os.path.join(ROOT, "briefs", "brief-a.md")], OAS, "smoke-bad", fr5, os.path.join(tmp, "s14"), os.path.join(tmp, "tr"),
+                        2, 1500, saved_extractor("brief-a"), fallback=FakeL3)
+            saves = lambda r: [json.loads(l)["candidate"] for l in open(r["trace"]) if json.loads(l)["event"] == "save"]
+            check(r14["exit_code"] == 2 and r14["signal"] == "S7" and r14.get("fallback_used") == "L3" and saves(r14) == ["main", "llm"], r14)
+            print("ok S7: main smoke failed -> L3 saved to the slot and smoked; both failed -> exit 2 S7")
+            calls = iter([{"ok": False, "skipped": False, "signal": "S7", "reason": "no reply"}, {"ok": True, "skipped": False, "signal": None, "reason": ""}])
+            SM.run = lambda *a, **k: next(calls)
+            fr6 = SmokeFreya()
+            r15 = build([os.path.join(ROOT, "briefs", "brief-a.md")], OAS, "smoke-l3", fr6, os.path.join(tmp, "s15"), os.path.join(tmp, "tr"),
+                        2, 1500, saved_extractor("brief-a"), fallback=FakeL3)
+            check(r15["exit_code"] == 0 and r15.get("fallback_used") == "L3" and r15["main_signal"] == "S7" and saves(r15) == ["main", "llm"], r15)
+            print("ok S7: main smoke failed, L3 smoke passed -> exit 0 with fallback_used=L3")
+            fr7 = SmokeFreya()
+            r16 = build([os.path.join(ROOT, "briefs", "brief-a.md")], OAS, "smoke-nol3", fr7, os.path.join(tmp, "s16"), os.path.join(tmp, "tr"),
+                        2, 1500, saved_extractor("brief-a"))
+            check(r16["exit_code"] == 0 or r16["signal"] == "S7", r16)
+        finally:
+            SM.run, SM.running_sims = real_run, real_sims
+            os.environ.pop("BUILDER_SMOKE", None)
         print("PASS")
     finally:
         shutil.rmtree(tmp)
