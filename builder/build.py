@@ -328,7 +328,7 @@ def build(briefs, openapi, slot=None, freya_client=None, out_dir="submission", t
             return engine_failed("the generator used a stub hub or event field")
         errs = validate(wf, rp, openapi, [u["quote"] for u in unstable])
         trace.log("validator", attempt=k + 1, passed=not errs, errors=errs, hub_code=generator.GENERATED_FROM.get("hub"),
-                  ev_field=generator.GENERATED_FROM.get("ev"))
+                  ev_field=generator.GENERATED_FROM.get("ev"), greet_dropped_placeholders=generator.GENERATED_FROM.get("greet_dropped_placeholders"))
         if not errs:
             break
         if k == 0 and len(attempt_order) == 1:

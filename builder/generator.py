@@ -275,7 +275,10 @@ def generate(rp, oas_path):
         else:
             extra.append(t)
     opening = " ".join([intro.rstrip()] + extra)
-    from builder.policy_bridge import honest_line      # the greet is spoken before any tool result
+    from builder.policy_bridge import CALL_ROLES, drop_unknown_placeholders, honest_line
+    cvm = meta.get("call_vars") or {}
+    opening, dropped = drop_unknown_placeholders(opening, set(cvm) | set(cvm.values()) | set(CALL_ROLES))
+    GENERATED_FROM["greet_dropped_placeholders"] = dropped        # the greet is spoken before any tool result
     opening = honest_line(opening)[0] or re.sub(r"\s*[^.!?]*\b(recorded|scheduled|transferred|saved|booked)\b[^.!?]*[.!?]", "", opening, flags=re.I).strip()
     # the reducer counts the name question as already asked by greet (contract §12 choice 2): greet must say it
     who_q = _call_var_placeholders(_text(rp, "confirm_who"), meta.get("call_vars") or {})

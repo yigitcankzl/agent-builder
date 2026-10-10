@@ -644,6 +644,56 @@ def callback_who_rules(p):
     return notes
 
 
+_PH = re.compile(r"\{\{?\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}?\}")
+
+
+def drop_unknown_placeholders(text, allowed):
+    """A spoken line may only carry placeholders the call provides (declared call variables and roles). A clause with
+    an unknown placeholder is dropped (comma/semicolon clauses, then the whole sentence) - never spoken literally.
+    -> (text, [dropped names])."""
+    t = str(text or "")
+    bad = [m.group(1) for m in _PH.finditer(t) if m.group(1) not in allowed and not m.group(0).startswith("<")]
+    if not bad:
+        return t, []
+    out = []
+    for sent in re.split(r"(?<=[.!?])\s+", t):
+        if not any(re.search(r"\{\{?\s*" + re.escape(b_) + r"\s*\}?\}", sent) for b_ in bad):
+            out.append(sent)
+            continue
+        parts = re.split(r"(?<=[,;])\s+", sent)
+        keep = [x for x in parts if not any(re.search(r"\{\{?\s*" + re.escape(b_) + r"\s*\}?\}", x) for b_ in bad)]
+        if keep and len(keep) < len(parts):
+            s_ = " ".join(keep).rstrip(",; ")
+            out.append(s_ + ("" if s_.endswith((".", "?", "!")) else sent[-1] if sent[-1] in ".?!" else "."))
+    return " ".join(x for x in out if x.strip()), sorted(set(bad))
+
+
+def placeholder_lint(p):
+    """Every spoken line of the policy: unknown placeholders dropped (see drop_unknown_placeholders). -> notes"""
+    cv = (p.get("meta") or {}).get("call_vars") or {}
+    allowed = set(cv) | set(cv.values()) | set(CALL_ROLES)
+    notes = []
+
+    def fix(where, holder, key):
+        new, dropped = drop_unknown_placeholders(holder.get(key), allowed)
+        if dropped:
+            notes.append(f"{where}: unknown placeholder(s) {dropped} dropped from {str(holder.get(key))[:70]!r}")
+            holder[key] = new
+    for sid, v in (p.get("sentences") or {}).items():
+        if isinstance(v, dict) and v.get("text"):
+            fix(f"sentence {sid}", v, "text")
+    for h in p.get("hooks") or []:
+        fix(f"hook {h.get('id')}", h, "text")
+    for coll in ("events", "who_rules"):
+        for e in p.get(coll) or []:
+            if e.get("say"):
+                fix(f"{coll} {e.get('topic') or e.get('who')}", e, "say")
+    for k, r in (p.get("date_rules") or {}).items():
+        if r.get("say"):
+            fix(f"date_rules.{k}", r, "say")
+    return notes
+
+
 def tool_status(p, oas_path):
     """{tool: {status: enabled|blocked|absent, why}}: a tool is blocked when the brief cannot call it with OAS values: identity
     blocked (verify_identity), a canonical write role with no OAS property, no queue that binds (transfer), no outcome
@@ -1112,6 +1162,7 @@ def to_reducer(policy, oas_path, stable_unmapped=None, brief_text=None):
     p.pop("unmapped", None)
     p["api_mismatch"] = mism
     p["tool_status"] = tool_status(p, oas_path)
+    notes += placeholder_lint(p)
     notes += [f"tool {t} BLOCKED: {v['why']}" for t, v in p["tool_status"].items() if v["status"] == "blocked"]
     report = {"api_mismatch": mism, "notes": notes, "errors": validate(p),
               "events": [(e_["brief_topic"], e_["topic"]) for e_ in evs], "who": [(x["brief_topic"], x["who"]) for x in who]}

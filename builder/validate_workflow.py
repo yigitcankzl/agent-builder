@@ -28,6 +28,7 @@ validate(wf, rp, oas_path, unstable_quotes=()) -> list of problems (empty = pass
 19 floor rules, amounts.acceptance and date_rules use the closed shapes (gaps 3-4)
 20 honesty: no recorded/scheduled/transferred/saved/booked in the greet or any line spoken before a write succeeds
 21 the bank name appears once per sentence in composed self-descriptions (greet, system prompt, task messages)
+22 every {{x}} in a spoken tts text is a workflow variable or a declared call variable
 """
 import argparse, json, os, re, sys
 
@@ -379,6 +380,15 @@ def validate(wf, rp, oas_path, unstable_quotes=()):
             for sent in re.split(r"(?<=[.!?])\s+", str(t)):
                 if len(re.findall(re.escape(bank), sent, re.I)) > 1:
                     errs.append(f"21: {where} names the bank twice in one sentence: {sent[:80]!r}")
+    # 22 every {{x}} in a spoken tts text is a variable the workflow defines (test_variables) or a declared call variable
+    cvars = set(((rp.get("meta") or {}).get("call_vars") or {}).values())
+    tv = set((wf.get("test_variables") or {}).keys()) | cvars
+    for k, n in nodes.items():
+        oe = n.get("on_enter") or {}
+        if oe.get("type") == "tts":
+            for name in re.findall(r"\{\{\s*([A-Za-z0-9_.\-]+)\s*\}\}", str(oe.get("text", ""))):
+                if name not in tv:
+                    errs.append(f"22: {k} speaks {{{{{name}}}}}, which is neither a workflow variable nor a declared call variable")
     # 9 unstable unmapped
     # only where unmapped rules are compiled: the policy's unmapped_rules (reducer input) and the free-talk prompts.
     # (A short generic phrase like "Ask once more." can legitimately appear elsewhere, e.g. a fixed sentence.)

@@ -288,13 +288,41 @@ def bank_names():
     check(any(e.startswith("21") for e in validate(wf, rp, OAS)), "validator 21 catches the doubled bank name")
 
 
+def placeholders():
+    print("== unknown placeholders are never spoken (F9)")
+    from builder.selftest import walk_smoke
+    p = copy.deepcopy(BASE)
+    p["meta"] = dict(p.get("meta") or {}, call_vars=dict((p.get("meta") or {}).get("call_vars") or {}, company_name="company_name"))
+    p["sentences"] = dict(p.get("sentences") or {}, confirm_who={"text": "Am I speaking with the accounts contact of {company_name}?",
+                                                                 "verbatim": True, "source": src("x")})
+    rp, rep = B.to_reducer(p, OAS, [])
+    wf = generate(rp, OAS)
+    g = wf["nodes"]["greet"]["on_enter"]["text"]
+    check("{{company_name}}" in g and not [e for e in validate(wf, rp, OAS) if e.startswith("22")], f"a declared {{company_name}} stays: {g!r}")
+    check(not walk_smoke(rp, wf, OAS)["errors"], "the walker resolves it")
+    p2 = copy.deepcopy(BASE)
+    p2["sentences"] = dict(p2.get("sentences") or {}, confirm_who={"text": "Am I speaking with {title} {last_name}, of {account_manager}?",
+                                                                   "verbatim": True, "source": src("x")})
+    p2["hooks"] = [{"id": "ref", "point": "after_debt", "condition": None, "expects_answer": False,
+                    "source": src('After the debt, say "Your case number is {case_no}."')}]
+    rp2, rep2 = B.to_reducer(p2, OAS, [])
+    wf2 = generate(rp2, OAS)
+    g2 = wf2["nodes"]["greet"]["on_enter"]["text"]
+    check("account_manager" not in g2 and "{{title}}" in g2, f"an undeclared placeholder's clause is dropped from the greet: {g2!r}")
+    check(not [h for h in rp2["hooks"] if "case_no" in h.get("text", "")] and any("case_no" in n for n in rep2["notes"]),
+          "a hook with an undeclared placeholder is not spoken, and noted")
+    check(not [e for e in validate(wf2, rp2, OAS) if e.startswith("22")], "validator 22 passes")
+    wf2["nodes"]["greet"]["on_enter"]["text"] += " {{account_manager}}"
+    check(any(e.startswith("22") for e in validate(wf2, rp2, OAS)), "validator 22 catches an undeclared spoken placeholder")
+
+
 def gap2_exact():
     q = {"field": "postcode", "format": "postcode", "format_evidence": {"source": src("Send the postcode exactly as said, letters and digits.")}}
     check(B.answer_format(q)[0] == "free", "'exactly as said' wins over the postcode format -> free")
 
 
 if __name__ == "__main__":
-    for g in (gap1, gap2, gap2_exact, gap3, gap4, regressions, derive_fixes, integration_fixes, honesty, bank_names):
+    for g in (gap1, gap2, gap2_exact, gap3, gap4, regressions, derive_fixes, integration_fixes, honesty, bank_names, placeholders):
         g()
     print("RESULT:", "PASS" if not fails else f"FAIL ({len(fails)})")
     sys.exit(1 if fails else 0)
