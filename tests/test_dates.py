@@ -27,9 +27,21 @@ def run(policy, vars_):
     return vars_
 
 
-def turn(said, products=EARLY, now=NOW, policy=FIX, state=None, current="p1"):
+def labels(iso="", d="", m="", wd="", wk="none", vague="no", rel="none", corr="no"):
+    """What the label extractor writes (date_spec). For an exact ISO day the fixture fills d and m from it."""
+    if iso and not d:
+        d, m = str(int(iso[8:10])), str(int(iso[5:7]))
+    return f"rel={rel};d={d};m={m};wd={wd};wk={wk};vague={vague};corr={corr}"
+
+
+def turn(said, products=EARLY, now=NOW, policy=FIX, state=None, current="p1", spec=None):
+    """said: 'YYYY-MM-DD' (both fields agree), 'vague: <words>', '' (nothing extracted) or a raw iso with spec given."""
+    if said.startswith("vague"):
+        iso, spec = "", spec or labels(wk="next" if "next week" in said else "none", vague="yes")
+    else:
+        iso, spec = said, spec if spec is not None else (labels(said) if said else "")
     v = dict(state or {})
-    v.update(now=now, products=json.dumps(products), current_product_id=current, date_said=said)
+    v.update(now=now, products=json.dumps(products), current_product_id=current, date_iso=iso, date_spec=spec)
     return run(policy, v)
 
 
@@ -66,7 +78,16 @@ def test_cases():
     expect(turn("2026-11-02"), "ok", "2026-11-02", "continue")                                       # early-band deadline
     expect(turn("2026-11-03"), "after_deadline", "2026-11-02", "say", ["Monday 2 November"])
     expect(turn("2026-10-10"), "before_earliest", "", "say")                                         # past
-    expect(turn("tomorrow"), "invalid", "", "say")                                                    # not normalized
+    expect(turn("2026-10-28", spec=labels("2026-10-27")), "invalid", "", "say")                     # fields disagree
+    expect(turn("2026-10-26", spec=labels("2026-10-26", wd="tue")), "invalid", "", "say")           # weekday contradicts day
+    # labels alone are enough: the engine computes the day (iso empty or not yet extracted)
+    expect(turn("", spec=labels(wd="fri", wk="next")), "ok", "2026-10-23", "continue")              # next = following week
+    expect(turn("", spec=labels(wd="fri", wk="this")), "ok", "2026-10-16", "continue")
+    expect(turn("", spec=labels(wd="fri")), "ok", "2026-10-16", "continue")
+    expect(turn("", spec=labels(rel="tomorrow")), "ok", "2026-10-15", "continue")
+    expect(turn("", spec=labels(d="26", wd="mon")), "non_business_day", "2026-10-27", "say")        # 'Monday the 26th'
+    expect(turn("", spec=labels(wk="after_next", vague="yes")), "vague", "", "say")                 # 'two weeks later'
+    expect(turn("", spec=labels(wd="fri", wk="next"), now="2026-10-16T10:00"), "ok", "2026-10-23", "continue")  # said on a Friday
     expect(turn("vague: next week"), "vague", "", "say", ["exact day"])
 
 
@@ -108,6 +129,13 @@ def test_correction_sticky_and_empty():
     v = turn("2026-10-26", state=v)                                                                   # sticky: no new date this turn
     check(v["date_state"] == "same" and v["route_date"] == "continue", "sticky value must not be re-decided")
     check(v["accepted_date"] == "2026-10-27" and v["date_reason"] == "non_business_day", "earlier decision kept")
+    # accepted offer (live bug, PUB-07 sim dd5bdf3c): iso moves to the offered day, the labels keep the old 'Monday 26th'
+    v = turn("", spec=labels(d="26", wd="mon"), state={})
+    expect(v, "non_business_day", "2026-10-27", "say")
+    v = turn("2026-10-27", spec=labels(d="26", wd="mon"), state=v)
+    expect(v, "ok", "2026-10-27", "continue")
+    v = turn("2026-10-29", spec=labels(d="26", wd="mon"), state=v)                                  # not the offer -> ask
+    expect(v, "invalid", "", "say")
     v = turn("", state={})
     check(v["route_date"] == "continue" and "date_reason" not in v, "empty extraction does nothing")
 
@@ -122,8 +150,8 @@ def test_vague_then_final():
 
 
 def test_never_raises():
-    for bad in ({"now": "garbage", "date_said": "2026-10-16"}, {"date_said": "2026-10-16"},
-                {"now": NOW, "date_said": "2026-10-16", "products": "{not json", "days_late": "x"}):
+    for bad in ({"now": "garbage", "date_iso": "2026-10-16"}, {"date_iso": "2026-10-16"},
+                {"now": NOW, "date_iso": "2026-10-16", "products": "{not json", "days_late": "x"}):
         v = run(FIX, dict(bad))
         check(v["date_reason"] == "error" and v["route_date"] == "continue" and v["accepted_date"] == "", v)
     check(all(isinstance(v, str) for k, v in turn("2026-10-26").items() if k in ("route_date", "date_state", "date_reason")),
@@ -183,14 +211,17 @@ def test_wire_into_workflow():
     check({"talk_date_say", "talk_cont", "date_resolve"} <= set(n), "nodes added")
     for k in ("talk", "talk_date_say", "talk_cont"):
         check(n[k]["transitions"][0]["target_node"] == "date_resolve", f"{k}: date transition first")
-        check(n[k]["extraction_schema"][-1]["name"] == "date_said", f"{k}: extraction field present")
+        check([f["name"] for f in n[k]["extraction_schema"]][-2:] == ["date_iso", "date_spec"], f"{k}: extraction fields present")
     check(n["talk_date_say"]["on_enter"] == {"type": "tts", "text": "{{say_next}}"}, "say node speaks say_next verbatim")
     targets = [t["target_node"] for t in n["date_resolve"]["transitions"]]
     check(targets == ["talk_date_say", "talk_cont"], f"one transition per target: {targets}")
     check(n["date_resolve"]["transitions"][0]["condition"]["conditions"][0] == {"variable": "route_date", "operator": "equals", "operand": "say"}, "string flag route")
     f = n["talk"]["extraction_schema"][-1]
     check("{{now}}" in f["extraction_prompt"] and "{{extractor.speech}}" in f["extraction_prompt"], "extraction anchored to now, keeps inputs")
-    check(re.match(G.DATE_PATTERN, "2026-10-26") and re.match(G.DATE_PATTERN, "vague: next week") and not re.match(G.DATE_PATTERN, "next week"), "pattern")
+    check(re.match(G.SPEC_PATTERN, labels("2026-10-26")) and re.match(G.SPEC_PATTERN, labels(wk="next", vague="yes")), "spec pattern accepts fixture labels")
+    check(re.match(G.ISO_PATTERN, "2026-10-26") and not re.match(G.ISO_PATTERN, "next week"), "iso pattern")
+    check(all("{{now}}" in x["extraction_prompt"] for x in n["talk"]["extraction_schema"][-2:]), "both fields anchored to now")
+    check(FIX["weekday_words"]["rule"] in n["talk"]["extraction_schema"][-2]["extraction_prompt"], "weekday rule from the policy")
     code = n["date_resolve"]["pre_actions"][0]["function"]["parameters"]["properties"]["code"]["default"]
     check(code == code_source(FIX), "the workflow carries exactly the tested code string")
     G.wire(wf, "talk", FIX)  # idempotent on the host

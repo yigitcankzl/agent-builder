@@ -1,13 +1,13 @@
 """Runtime date engine. This file IS the Freya code-node snippet (the emitter appends the policy and the call), so:
 stdlib only, run_safe never raises, routing flags are strings, and the source never contains double braces.
 
-No natural-language parsing happens here. The Freya extraction model writes ONE normalized field (policy
-inputs.date_var), anchored to the call variable `now` by its extraction prompt:
-    'YYYY-MM-DD'  an exact day the customer named (the corrected one if they corrected themselves)
-    'vague: ...'  only a period or an event, with the customer's words ("vague: when my salary comes"); the words
-                  make a second, different vague answer a new value, so it is not swallowed by the sticky dedupe
-    ''            nothing yet
-The engine applies the brief's date policy to it and writes:
+No natural-language parsing happens here. Two-field extraction contract (validated live, 13/13 and 6/6), both
+anchored to the call variable `now` by custom extraction prompts:
+    date_iso   'YYYY-MM-DD' the exact day the customer named or accepted, or ''
+    date_spec  labels only: rel=<today|tomorrow|none>;d=..;m=..;wd=<mon..sun>;wk=<this|next|after_next|none>;
+               vague=<yes|no>;corr=<yes|no>
+The engine recomputes the day from the labels with calendar arithmetic, cross-checks it with date_iso (a mismatch
+means ask again, except when date_iso is the date just offered: an accepted offer), applies the policy, and writes:
     accepted_date  the date that may be recorded now (YYYY-MM-DD) or ''
     date_reason    ok | non_business_day | after_deadline | before_earliest | vague | vague_final | invalid | error
     route_date     'say' (speak say_next verbatim) | 'continue' (dialogue model continues)
@@ -95,19 +95,95 @@ def current_days_late(vars, policy):
     return int(float(vars.get(inp.get('days_late_var', 'days_late'))))
 
 
-def decide(today, days_late, said, vague_count, policy):
-    """Pure decision -> dict(reason, named, accepted, deadline). `said` is 'YYYY-MM-DD', 'vague' or ''."""
+WD_KEYS = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun']
+
+
+def parse_spec(spec):
+    out = dict()
+    for part in str(spec or '').split(';'):
+        if '=' in part:
+            k, v = part.split('=', 1)
+            v = v.strip().lower()
+            if v not in ('', 'none', 'null'):
+                out[k.strip().lower()] = v
+    return out
+
+
+def _safe_date(y, m, d):
+    try:
+        return datetime.date(y, m, d)
+    except ValueError:
+        return None
+
+
+def date_from_spec(today, spec, policy):
+    """Calendar arithmetic on the extraction's labels (no language parsing). -> (date or None, kind)
+    kind: exact | vague | none | invalid."""
+    rel, wd, wk = spec.get('rel'), spec.get('wd'), spec.get('wk', 'none')
+    try:
+        dd = int(spec['d']) if 'd' in spec else None
+        mm = int(spec['m']) if 'm' in spec else None
+    except ValueError:
+        return None, 'invalid'
+    if rel == 'today':
+        return today, 'exact'
+    if rel == 'tomorrow':
+        return today + datetime.timedelta(days=1), 'exact'
+    if dd is not None:
+        if mm is not None:  # the year is never said: take the occurrence nearest to today
+            opts = [c for c in (_safe_date(today.year + k, mm, dd) for k in (-1, 0, 1)) if c is not None]
+            cand = min(opts, key=lambda c: abs((c - today).days)) if opts else None
+        else:  # day only: this month if still ahead, else next month
+            cand = _safe_date(today.year, today.month, dd)
+            if cand is None or cand < today:
+                ny, nm = (today.year + 1, 1) if today.month == 12 else (today.year, today.month + 1)
+                cand = _safe_date(ny, nm, dd)
+        if cand is None or (wd in WD_KEYS and cand.weekday() != WD_KEYS.index(wd)):
+            return None, 'invalid'
+        return cand, 'exact'
+    if wd in WD_KEYS:
+        target = WD_KEYS.index(wd)
+        monday = today - datetime.timedelta(days=today.weekday())
+        if wk == 'next' and (policy.get('weekday_words') or dict()).get('next') == 'next_occurrence':
+            return today + datetime.timedelta(days=(target - today.weekday() - 1) % 7 + 1), 'exact'
+        weeks = 1 if wk == 'next' else 2 if wk == 'after_next' else 0
+        cand = monday + datetime.timedelta(days=7 * weeks + target)
+        if weeks == 0 and cand < today:  # a bare or 'this' weekday already gone this week: the coming one
+            cand = cand + datetime.timedelta(days=7)
+        return cand, 'exact'
+    if spec.get('vague') == 'yes' or wk in ('this', 'next', 'after_next'):
+        return None, 'vague'
+    return None, 'none'
+
+
+def interpret(today, date_iso, date_spec, policy, last_offer=''):
+    """Two-field extraction contract. date_spec (labels) is recomputed in code and cross-checked with date_iso;
+    a disagreement is 'invalid' (ask again), except when date_iso is the date we just offered: the customer accepted
+    the offer and the label extractor kept its old labels (seen live, PUB-07 sim dd5bdf3c). -> (kind, date)."""
+    cand, kind = date_from_spec(today, parse_spec(date_spec), policy)
+    try:
+        iso = datetime.date.fromisoformat(str(date_iso).strip()[:10]) if date_iso else None
+    except ValueError:
+        iso = None
+    if iso is not None and last_offer and iso.isoformat() == last_offer and iso != cand:
+        return 'exact', iso
+    if kind == 'invalid' or (kind == 'exact' and iso is not None and iso != cand):
+        return 'invalid', None
+    if kind == 'none' and iso is not None:
+        return 'exact', iso
+    return kind, cand
+
+
+def decide(today, days_late, kind, named, vague_count, policy):
+    """Pure decision -> dict(reason, named, accepted, deadline)."""
     deadline = deadline_for(today, days_late, policy)
     out = lambda reason, named=None, acc=None: dict(reason=reason, named=named, accepted=acc, deadline=deadline)
-    said = str(said or '').strip().lower()
-    if said.startswith('vague'):
+    if kind == 'vague':
         v = policy['on_vague']
         if vague_count >= int(v.get('asks', 1)) and v.get('then') == 'offer_deadline':
             return out('vague_final', acc=deadline)
         return out('vague')
-    try:
-        named = datetime.date.fromisoformat(said[:10])
-    except ValueError:
+    if kind != 'exact' or named is None:
         return out('invalid')
     earliest = today if policy['earliest'].get('allow_today', True) else today + datetime.timedelta(days=1)
     if named < earliest:
@@ -144,20 +220,19 @@ def sentence(r, policy):
 
 def run(vars, policy):
     inp = policy['inputs']
-    said = str(vars.get(inp.get('date_var', 'date_said')) or '').strip()
-    if not said:
-        vars['date_state'] = 'same'
-        vars['route_date'] = 'continue'
-        return
-    if said == str(vars.get('date_handled') or ''):
+    iso = str(vars.get(inp.get('iso_var', 'date_iso')) or '').strip()
+    spec = str(vars.get(inp.get('spec_var', 'date_spec')) or '').strip()
+    sig = iso + '|' + spec
+    if sig == '|' or sig == str(vars.get('date_handled') or ''):
         vars['date_state'] = 'same'  # sticky extraction: a turn without a new date must not re-decide the old one
         vars['route_date'] = 'continue'
         return
-    vars['date_handled'] = said
+    vars['date_handled'] = sig
     vars['date_state'] = 'new'
     today = datetime.date.fromisoformat(str(vars.get(policy['now']['var']))[:10])
     vague_count = int(vars.get('date_vague_count') or 0)
-    r = decide(today, current_days_late(vars, policy), said, vague_count, policy)
+    kind, named = interpret(today, iso, spec, policy, str(vars.get('accepted_date') or ''))
+    r = decide(today, current_days_late(vars, policy), kind, named, vague_count, policy)
     if r['reason'] == 'vague':
         vars['date_vague_count'] = str(vague_count + 1)
     vars['date_reason'] = r['reason']
