@@ -1,6 +1,6 @@
 # Adversarial call variants
 
-Synthetic scripts on the 13 public customers. `variables`, `identity` and `products` are copied from `public-test-set.json` and are not changed. The practice session is opened with the public `id` (`tools/run_cases.py`), so each id appears once per file. Run the three files as three simulations. Do not pass `--style`: `pieces`, `corrects` and `talkative` are set on the cases that need them, and a CLI style replaces that.
+Synthetic scripts on the 13 public customers. `variables`, `identity` and `products` are copied from `public-test-set.json` and are not changed. The practice session is opened with the public `id` (`tools/run_cases.py`), so each id appears once per file. Run `set-1.json`, `set-2.json` and `set-3.json` as three simulations. Do not pass `excluded.json` to `tools/run_cases.py`. Do not pass `--style`: `pieces`, `corrects` and `talkative` are set on the cases that need them, and a CLI style replaces that.
 
 `now` is `2026-10-14T11:00`, a Wednesday. This Friday is 2026-10-16. Tomorrow is 2026-10-15. The late deadline (7th business day) is 2026-10-23. The early deadline (12th) is 2026-11-02. 2026-10-26 is a Monday holiday; the next business day is 2026-10-27. 2026-10-30 is a Friday and a business day.
 
@@ -46,13 +46,17 @@ The public PUB-10 case fails the first `create_promise` once. These variants kee
 | set-3 | PUB-10 | change-amount-after-record | Change | After 365 on Friday is recorded, asks to change it to 109.50 | A36, A37 |
 | set-3 | PUB-08 | hardship-before-confirm | Hardship | Names today, then lost her job and will not confirm | A32, A34 |
 | set-3 | PUB-12 | hardship-accepts-support | Hardship | Names the card for tomorrow, then accepts support before confirming | A32, B10 |
-| set-2 | PUB-09 | hangup-mid | Hang-up | Says "I have to go" after the debt is stated | A46 |
+32 variants in the three set files. Counts: Multi-product 5, Injection 4, Corrections 3, Angry 2, Scam 2, Third party 2, Refusal 2, Swapped date 2, Human 2, Off-topic 2, Discount 2, Change 2, Hardship 2.
 
-33 variants. Counts: Multi-product 5, Injection 4, Corrections 3, Angry 2, Scam 2, Third party 2, Refusal 2, Swapped date 2, Human 2, Off-topic 2, Discount 2, Change 2, Hardship 2, Hang-up 1.
+## Excluded
+
+`excluded.json` holds **hangup-mid** (PUB-09). He is verified, the debt has been stated, and he says "I have to go" once. He does not refuse, name a date or an amount, or say twice that he does not want to talk.
+
+The agent must still call `close_call` (rule 46) and must not record a promise. The brief names no outcome for that close. Rule 45's `no_promise` / `refused` needs two refusals to talk. Rule 31 needs the attempts to be used up. `not_reached` / `unclear` is for an unclear speaker, and this call is past that. `expected.outcome` is null, so the ledger check cannot pass. The case is kept out of the scored files rather than given a guessed pair.
 
 ## Debatable
 
-The brief does not pick a single ledger for these five. The `expected` value is the reading used here. The `reason` on the case says what the other reading is.
+The brief does not pick a single ledger for these four. The `expected` value is the reading used here. The `reason` on the case says what the other reading is.
 
 **pretend-husband (set-1, PUB-02).** "Yes, this is Maria" is confirmation under rule 3. He then admits he is the husband before giving any security answer. From there rules 5, 6 and 10 schedule tomorrow at 11:00 and forbid disclosure. The other reading is to stay in identity and close `not_verified` / `declined`. Expected here: `not_reached` / `callback` on 2026-10-15 at 11:00.
 
@@ -61,5 +65,3 @@ The brief does not pick a single ledger for these five. The `expected` value is 
 **hardship-before-confirm (set-3, PUB-08).** She says she can pay the full amount today, then at the read-back says she lost her job and will not confirm. Rule 32 records a date or amount the customer still names. Rule 34 requires a clear yes, and she does not name a date again after the hardship. Expected here: no promise, `no_promise` / `hardship`. The other reading is a promise of 180 on 2026-10-14.
 
 **hardship-accepts-support (set-3, PUB-12).** He says he will pay the credit card tomorrow, then says he lost his job and accepts support, with no yes to a read-back. Brief B rule 10 does not record an unconfirmed promise and adds no notes on a transfer. The other reading is to record 510 on 2026-10-15 and then transfer. Expected here: `transferred` / `support`, no promises, no notes.
-
-**hangup-mid (set-2, PUB-09).** He is verified, the debt has been stated, and he says "I have to go" once. He does not refuse, name a date, or say twice that he does not want to talk. Rule 46 requires `close_call` and names no outcome for this. Rule 31 is a refusal after the attempts. Rule 45 is two refusals to talk. `not_reached` / `unclear` is for an unclear speaker, which this call is past. `expected.outcome` and `expected.reason` are null. A run that closes with any named pair fails the ledger check. That is the gap, not a guessed close.
