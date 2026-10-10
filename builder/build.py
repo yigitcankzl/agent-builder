@@ -17,7 +17,7 @@ stays the submission.
 L3 fallback (builder/fallback_llm.py, Fork 5): the direct LLM workflow writer starts in its own thread as soon as the
 sources are readable (not on S0, not when nothing is readable; --no-l3 turns it off). The main path is capped at
 MAIN_CAP_S (15 min + 90 s) or --budget-min - 90 s, whichever is earlier. If the main path passes, L3 is cancelled
-before the save. If it ends on EXTRACT, S2, S5 or GUARD, build waits for L3 until budget - 150 s and, when L3's static
+before the save. If it ends on EXTRACT, S2 or S5, build waits for L3 until budget - 150 s and, when L3's static
 check passed, saves THAT workflow once and exports it (exit 0, fallback_used=L3, a fallback_selection trace event).
 There is exactly one save per slot per build.
 
@@ -104,7 +104,7 @@ def _rules_summary(policy):
 
 
 MAIN_CAP_S = 15 * 60 + 90       # the main path's own cap; the rest of --budget-min is for the L3 candidate + one save
-L3_SIGNALS = {"EXTRACT", "S2", "S5", "GUARD"}     # main-path failures the L3 writer may cover (never S0, never S1 abort)
+L3_SIGNALS = {"EXTRACT", "S2", "S5"}     # main-path failures the L3 writer may cover (never S0, S1 abort or GUARD: a late main build is never replaced)
 
 
 def _save(freya_client, slot, wf, out_dir, trace, result, candidate):
