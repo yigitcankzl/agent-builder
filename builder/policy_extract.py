@@ -12,6 +12,7 @@ import argparse, json, os, re, subprocess, sys, time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from builder.engine.date_policy import AMOUNT_RULES, DATE_RULES, bad_quotes, core_missing, validate
+from builder.oas import load_oas
 
 MODEL = os.environ.get("POLICY_MODEL", "")          # empty: the CLI's default model
 TEXT_EXT = (".md", ".txt", ".eml", ".csv", ".json", ".yaml", ".yml")
@@ -174,7 +175,7 @@ def oas_summary(path):
     """Tool name -> {field: enum list or type}, read from an OpenAPI file."""
     if not path or not os.path.exists(path):
         return {}
-    d = json.load(open(path))
+    d = load_oas(path)
     out = {}
     for p, ops in d.get("paths", {}).items():
         for op in ops.values():

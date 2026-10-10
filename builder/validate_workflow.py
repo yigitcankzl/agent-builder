@@ -31,6 +31,7 @@ import argparse, json, os, re, sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from builder.generator import CALL_VARS, GATED, arg_map, oas_tools
+from builder.oas import load_oas
 
 
 def _targets(n):
@@ -76,7 +77,7 @@ def validate(wf, rp, oas_path, unstable_quotes=()):
     errs = []
     nodes = wf.get("nodes") or {}
     tools = oas_tools(oas_path)
-    oas = json.load(open(oas_path))
+    oas = load_oas(oas_path)
     # 1 targets
     if wf.get("initial_node") not in nodes:
         errs.append(f"1: initial node {wf.get('initial_node')!r} missing")
