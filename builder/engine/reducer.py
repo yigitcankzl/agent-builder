@@ -2325,8 +2325,9 @@ def _dump(st, sep=None):
 
 
 # Freya's code_exec prints __CODE_EXEC_RESULT__ plus the vars JSON and cuts the stdout near 10,000 chars.
-# A cut result is not applied, and the error text is stored back into vars, so the next run is larger.
-RETURN_BUDGET = 9000
+# Stay near 6,000 so a 40-turn call never reaches that cut. A cut result is discarded and the error text is
+# stored back into vars, so the next run is larger.
+RETURN_BUDGET = 6000
 _RESULT_MARK = '__CODE_EXEC_RESULT__'
 
 
@@ -2335,24 +2336,26 @@ def returned_len(vars):
     return len(_RESULT_MARK) + len(json.dumps(dict(vars=vars), default=str))
 
 
+def _noise_key(k):
+    sk = str(k)
+    return '.header.' in sk or sk.endswith('_response.message') or sk.endswith('_response.error') or sk.startswith('system.')
+
+
 def _blank_noise(vars):
-    """Response headers and stored code_exec errors are never read. Blank them, do not delete them:
-    the platform merges the returned table, so a missing key would keep the previous fat value."""
+    """Response headers, platform clock strings and stored code_exec errors are never read.
+    Drop the key. An empty string would still be printed, and the key names alone blew past 6,000."""
     for k in list(vars):
-        sk = str(k)
-        if '.header.' in sk or sk.endswith('_response.message') or sk.endswith('_response.error'):
-            if vars.get(k) not in ('', None):
-                vars[k] = ''
+        if _noise_key(k):
+            vars.pop(k, None)
 
 
 def _blank_spent_data(vars):
-    """Tool bodies are copied into st on the hub run that reads them. Empty afterwards, so they do not
-    sit in every later snapshot. Counts and status codes stay."""
+    """Tool bodies are copied into st on the hub run that reads them. Drop them afterwards.
+    Counts and status codes stay."""
     for k in list(vars):
         sk = str(k)
         if '_response.data' in sk or sk.endswith('_data'):
-            if vars.get(k) not in ('', None):
-                vars[k] = ''
+            vars.pop(k, None)
 
 
 def _note_promise(vars):

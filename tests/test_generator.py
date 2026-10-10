@@ -59,12 +59,13 @@ def public_constants():
 
 
 def hub_failsafe():
-    """A lost hub result closes (a recorded promise stays a promise). talk_post can close on a goodbye.
-    hub_reset blanks the headers and error text that overflowed the sandbox."""
+    """A failed hub (failure count or non-200 status) closes, and a recorded promise stays a promise.
+    talk_post's goodbye goes to t_close_call. hub_reset drops the headers and error text."""
     from builder.engine.reducer import RETURN_BUDGET, returned_len
     _, _, wf, _ = build("brief-a")
     edges = wf["nodes"]["hub"]["transitions"]
-    stale = next(e for e in edges if e.get("description") == "hub result lost")
+    failed = next(e for e in edges if e.get("description") == "hub failed")
+    conds = json.dumps(failed["condition"])
     close_at = next(i for i, e in enumerate(edges) if e["target_node"] == "close_say")
     talk_at = next(i for i, e in enumerate(edges) if e["target_node"] == "talk_post")
     post = wf["nodes"]["talk_post"]
@@ -74,15 +75,15 @@ def hub_failsafe():
            "hub_response.message": "M" * 700, "hub_reset_response.error": "E" * 200,
            "close_outcome": "not_reached", "close_reason": "unclear", "st": "{}"}
     before = returned_len(dict(fat))
-    ns = dict(vars=fat, __name__="hub")
-    exec(compile(code, "hub_reset", "exec"), ns)
+    exec(compile(code, "hub_reset", "exec"), dict(vars=fat, __name__="hub"))
     after = returned_len(fat)
-    ok = (stale["target_node"] == "close_say" and close_at < talk_at
-          and any(t["target_node"] == "close_say" for t in post["transitions"])
+    ok = (failed["target_node"] == "close_say" and close_at < talk_at
+          and "hub_failure_count" in conds and "greater_than" in conds and "hub_status_code" in conds
+          and any(t["target_node"] == "t_close_call" for t in post["transitions"])
           and "set ending to yes" in post["task_message"]
           and any(f.get("name") == "ending" for f in post["extraction_schema"])
           and fat["route"] == "stale" and fat["close_outcome"] == "promise" and fat["close_reason"] == ""
-          and fat["t_get_account_response.header.Report-To"] == "" and fat["hub_response.message"] == ""
+          and "t_get_account_response.header.Report-To" not in fat and "hub_response.message" not in fat
           and after <= RETURN_BUDGET and after < before)
     print(f"   hub fail-safe: {'yes' if ok else 'NO'}  reset payload {before} -> {after}")
     return ok

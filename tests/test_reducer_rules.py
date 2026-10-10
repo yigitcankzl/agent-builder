@@ -119,7 +119,7 @@ def offer_chatter_live():
 
 def payload_stays_under_truncation():
     """40 talkative turns, with the live fat vars reappearing each turn (headers, sandbox error text).
-    The printed code_exec result stays under the ~10000-char cut."""
+    The printed code_exec result stays under ~6,000 characters."""
     pol = POL["A"]
     st = R.init_state(pol, dict(CV, customer_id="c_r"))
     vars_ = dict(st=R._dump(st, (",", ":")), route="stale", route_ok="no", ev_tok="kstart",
@@ -141,8 +141,8 @@ def payload_stays_under_truncation():
         R.hub_main(vars_, pol)
         after = R.returned_len(vars_)
         worst = max(worst, after)
-        check(after <= R.RETURN_BUDGET, "turn %d printed %d (in %d)" % (i, after, before))
-        check(vars_.get("hub_response.message") == "" and vars_.get("t_get_account_response.header.Report-To") == "",
+        check(after <= R.RETURN_BUDGET, "turn %d printed %d (in %d, budget %d)" % (i, after, before, R.RETURN_BUDGET))
+        check("hub_response.message" not in vars_ and "t_get_account_response.header.Report-To" not in vars_,
               "turn %d noise still in the result" % i)
         check(vars_.get("route") != "talk_post" or after <= R.RETURN_BUDGET, "route")
     check(worst <= R.RETURN_BUDGET, "worst %d" % worst)

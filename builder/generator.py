@@ -252,17 +252,16 @@ CLOSE_RETRY = True      # a rejected close_call is retried once by the hub (grap
 
 def hub_reset_code(tools, promise_outcome=""):
     """Slim the variable table before the hub runs. A truncated code_exec result is discarded and the error text
-    is written back, so the next run is larger; blanking headers and old errors here is what lets the hub return.
-    route stays 'stale' until the hub replaces it. If the hub's own result is then discarded, that stale route is
-    the safe close (see the hub edges), and a recorded promise keeps its outcome."""
+    is written back, so the next run is larger. Drop headers and old errors (the key as well as the value).
+    route stays 'stale' until the hub replaces it. A recorded promise keeps its outcome for the failure close."""
     po = json.dumps(promise_outcome or "")
     lines = ["try:", "    vars['route'] = 'stale'",
              "    if str(vars.get('t_create_promise_response.data.ok') or '').lower() in ('true', 'yes'):",
              "        vars['promise_recorded'] = 'yes'",
              "    for k in list(vars):",
              "        sk = str(k)",
-             "        if '.header.' in sk or sk.endswith('_response.message') or sk.endswith('_response.error'):",
-             "            vars[k] = ''"]
+             "        if '.header.' in sk or sk.endswith('_response.message') or sk.endswith('_response.error') or sk.startswith('system.'):",
+             "            vars.pop(k, None)"]
     if promise_outcome:
         lines += ["    if vars.get('promise_recorded') == 'yes':",
                   "        vars['close_outcome'] = " + po,
@@ -355,8 +354,9 @@ def generate(rp, oas_path):
                                       "Never offer terms, dates or amounts yourself." + NO_RESTATE + _soft_rules(rp, "post")
                                       + " If you say goodbye, or the customer is ending the call, set ending to yes.",
                       "extraction_schema": [ev, ENDING_FIELD], "max_node_turns": 80,
-                      "transitions": [{"target_node": "close_say", "description": "goodbye ends the call",
-                                       "condition": _cond(("ending", "yes"))}, _always("hub_reset")]},
+                      "transitions": ([{"target_node": "t_close_call", "description": "goodbye ends the call",
+                                        "condition": _cond(("ending", "yes"))}] if "close_call" in tools else [])
+                                     + [_always("hub_reset")]},
         "close_say": {"name": "close_say", "node_type": "conversation", "on_enter": {"type": "tts", "text": "{{farewell}}"},
                       "passthrough": True, "passthrough_default_transition": "t_close_call",
                       "task_message": "No tool call is allowed.", "transitions": [_always("t_close_call")]},
@@ -402,12 +402,14 @@ def generate(rp, oas_path):
         if t in OPEN:
             hub_edges.append({"target_node": "t_" + t, "description": t, "condition": _cond(("route", "t_" + t), ("w_go_" + t, "go"))})
     hub_edges.append({"target_node": "exact_say", "description": "say", "condition": _cond(("route", "say"))})
-    # hub_reset leaves route=stale. A hub result that the sandbox cut never replaces it, so this edge — before the
-    # verified free-talk catch-all — closes instead of falling through to talk_post.
-    hub_edges.append({"target_node": "close_say", "description": "hub result lost",
-                      "condition": _cond(("route", "stale"))})
-    # free talk the hub chose, then any other verified route that is not stale (stale already went to close_say).
-    # Same-target edges merge, so the stale close shares the close_say edge and stays ahead of this one.
+    # A failed code_exec leaves hub_failure_count > 0 and a non-200 status, and does not apply the returned vars.
+    # Same-target edges merge, so this OR joins the close edge and stays ahead of talk_post. greater_than is false
+    # when the counter is unset, so a healthy hub (status 200, count 0) does not take it.
+    hub_edges.append({"target_node": "close_say", "description": "hub failed", "condition": {"logic": "or", "conditions": [
+        {"variable": "hub_failure_count", "operator": "greater_than", "operand": 0},
+        {"variable": "hub_status_code", "operator": "greater_than", "operand": 200},
+        {"variable": "hub_response.status", "operator": "equals", "operand": "error"},
+        {"variable": "hub_response.status_code", "operator": "greater_than", "operand": 200}]}})
     hub_edges.append({"target_node": "talk_post", "description": "free talk after verification",
                       "condition": _cond(("route", "talk_post"), ("route_ok", "yes"))})
     hub_edges.append({"target_node": "talk_post", "description": "unmatched route after verification",
