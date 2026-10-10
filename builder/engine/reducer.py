@@ -284,11 +284,60 @@ def init_state(policy, call_vars=None):
 
 
 # ---------------------------------------------------------------- products
+def _round(v, how, to):
+    q = 1.0 if str(to or '').lower() in ('unit', 'units', 'whole', 'integer', '1') else 0.01
+    x = v / q
+    x = -int(-x // 1) if how == 'up' and abs(x - round(x)) > 1e-9 else (int(x // 1) if how == 'down' and abs(x - round(x)) > 1e-9 else round(x))
+    return round(x * q, 2)
+
+
+def _num(x):
+    try:
+        return float(x)
+    except Exception:
+        return None
+
+
 def _floor(policy, row):
-    fb = ((policy.get('products') or dict()).get('floor_by_type') or dict()).get(str(row.get('type')))
-    if isinstance(fb, dict) and fb.get('field') and row.get(fb['field']) is not None:
-        return float(row.get(fb['field']))
-    return float(row.get('past_due') or 0)      # no floor rule for this type in the policy: the full amount
+    """floor_by_type[type] (or '*'): kind field|account_field (field), percent|percent_of_past_due (percent),
+    fixed (amount), max_fixed_percent (amount, percent); round up|down|nearest to cents (default) or units. Never above
+    the full amount; no rule -> the full amount. acceptance full_only -> the full amount."""
+    full = float(row.get('past_due') or 0)
+    if accept_rule(policy)[0] == 'full_only':
+        return full
+    fbt = (policy.get('products') or dict()).get('floor_by_type') or dict()
+    fb = fbt.get(str(row.get('type'))) or fbt.get('*') or fbt.get('default')
+    if not isinstance(fb, dict):
+        return full
+    kind = str(fb.get('kind') or ('account_field' if fb.get('field') else '')).lower()
+    pct, fix = _num(fb.get('percent')), _num(fb.get('amount') if fb.get('amount') is not None else fb.get('fixed'))
+    how, to = str(fb.get('round') or fb.get('rounding') or 'nearest').lower(), fb.get('round_to') or fb.get('to')
+    if kind in ('field', 'account_field') and fb.get('field') and row.get(fb['field']) is not None:
+        v = float(row.get(fb['field']))
+    elif kind in ('percent', 'percent_of_past_due') and pct is not None:
+        v = _round(full * pct / 100.0, how, to)
+    elif kind == 'fixed' and fix is not None:
+        v = fix
+    elif kind in ('max_fixed_percent', 'max') and fix is not None and pct is not None:
+        v = max(fix, _round(full * pct / 100.0, how, to))
+    else:
+        return full
+    return min(v, full)
+
+
+def amount_fits(policy, pd, amt):
+    kind, x = accept_rule(policy)
+    low = x if kind == 'min_x' and x is not None else pd['floor']
+    return min(low, pd['past_due']) - 0.005 <= amt and (amt <= pd['past_due'] + 0.005 or kind == 'above_full_allowed')
+
+
+def accept_rule(policy):
+    """amounts.acceptance: floor_to_full (default) | full_only | min_x (with min) | above_full_allowed; a string or
+    dict(kind=, min=)."""
+    a = (policy.get('amounts') or dict()).get('acceptance')
+    if isinstance(a, dict):
+        return str(a.get('kind') or 'floor_to_full'), _num(a.get('min') if a.get('min') is not None else a.get('x'))
+    return (str(a), None) if a in ('floor_to_full', 'full_only', 'min_x', 'above_full_allowed') else ('floor_to_full', None)
 
 
 def _name(policy, row):
@@ -809,11 +858,12 @@ def plan_date(rule, today, pd, policy):
 
 
 def plan_amount(rule, pd):
+    below = pd['floor'] < pd['past_due'] - 0.005     # a floor equal to the full amount is not a floor offer
     if rule in ('floor', 'floor_again'):
-        return pd['floor'], True
+        return pd['floor'], below
     if rule == 'full':
         return pd['past_due'], False
-    return (pd['floor'], True) if pd['too_much'] else (pd['past_due'], False)
+    return (pd['floor'], below) if pd['too_much'] else (pd['past_due'], False)
 
 
 def start_attempt(policy, st, i, today, from_today_ask=True):
@@ -888,9 +938,15 @@ def date_event(policy, st, ev, today, cv):
         return after_resolved(policy, st, today, cv)
     i = targets[0]
     p, pd = _p(st, i)
-    amount = float(amt) if amt else ((st['offer'] or dict()).get('amount') or (pd['floor'] if pd['too_much'] else pd['past_due']))
     r = decide(today, pd['days_late'], 'exact', named, 0, policy)
     reason = r['reason']
+    if amt and _num(amt) is not None and not amount_fits(policy, pd, float(amt)):
+        if reason == 'ok':     # the date stands; the amount goes through the acceptance rule
+            st['cur'] = i
+            st['offer'] = dict(product_ids=[p['id']], amount=None, date=iso(r['accepted']), kind='customer')
+            return amount_event(policy, st, ev, today, cv)
+        amt = None
+    amount = float(amt) if amt else ((st['offer'] or dict()).get('amount') or (pd['floor'] if pd['too_much'] else pd['past_due']))
     if reason == 'ok':
         if multi and st['cur'] is not None and i != st['cur'] or (multi and st['cur'] is None):
             p['status'], p['offer'] = 'agreed', dict(amount=amount, date=iso(r['accepted']))
@@ -943,7 +999,7 @@ def reject_event(policy, st, ev, today, cv):
     p, pd = _p(st, i)
     if st['q'] == 'pay_today' and ev.get('why') != 'too_much':   # a "not today" answers the today ask
         st['all_today_asked'] = True
-    if ev.get('why') == 'too_much' and not p['floor_offered']:
+    if ev.get('why') == 'too_much' and not p['floor_offered'] and pd['floor'] < pd['past_due'] - 0.005:
         pd['too_much'] = True
         p['floor_offered'] = True
         date = (st['offer'] or dict()).get('date') or iso(today)
@@ -965,17 +1021,24 @@ def amount_event(policy, st, ev, today, cv):
     except Exception:
         return resay(st)
     date = (st['offer'] or dict()).get('date') or iso(today)
-    if amt < pd['floor'] - 0.005:
+    kind, x = accept_rule(policy)
+    full = pd['past_due']
+    low = x if kind == 'min_x' and x is not None else pd['floor']
+    if amt < min(low, full) - 0.005:
         if p['floor_offered']:
             return start_attempt(policy, st, i, today)
         p['floor_offered'] = True
-        p['status'], p['offer'] = 'proposed', dict(amount=pd['floor'], date=date)
-        st['offer'] = dict(product_ids=[p['id']], amount=pd['floor'], date=date, kind='floor')
-        return ask(st, 'I cannot record ' + money(amt) + '. ' + offer_line(pd, pd['floor'], date, True), 'offer')
-    amt = min(amt, pd['past_due'])
+        ofr = max(low, pd['floor']) if kind == 'min_x' else pd['floor']
+        ofr = min(ofr, full)
+        p['status'], p['offer'] = 'proposed', dict(amount=ofr, date=date)
+        st['offer'] = dict(product_ids=[p['id']], amount=ofr, date=date, kind='floor')
+        return ask(st, 'I cannot record ' + money(amt) + '. ' + offer_line(pd, ofr, date, ofr < full - 0.005), 'offer')
+    pre = ''
+    if amt > full + 0.005 and kind != 'above_full_allowed':     # never clamped silently
+        pre, amt = 'The amount due is ' + money(full) + '. ', full
     p['status'], p['offer'] = 'proposed', dict(amount=amt, date=date)
     st['offer'] = dict(product_ids=[p['id']], amount=amt, date=date, kind='customer')
-    return ask(st, offer_line(pd, amt, date), 'offer')
+    return ask(st, pre + offer_line(pd, amt, date), 'offer')
 
 
 def yes_event(policy, st, today, cv):

@@ -155,6 +155,62 @@ def identity_formats():
     return True
 
 
+# ---------------------------------------------------------------- gap 3: floor and acceptance
+def floor_acceptance():
+    pol = copy.deepcopy(POL["A"])
+    row = lambda pd: dict(product_id="p1", type="personal_loan", past_due=pd, days_late=5, instalment_amount=180.0)
+    fl = lambda spec, pd: R._floor(dict(pol, products=dict(pol["products"], floor_by_type=dict(personal_loan=spec))), row(pd))
+    for spec, pd, exp in ((dict(kind="account_field", field="instalment_amount"), 540.0, 180.0),
+                          (dict(kind="percent_of_past_due", percent=30, round="up"), 540.0, 162.0),
+                          (dict(kind="percent", percent=30, round="up"), 333.33, 100.0),
+                          (dict(kind="percent", percent=30, round="down"), 333.33, 99.99),
+                          (dict(kind="percent", percent=25, round="up", to="unit"), 333.0, 84.0),
+                          (dict(kind="fixed", amount=50), 300.0, 50.0),
+                          (dict(kind="fixed", amount=500), 300.0, 300.0),         # never above full
+                          (dict(kind="max_fixed_percent", amount=50, percent=10), 300.0, 50.0),
+                          (dict(kind="max_fixed_percent", amount=50, percent=10), 900.0, 90.0),
+                          (dict(kind="unknown"), 300.0, 300.0)):
+        got = fl(spec, pd)
+        check(abs(got - exp) < 0.005, f"floor {spec} on {pd}: {got} != {exp}")
+    # mut-03 percent floor end to end: "too much" offers 30% rounded up, not the full amount
+    import json
+    m3 = json.load(open(os.path.join(ROOT, "tests/generated/mut-03.reducer_policy.json")))
+    st, a = to_statement(m3, EARLY)
+    st, a = say(m3, st, "kind=reject;also=none;st=complete;prod=;why=too_much")
+    check("162.00" in a["text"], f"mut-03 floor 30% of 540 = 162.00: {a}")
+
+    def amount_after_statement(p, amt, acc=EARLY):
+        st, a = to_statement(p, acc)
+        st, a = say(p, st, "kind=no;also=none;st=complete;prod=")
+        return say(p, st, "kind=amount;also=none;st=complete;prod=;amt=" + str(amt))
+    # default: above full is never clamped silently
+    st, a = amount_after_statement(pol, 600)
+    check("The amount due is 540.00." in a["text"] and st["offer"]["amount"] == 540.0, f"above full, default: {a}")
+    allow = copy.deepcopy(pol); allow["amounts"] = dict(acceptance="above_full_allowed")
+    st, a = amount_after_statement(allow, 600)
+    check(st["offer"]["amount"] == 600.0 and "amount due" not in a["text"], f"above_full_allowed: {a}")
+    full = copy.deepcopy(pol); full["amounts"] = dict(acceptance="full_only")
+    st, a = amount_after_statement(full, 300)
+    check("I cannot record 300.00." in a["text"] and st["offer"]["amount"] == 540.0 and "overdue" not in a["text"], f"full_only: {a}")
+    st, a = to_statement(full, EARLY)
+    st, a = say(full, st, "kind=reject;also=none;st=complete;prod=;why=too_much")
+    check("540.00" in a["text"] and "overdue" not in a["text"] and not st["products"][0]["floor_offered"], f"full_only too much: {a}")
+    mx = copy.deepcopy(pol); mx["amounts"] = dict(acceptance=dict(kind="min_x", min=100))
+    st, a = amount_after_statement(mx, 120)
+    check(st["offer"]["amount"] == 120.0 and "cannot" not in a["text"], f"min_x accepts 120 >= 100: {a}")
+    st, a = amount_after_statement(mx, 80)
+    check("I cannot record 80.00." in a["text"] and st["offer"]["amount"] == 180.0, f"min_x below: {a}")
+    # date + amount: the amount goes through the same rule, the date is kept
+    st, a = to_statement(pol, EARLY)
+    st, a = say(pol, st, "kind=date_amount;also=none;st=complete;prod=;rel=;d=16;m=10;wd=;wk=none;vague=no;amt=100")
+    check("I cannot record 100.00." in a["text"] and "16 October" in a["text"], f"date_amount below floor: {a}")
+    st, a = to_statement(pol, EARLY)
+    st, a = say(pol, st, "kind=date_amount;also=none;st=complete;prod=;rel=;d=16;m=10;wd=;wk=none;vague=no;amt=900")
+    check("The amount due is 540.00." in a["text"], f"date_amount above full: {a}")
+    return True
+
+
 if __name__ == "__main__":
+    print("gap 3 floor and acceptance:", floor_acceptance())
     print("gap 2 identity formats:", identity_formats())
     print("gap 1 hooks:", hooks())
