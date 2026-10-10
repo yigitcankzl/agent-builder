@@ -20,7 +20,7 @@ validate(wf, rp, oas_path, unstable_quotes=()) -> list of problems (empty = pass
 import argparse, json, os, re, sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from builder.generator import GATED, oas_tools
+from builder.generator import CALL_VARS, GATED, arg_map, oas_tools
 
 
 def _targets(n):
@@ -127,8 +127,16 @@ def validate(wf, rp, oas_path, unstable_quotes=()):
                 continue
             props = (fn.get("parameters") or {}).get("properties") or {}
             body = (props.get("body") or {}).get("properties") or {}
-            if set(body) != set(tools[name]["props"]):
-                errs.append(f"4: {k} body args {sorted(body)} != OAS {sorted(tools[name]['props'])}")
+            extra = set(body) - set(tools[name]["props"])
+            if extra:
+                errs.append(f"4: {k} body args {sorted(extra)} are not in the OAS")
+            amap, unmapped_req, _ = arg_map(name, tools[name])
+            for f in unmapped_req:
+                errs.append(f"4: api_mismatch: required OAS field {name}.{f} has no canonical source or call variable")
+            for f in tools[name]["required"]:
+                d = str((body.get(f) or {}).get("default", ""))
+                if f not in unmapped_req and not re.fullmatch(r"\{\{(w_\w+|close_\w+|" + "|".join(CALL_VARS) + r")\}\}", d):
+                    errs.append(f"4: required OAS field {name}.{f} is not baked from a canonical variable ({d!r})")
             if (props.get("url") or {}).get("default") != tools[name]["url"]:
                 errs.append(f"4: {k} url differs from the OAS")
             for arg, sch in body.items():

@@ -149,6 +149,85 @@ def _alias(policy, field, value, enum):
     return None
 
 
+# Contract defaults (REDUCER-CONTRACT; the date-slice wording) used when the brief gives no exact wording.
+CONTRACT_DATE_SAY = {("on_non_business_day", "say"): "<NAMED> is not a business day. The next business day is <DATE>. Could you pay on <DATE>?",
+                     ("on_after_deadline", "say"): "The latest date I can record is <DEADLINE>. Could you pay on <DEADLINE>?",
+                     ("on_vague", "say_ask"): "Which exact day would that be?",
+                     ("on_vague", "say_final"): "Then I can offer <DEADLINE>, the latest date I can record. Could you pay on <DEADLINE>?",
+                     ("on_before_earliest", "say"): "That date has already passed. Which day from today on would work for you?",
+                     ("on_invalid", "say"): "Sorry, which exact date do you mean?"}
+CONTRACT_SENTENCES = {"no_other_terms": "I am sorry, there are no other terms.", "change_in_app": "You can change it in the mobile app.",
+                      "farewell": "Thank you, goodbye."}
+# Generic instruction forms of a brief ("Say that you are ...", "Tell the customer to ...") -> the sentence they ask
+# for, by a fixed grammatical rewrite of the brief's own words (no new wording).
+DERIVE = {"debt_intro": (r"\bsay (?:that )?you are (calling from [^,;]+)", lambda m: "I am " + m.group(1)),
+          "id_fail": (r"\btell (?:the customer|them) to (.+)$", lambda m: "Please " + m.group(1)),
+          "change_in_app": (r"say (?:that )?they can (change .+)$", lambda m: "You can " + m.group(1))}
+
+
+def _all_quotes(p, stable):
+    out = []
+    for _, src in _walk_sources(p):
+        out += [s.get("quote") if isinstance(s, dict) else s for s in (src if isinstance(src, list) else [src])]
+    out += [u.get("quote") for u in stable]
+    out += [u.get("quote") for u in p.get("unmapped") or [] if isinstance(u, dict)]   # verbatim-checked quotes of this run
+    return [q for q in out if q]
+
+
+def _walk_sources(x):
+    if isinstance(x, dict):
+        if "source" in x:
+            yield None, x["source"]
+        for k, v in x.items():
+            if k != "source":
+                yield from _walk_sources(v)
+    elif isinstance(x, list):
+        for v in x:
+            yield from _walk_sources(v)
+
+
+def _derived_sentences(p, stable):
+    notes, sent, quotes = [], p.setdefault("sentences", {}), None
+    for sid, (pat, fn) in DERIVE.items():
+        if sid in sent:
+            continue
+        quotes = quotes if quotes is not None else _all_quotes(p, stable)
+        for q in quotes:
+            for part in re.split(r"(?<=[.!?])\s+", q):
+                m = re.search(pat, part.strip().strip('"'), re.I)
+                if m:
+                    txt = fn(m).strip()
+                    txt = txt if txt.endswith((".", "!", "?")) else txt + "."
+                    sent[sid] = {"text": txt, "verbatim": False, "max_times": 99,
+                                 "source": [{"file": "derived", "quote": q}]}
+                    break
+            if sid in sent:
+                break
+    for sid, text in CONTRACT_SENTENCES.items():
+        if sid not in sent:
+            sent[sid] = {"text": text, "verbatim": True, "max_times": 99, "source": DEFAULT}
+            notes.append(f"sentence {sid}: no brief wording, contract default used")
+    return notes
+
+
+def _date_templates(p):
+    """A date-decision sentence is kept only if the brief gives that wording (its words, tokens aside, appear in a
+    quote of the same section); otherwise the contract template replaces the extractor's own wording."""
+    notes = []
+    for (sec, key), default in CONTRACT_DATE_SAY.items():
+        node = p.setdefault(sec, {})
+        txt = node.get(key)
+        quotes = [s.get("quote") if isinstance(s, dict) else s for s in node.get("source") or []]
+        if txt:
+            words = [w for w in re.split(r"<[A-Z]+>", txt) if w.strip()]
+            if words and all(any(_norm(w) in _norm(q or "") for q in quotes) for w in words):
+                continue
+        node[key] = default
+        if txt and txt != default:
+            notes.append(f"{sec}.{key}: extractor wording replaced by the contract template")
+    return notes
+
+
 def to_reducer(policy, oas_path, stable_unmapped=None):
     oas = oas_summary(oas_path)
     p = copy.deepcopy(policy)
@@ -290,6 +369,8 @@ def to_reducer(policy, oas_path, stable_unmapped=None):
     sent = p.setdefault("sentences", {})
     for sid, text in DEFAULT_SENTENCES.items():
         sent.setdefault(sid, {"text": text, "verbatim": True, "max_times": 99, "source": DEFAULT})
+    notes += _derived_sentences(p, stable_unmapped or [])
+    notes += _date_templates(p)
     words = [x.lower() for x in (p.get("honesty_words") or {}).get("words") or []]
     if words and not any(x in DEFAULT_HONESTY for x in words):
         p["disclosure_words"] = p["honesty_words"]

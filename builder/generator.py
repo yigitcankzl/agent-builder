@@ -60,10 +60,45 @@ def _code_action(name, code, target):
             "transitions": [_always(target)]}
 
 
+# The reducer's canonical argument names per tool (Fork 3's interface). The brief's OAS may rename body fields; each
+# OAS field is bound to a canonical name by arg_map(), never by guessing a value.
+CANONICAL = {"verify_identity": ["customer_id", "field", "answer"], "get_account": ["customer_id"],
+             "create_promise": ["customer_id", "product_id", "amount", "date"], "add_note": ["customer_id", "product_id", "reason"],
+             "schedule_callback": ["customer_id", "date", "time"], "transfer_to_agent": ["customer_id", "queue"],
+             "close_call": ["customer_id", "outcome", "reason"]}
+CALL_VARS = {"customer_id"}     # canonical names filled from call variables, not from the reducer
+
+
+def _tokens(s):
+    return {t for t in re.findall(r"[a-z]+", str(s).lower()) if len(t) > 2}
+
+
+def arg_map(tool, spec):
+    """OAS body field -> canonical name. Exact names first; then a remaining canonical name binds to the one remaining
+    OAS field whose name or description mentions it (and whose enum-ness matches). Returns (mapping, unmapped_required,
+    unused_canonical)."""
+    props, req = spec["props"], set(spec["required"])
+    canon = list(CANONICAL.get(tool, []))
+    m = {f: f for f in props if f in canon}
+    left_c = [c for c in canon if c not in m.values()]
+    left_f = [f for f in props if f not in m]
+    for c in list(left_c):
+        cands = [f for f in left_f if (c in _tokens(f) or c in _tokens((props[f] or {}).get("description", "")))]
+        if len(cands) == 1:
+            m[cands[0]] = c
+            left_c.remove(c)
+            left_f.remove(cands[0])
+    return m, [f for f in left_f if f in req], left_c
+
+
 def _api_node(tool, spec, target, args_prefix=None, extra_mapping=()):
     body = {}
+    amap, _, _ = arg_map(tool, spec)
     for arg, sch in spec["props"].items():
-        var = "customer_id" if arg == "customer_id" else f"{args_prefix or 'w_' + tool}_{arg}"
+        c = amap.get(arg)
+        if c is None:
+            continue            # an optional OAS field with no canonical source is left out (a required one is an error)
+        var = c if c in CALL_VARS else f"{args_prefix or 'w_' + tool}_{c}"
         body[arg] = {"type": sch.get("type", "string"), "default": "{{" + var + "}}"}
     return {"name": "t_" + tool, "node_type": "api_request", "passthrough": True, "passthrough_default_transition": target,
             "on_enter": {"type": "silent"},
@@ -180,9 +215,9 @@ def generate(rp, oas_path):
           "talk_hint": "", "close_outcome": who0.get("outcome") or "", "close_reason": who0.get("reason") or ""}
     for t in used:
         tv["w_go_" + t] = "done"
-        for arg in tools[t]["props"]:
-            if arg != "customer_id":
-                tv[f"w_{t}_{arg}"] = ""
+        for c in CANONICAL.get(t, []):
+            if c not in CALL_VARS:
+                tv[f"w_{t}_{c}"] = ""
     wf = {"initial_node": "greet", "system_prompt": sysp, "nodes": nodes, "global_nodes": {}, "test_variables": tv}
     GENERATED_FROM.update(hub=hub_from, ev=ev_src)
     if "close_call" in tools:
