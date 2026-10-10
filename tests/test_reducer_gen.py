@@ -368,7 +368,56 @@ def status_and_scale():
     return True
 
 
+# ---------------------------------------------------------------- mixed verified shapes, composed request fields
+def mixed_verified_and_composed():
+    # verified_this = a string status, verified_all = a boolean: both count
+    pol = copy.deepcopy(POL["A"])
+    pol["tool_results"] = dict(pol.get("tool_results") or {})
+    pol["tool_results"]["verify_identity"] = dict(verified_this="data.status", verified_all="data.all_verified",
+                                                   wrong_left="data.wrong_answers_left", verified_value="verified")
+    st = R.init_state(pol, CV)
+    st, a = say(pol, st, "kind=who;also=none;st=complete;prod=;who=self;party=")
+    st, a = say(pol, st, "kind=identity;also=none;st=complete;prod=;field=date_of_birth;ans=1990-01-01")
+    st, a = tool(pol, st, dict(status="verified", all_verified=True, wrong_answers_left=3))
+    check(a["type"] == "call_tool" and a["tool"] == "get_account", f"string verified + boolean all_verified: {a}")
+    st = R.init_state(pol, CV)
+    st, a = say(pol, st, "kind=who;also=none;st=complete;prod=;who=self;party=")
+    st, a = say(pol, st, "kind=identity;also=none;st=complete;prod=;field=date_of_birth;ans=1990-01-01")
+    st, a = tool(pol, st, dict(status="failed", all_verified=False, wrong_answers_left=2))
+    check(st["identity"]["wrong"] == 1, f"'failed' + false: wrong: {a}")
+    # composed request field: schedule_callback.when = date + time, one var, PUB-02 flow
+    pol = copy.deepcopy(POL["A"])
+    pol["tool_args"] = dict(pol.get("tool_args") or {}, schedule_callback=dict(date="when", time="when"))
+    pol["composed_fields"] = {"schedule_callback.when": dict(format="date-time", roles=["date", "time"])}
+    cv = dict(customer_id="c_p2", first_name="Ana", last_name="Costa", title="Ms", now=NOW)
+    st = R.init_state(pol, cv)
+    st["tok"] = "kstart"
+    e = R.parse_event("n=kstart;src=user;kind=who;also=none;st=complete;prod=;who=other;party=relative", st, TOPICS)
+    st, a = R.step(pol, st, e, None, NOW, cv)
+    st["last_tok"] = "kstart"
+    st["tok"] = "kcbzzz"
+    e = R.parse_event("n=kcbzzz;src=user;kind=callback;also=none;st=complete;prod=;rel=tomorrow;d=;m=;wd=;wk=none;vague=no;tm=11:00", st, TOPICS)
+    st, a = R.step(pol, st, e, None, NOW, cv)
+    check(a["type"] == "call_tool" and a["tool"] == "schedule_callback" and a["args"].get("when") == "2026-10-15T11:00:00"
+          and "date" not in a["args"] and "time" not in a["args"], f"composed when: {a}")
+    v = dict(cv, ev="n=kstart;src=user;kind=who;also=none;st=complete;prod=;who=other;party=relative")
+    code = compile(R.hub_source(pol), "hub", "exec")
+    exec(code, dict(vars=v))
+    v["ev"] = "n=" + v["ev_tok"] + ";src=user;kind=callback;also=none;st=complete;prod=;rel=tomorrow;d=;m=;wd=;wk=none;vague=no;tm=11:00"
+    exec(code, dict(vars=v))
+    check(v.get("w_schedule_callback_when") == "2026-10-15T11:00:00" and "w_schedule_callback_date" not in v, f"hub vars: {v}")
+    # absent: unchanged
+    st = R.init_state(POL["A"], cv)
+    st["tok"] = "kstart"
+    st, a = R.step(POL["A"], st, R.parse_event("n=kstart;src=user;kind=who;also=none;st=complete;prod=;who=other;party=relative", st, TOPICS), None, NOW, cv)
+    st["last_tok"], st["tok"] = "kstart", "kcbyyy"
+    st, a = R.step(POL["A"], st, R.parse_event("n=kcbyyy;src=user;kind=callback;also=none;st=complete;prod=;rel=tomorrow;d=;m=;wd=;wk=none;vague=no;tm=11:00", st, TOPICS), None, NOW, cv)
+    check(a["args"].get("date") == "2026-10-15" and a["args"].get("time") == "11:00", f"absent composed: {a}")
+    return True
+
+
 if __name__ == "__main__":
+    print("mixed verified + composed fields:", mixed_verified_and_composed())
     print("verified_value + amount_scale:", status_and_scale())
     print("nested response paths:", nested_paths())
     print("gap 4 date refusal:", date_refusal())

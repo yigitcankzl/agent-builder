@@ -758,7 +758,13 @@ def step(policy, st, event, tool_event, now, call_vars=None):
         st.pop('_hp', None)
     if act.get('type') == 'call_tool':   # canonical argument roles -> the brief's OAS body fields (bridge tool_args)
         ta = (policy.get('tool_args') or dict()).get(act['tool']) or dict()
-        act = dict(act, args=dict((ta.get(k) or k, v) for k, v in (act.get('args') or dict()).items()))
+        args = dict(act.get('args') or dict())
+        for key, spec in (policy.get('composed_fields') or dict()).items():
+            tool, _, fld = str(key).partition('.')
+            roles = (spec or dict()).get('roles') or []
+            if tool == act['tool'] and roles and all(r in args for r in roles):
+                args[fld] = compose(spec, [args.pop(r) for r in roles])   # one field from several roles, never overwritten
+        act = dict(act, args=dict((ta.get(k) or k, v) for k, v in args.items()))
     update_hangup(policy, st)
     return st, act
 
@@ -858,8 +864,9 @@ def verify_result(policy, st, data, cv):
         st['_id_hint'] += 1
         return ask(st, D_HINT_MONTH, 'id_' + idt['order'][idt['idx']])
     vv = tr_path(policy, 'verify_identity', 'verified_value')
-    if vv is not None:      # a string status (e.g. 'verified' | 'failed') instead of a boolean
-        data = dict(data, verified=str(data.get('verified')) == str(vv), all_verified=str(data.get('all_verified')) == str(vv))
+    if vv is not None:      # a string status (e.g. 'verified' | 'failed'); a boolean path (all_verified) still counts
+        yes = lambda x: str(x).lower() == 'true' or str(x) == str(vv)
+        data = dict(data, verified=yes(data.get('verified')), all_verified=yes(data.get('all_verified')))
     verified = str(data.get('verified')).lower() == 'true'
     if verified:
         if str(data.get('all_verified')).lower() == 'true' or idt['idx'] + 1 >= len(idt['order']):
@@ -1450,6 +1457,15 @@ def info_line(policy, st, t):
         st['_terms_n'] = st.get('_terms_n', 0) + 1
         return brief_sentence(policy, 'no_other_terms', D_NO_TERMS) if st['_terms_n'] == 1 else ''
     return (event_row(policy, t) or dict()).get('say') or ''
+
+
+def compose(spec, vals):
+    """composed_fields: format date-time (date YYYY-MM-DD + time HH:MM -> YYYY-MM-DDTHH:MM:00); otherwise joined by a
+    space."""
+    if str((spec or dict()).get('format')) == 'date-time' and len(vals) == 2:
+        t = str(vals[1])
+        return str(vals[0]) + 'T' + (t if t.count(':') == 2 else t + ':00')
+    return ' '.join(str(v) for v in vals)
 
 
 def loop_break(policy, st, today, cv):
