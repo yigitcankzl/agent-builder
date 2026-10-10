@@ -21,6 +21,7 @@ from builder.engine.date_policy import _norm, validate
 from builder.policy_extract import oas_summary
 
 DEFAULT = [{"file": "default", "quote": ""}]
+CALL_ROLES = ("customer_id", "first_name", "last_name", "title", "now")   # the reducer's call-variable roles
 # Generic cue words per contract topic (vocabulary of a collections call, not values of any brief); matched on the
 # topic NAME with word boundaries. Order matters: the first topic whose cue matches wins.
 TOPIC_CUES = {"change_promise": ("(change|cancel|modify)( or (change|cancel|modify))? (the |a )?(recorded )?promise", "change (the )?(recorded )?promise", "change recorded promise", "modify (the )?promise",
@@ -179,7 +180,7 @@ CONTRACT_SENTENCES = {"change_in_app": "You can change it in the mobile app.",  
 # Generic instruction forms of a brief ("Say that you are ...", "Tell the customer to ...") -> the sentence they ask
 # for, by a fixed grammatical rewrite of the brief's own words (no new wording).
 DERIVE = {"debt_intro": (r"\bsay (?:that )?you are (calling (?:from|about) [^,;]+)", lambda m: "I am " + m.group(1)),
-          "id_fail": (r"\btell (?:the customer|them) to (.+)$", lambda m: "Please " + m.group(1)),
+          "id_fail": (r"\btell (?:the customer|the person|the policyholder|the caller|them) to (.+)$", lambda m: "Please " + m.group(1)),
           "change_in_app": (r"say (?:that )?they can (change .+)$", lambda m: "You can " + m.group(1)),
           # verbatim quoted questions in the brief (the words inside the quotes are kept exactly)
           "pay_today": (r"[\"“]([^\"”]*\bpay\b[^\"”]*\btoday\?)[\"”]", lambda m: m.group(1)),
@@ -646,12 +647,16 @@ def _map_sentence_keys(p):
     return notes
 
 
-def _derived_sentences(p, stable):
+def _derived_sentences(p, stable, brief_text=None):
     notes, sent, quotes = [], p.setdefault("sentences", {}), None
+    has = lambda sid: isinstance(sent.get(sid), dict) and bool(str(sent[sid].get("text") or "").strip())
     for sid, (pat, fn) in DERIVE.items():
-        if sid in sent:
+        if has(sid):        # an extractor entry with no text is no wording: derive it from the brief's rule
             continue
-        quotes = quotes if quotes is not None else _all_quotes(p, stable)
+        sent.pop(sid, None)
+        # the extraction's quotes first; then the brief's own lines (an extraction run can miss a rule's quote)
+        quotes = quotes if quotes is not None else _all_quotes(p, stable) + [ln.strip(" -*#>\t") for ln in
+                                                                             str(brief_text or "").splitlines() if ln.strip()]
         for q in quotes:
             for part in re.split(r"(?<=[.!?])\s+", q):
                 m = re.search(pat, part.strip().strip('"'), re.I)
@@ -661,10 +666,10 @@ def _derived_sentences(p, stable):
                     sent[sid] = {"text": txt, "verbatim": False, "max_times": 99,
                                  "source": [{"file": "derived", "quote": q}]}
                     break
-            if sid in sent:
+            if has(sid):
                 break
     for sid, text in CONTRACT_SENTENCES.items():
-        if sid not in sent:
+        if not has(sid):
             sent[sid] = {"text": text, "verbatim": True, "max_times": 99, "source": DEFAULT}
             notes.append(f"sentence {sid}: no brief wording, contract default used")
     return notes
@@ -688,7 +693,7 @@ def _date_templates(p):
     return notes
 
 
-def to_reducer(policy, oas_path, stable_unmapped=None):
+def to_reducer(policy, oas_path, stable_unmapped=None, brief_text=None):
     oas = oas_summary(oas_path)
     p = copy.deepcopy(policy)
     mism, notes = [], []
@@ -702,6 +707,17 @@ def to_reducer(policy, oas_path, stable_unmapped=None):
                      "action": ("map_to:" + mapped) if mapped else "block"})
         return mapped
 
+    # ---- call variables: the reducer reads fixed roles; the extractor names them freely ('customer' / 'customer_id')
+    #      or omits some. A variable whose name is a role takes that role; a missing role maps to the same-named variable.
+    meta = p.setdefault("meta", {})
+    cvs = {}
+    for role, var in (meta.get("call_vars") or {}).items():
+        cvs[var if var in CALL_ROLES else role] = var
+    for r in CALL_ROLES:
+        if r not in cvs:
+            cvs[r] = r
+            notes.append(f"meta.call_vars: role {r} not stated, mapped to the variable {r}")
+    meta["call_vars"] = cvs
     # ---- products
     types = _enum(oas, "get_account", "products[].type", response=True)
     prod = p.setdefault("products", {})
@@ -903,6 +919,31 @@ def to_reducer(policy, oas_path, stable_unmapped=None):
                 ev["note_reason"] = resolve(f"topic_checklist.{ev['topic']}.note_reason", ev["note_reason"], "add_note.reason", e_n) or ""
             if ev.get("reason") and _enum(oas, "close_call", "reason") and ev["reason"] not in _enum(oas, "close_call", "reason"):
                 ev["reason"] = resolve(f"topic_checklist.{ev['topic']}.reason", ev["reason"], "close_call.reason", _enum(oas, "close_call", "reason")) or ""
+    # hardship has two closes (support accepted / declined) but the checklist carries one: the missing one comes from the
+    # closing-table row whose `when` names hardship and the other branch (a declined row when only the accept row exists)
+    hq = qtopic.get("hardship")
+    hrows = [e_ for e_ in evs if e_["topic"] == "hardship"]
+    if hrows and all(hq and e_.get("reason") == hq for e_ in hrows):
+        hard_cue = re.compile(r"hardship|illness|job loss|bereave", re.I)
+        dec = next((r for r in live if hard_cue.search(str(r.get("when", ""))) and re.search(r"declin|refus|no transfer", str(r.get("when", "")), re.I)
+                    and r.get("reason") != hq), None)
+        if dec:
+            evs.append({"topic": "hardship", "brief_topic": "hardship (declined)", "precedence": hrows[0]["precedence"], "say": "",
+                        "effect": "support declined", "outcome": dec["outcome"], "reason": dec["reason"],
+                        "note_reason": dec["reason"] if (not e_n or dec["reason"] in e_n) else "",
+                        "source": cl.get("source") or DEFAULT, "from_closing": dec.get("when", "")})
+            notes.append(f"events hardship (declined) from closing row {dec['outcome']}/{dec['reason']}")
+    # the support desk's name, in the brief's words, for the support offer line (reducer reads events[].desk)
+    desk_re = re.compile(r"\boffer (?:to connect (?:them|the customer|the person|the caller) with )?(?:the |our |a )?"
+                         r"([a-z][a-z ]{0,30}?\b(?:team|desk|unit|department|line))\b", re.I)
+    hard_lines = [q for e_ in evs if e_["topic"] == "hardship" for q in
+                  [str(x.get("quote") if isinstance(x, dict) else x) for x in e_.get("source") or []]]
+    hard_lines += [ln for ln in str(brief_text or "").splitlines() if re.search(r"hardship|illness|job loss", ln, re.I)]
+    desk = next((m.group(1).lower() for q in hard_lines for m in [desk_re.search(q)] if m), "")
+    if desk:
+        for e_ in evs:
+            if e_["topic"] == "hardship":
+                e_["desk"] = desk
     for t in V3_ALWAYS:
         if not any(e_["topic"] == t for e_ in evs):
             evs.append({"topic": t, "brief_topic": None, "precedence": len(evs), "source": DEFAULT})
@@ -955,7 +996,7 @@ def to_reducer(policy, oas_path, stable_unmapped=None):
     for sid, text in DEFAULT_SENTENCES.items():
         sent.setdefault(sid, {"text": text, "verbatim": True, "max_times": 99, "source": DEFAULT})
     notes += _map_sentence_keys(p)
-    notes += _derived_sentences(p, stable_unmapped or [])
+    notes += _derived_sentences(p, stable_unmapped or [], brief_text)
     for sid in FIXED_SENTENCES:
         if sid not in sent:
             sent[sid] = {"text": "", "verbatim": True, "max_times": 99, "source": DEFAULT}

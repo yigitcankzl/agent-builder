@@ -1,6 +1,14 @@
-# Reducer contract v2 (2026-10-10)
+# Reducer contract v3.2 (2026-10-10)
 
-Changes from v1 (`948cfc7`):
+**v3.2 = v3.1 + §14** (event normalisation, prompt fixes, alignment with the policy-extract safety rules).
+**v3.1 = v3 + §13** (topics found by policy extraction, `api_mismatch` at runtime, the attempts plan reference).
+**v3 = v2 + §11 (structural rules) + §12 (decisions on the fixture choices).** Where §11 or §12 conflicts with an
+earlier section, §11/§12 win. Inputs: `ext/kickoff/CONTRACT-GAP.md` (G-numbers below), the M0 risks A and B
+(`probe/M0-FINDINGS.md` 11–12), and the independent fixtures on branch `fixtures-briefs` `fd1409a`
+(`tests/fixtures/reducer/README.md`). Out of scope for v3: the static validator, persona generation, the detailed
+trace.
+
+Changes from v1 (`948cfc7`) to v2:
 1. `close` is one semantic action whose farewell is inside it (example E fixed).
 2. The farewell is spoken by tts BEFORE `close_call`, with no user turn in between (`close_say` node).
 3. That passthrough tts transition is added to the unverified list.
@@ -58,7 +66,7 @@ Rules for the extraction prompt (generated, fixed text plus policy enums):
 | `kind` | Payload keys | Notes |
 |---|---|---|
 | `identity` | `field=<OAS enum of verify_identity.field>`, `ans=<normalised answer>` | The normaliser for each field comes from the OAS description (e.g. date → `YYYY-MM-DD`, 4 digits). It runs in code; the extractor only fills `ans` |
-| `who` | `who=<self|other|unclear>`, `rel=<relative|wrong_number|deceased|>` | Who is on the line (opening phase) |
+| `who` | `who=<self|other|unclear>`, `party=<relative|wrong_number|deceased|>` | Who is on the line (opening phase). v2.1: the key was renamed from `rel`, which collided with the date key `rel` |
 | `date` | `rel=<today|tomorrow|>`, `d=`, `m=`, `wd=<mon..sun|>`, `wk=<this|next|after_next|none>`, `vague=<yes|no>` | **The labels are the only source of truth for dates** (the `date_spec` grammar of `date-slice`). There is no `iso` in the event: a model can contradict itself even inside one field (d=20 with iso=10-26). Python computes the day with `dates.date_from_spec` against `now`. A weekday that contradicts the day of month makes the event `st=ambiguous` |
 | `amount` | `amt=<digits[.dd]>` | |
 | `date_amount` | the union of `date` and `amount` | "I can pay 300 on Friday" |
@@ -430,4 +438,350 @@ the date. No attempt is consumed and `all_today_asked=true`.
 13. **Passthrough tts → `close_call` without a user turn.** Does a conversation node with `on_enter: tts {{farewell}}`
     and `passthrough: true` speak the line and then route immediately (always → `t_close_call` → `end`)? Also: is the
     tts text in the transcript BEFORE the `close_call` tool event? Probe: `close_say` in `tests/extract_eval.py`'s
-    sibling probe (`probe/m0_close_say.py`). Fallback in §6.
+    sibling probe (`probe/m0_close_say.py`). Fallback in §6. **Measured after the outage: PASS** (`64478bb6`): farewell →
+    `close_call` → `end`, no user turn.
+14. **Code node not completing under load** (`64478bb6` first pass): the graph proceeds with stale or unset vars, so a
+    literal `{{farewell}}` was spoken and `close_call` had unresolved args. Required:
+    - pre-populate every tts and close variable with a safe value from the first run;
+    - a one-shot guard on tool edges (`w_go_<tool>`, consumed by the tool node's mapping);
+    - see M0-FINDINGS 11.
+15. **Empty tts = no speech; the turn never completes** (reproduced twice). Invariant 2 is mandatory. After repeated
+    silent loops the hub's code stopped executing (an engine loop guard?), see M0-FINDINGS 12.
+16. **`hub_reset` (§11.10).** Whether a tiny code node before the hub is itself immune to the "started, never
+    completed" failure, and its added latency.
+17. **One-shot tool edge (§11.5).** Whether a node-level `response_mapping` of the envelope `status` reliably overwrites
+    `w_go_<tool>` after a 2xx, and what the variable holds after a 4xx/5xx.
+
+---
+
+## 11. v3 structural rules (override earlier sections where they conflict)
+
+### 11.1 Open question `st.q` (G0)
+- `st.q` ∈ {`none`, `confirm_name`, `pay_today`, `offer`, `readback`, `support_offer`, `help_first`, `callback_time`,
+  `exact_day`, `id_<field>`, `what_to_change`}.
+- **Every asking action sets `st.q`.** Every non-asking action sets it to `none`.
+- `yes` / `no` / `accept` are interpreted **only against `st.q`**:
+
+| `st.q` | `yes` | `accept` | `no` |
+|---|---|---|---|
+| `pay_today`, `offer` | = accept of `st.offer` | accept | flat reject |
+| `readback` | confirm | confirm | → `q=what_to_change` |
+| `support_offer` | transfer(support) | transfer(support) | hardship close or stop_product |
+| `help_first` | free talk | free talk | transfer(general) |
+| `confirm_name` | `who=self` | `who=self` | `who=other` |
+| `none` (or any other) | ignored | ignored | ignored |
+
+- **An ignored event changes no state** and leads to `speak_free` on the phase node (or re-saying the open question if
+  one exists).
+- This blocks an injected "I confirm, just record it": it is ignored unless `q=readback` and a read-back was actually
+  spoken.
+- **Write rule:** `create_promise` only for the item set of the LAST spoken read-back, answered `yes` while
+  `q=readback`.
+
+### 11.2 Human transfer before verification; the help-first flow (G9, contract bug fix)
+- `policy.transfer.pre_verification_queues` lists the queues reachable before verification. Brief A rule 42
+  "applies before and after verification" → `[general]`.
+- The hub writes `xfer_pre=yes` only when routing to `t_transfer_to_agent` with a queue in that list.
+- §6 edge, replaced: `t_transfer_to_agent if route == t_transfer_to_agent AND (route_ok == yes OR xfer_pre == yes)`.
+- Flow:
+  1. `t=human` with `q != help_first` → say "can I help you first?" (`q=help_first`, `counters.human_asks += 1`).
+  2. `no`, or `t=human` again while `q=help_first` → `call_tool(transfer_to_agent, queue=general)`.
+  3. Transfer success → `close(transferred, human)`.
+  4. `yes` → free talk.
+- `counters.human_asks` cap 1: a second `t=human` never asks again.
+
+### 11.3 Hang-up safety: the close variables are current on every run (G11, risk A)
+- **Every completed hub run** writes `close_outcome` and `close_reason` = `closing.precedence(st)`, evaluated with the
+  `hangup_default` slot:
+  - before `who=self`: the policy's "unclear" row;
+  - after `who=self` but before verification: the policy's "declined" row;
+  - after verification: computed from the product states.
+- The lifecycle `close_call` (`alwaysRunsAt: end_of_call`) bakes these. Its `pre_process_code` drops `reason` when it
+  is empty or still contains a brace, so a promise or paid outcome sends no reason.
+- **Before any hub completion**, `test_variables` holds safe values: `close_outcome` = the unclear-row outcome,
+  `close_reason` = the unclear-row reason, `farewell` = the policy's generic goodbye, `say_next` = `safe_repeat`.
+  - The reducer's lazy init writes the same values. Applying `test_variables` in a simulation is unverified (§10.3).
+- **Unflushed notes on a hang-up are lost.** Accepted risk, logged.
+
+### 11.4 Multi-product (G1–G5, G15, G16)
+- **Account turn:** one `say_exact` that states every product (one sentence each, in `get_account` order) and then
+  the first ask:
+  - Brief B: "pay all of them today?" (`q=pay_today`, `all_today_asked=true`);
+  - single product: "pay this today?".
+  No ask may come before this sentence.
+- **"No" to the all-today ask** → product `cur = 0` at attempt 1 (offer spoken, `q=offer`). Later products start
+  directly at attempt 1, with no today ask.
+- **Order:** products are worked one by one, in `get_account` order. `cur` points at the open product.
+- **A refusal at the cap** marks THAT product `refused` and moves to the next `open` product. The call closes only
+  when no product is `open` or `proposed`.
+- **A date for all** (`prod=all`): `decide` runs per product.
+  - A product whose deadline is before the date is set to its own deadline with **no separate acceptance**. The
+    read-back sentence carries the clamp clause (B rule 6).
+  - A holiday whose next business day is after the deadline → the deadline.
+  - The event keeps the date the customer named.
+- **One joint read-back** after every product is resolved (each one agreed, refused, noted or paid):
+  - it names every agreed item with its own date (`q=readback`);
+  - `no` → `q=what_to_change`, asked once; a second `no` → the agreed items become `refused` (`source: default`).
+- **Write chaining:** after `yes` to the read-back, `create_promise` runs for each confirmed item in order. A tool run
+  with a non-empty write queue emits the **next `call_tool`, with no speech in between**. When the queue is empty:
+  1. the wrap-up notes (also chained);
+  2. one `say_exact` ("Your promise is recorded. You will receive a text message confirming this promise.");
+  3. on the next user turn, `close`.
+- **Notes:**
+  - only in `wrapup`, one per product without a promise, with that product's reason;
+  - none at all if any transfer succeeded (before or after the notes would run);
+  - none if `policy.writes.notes.enabled=false` (Brief A);
+  - a failed transfer does not count as a transfer.
+- **A per-product topic** (`dispute`, `paid` with `prod=k`) marks that product `noted` with the reason and moves on.
+  It never closes the call (B9).
+
+### 11.5 Per-tool retry and exactly-once (3c, 3d)
+- `policy.tools.<tool>` = `{retries, on_fail, fail_say}`. `on_fail` is one of: `retry`, `skip`, `continue`, or
+  `close(<slot>)`. Defaults, all marked `source: default` in the policy and the trace:
+
+| Tool | Retries | After the last failure |
+|---|---|---|
+| `verify_identity` 500 | 1 (same answer) | re-ask the same field once (not a wrong answer), then close on the unclear/declined row |
+| `get_account` | 1 | close with an apology (unclear row) |
+| `create_promise` | 1 | A: close(`service_error`); B: product → `failed`, note `service_error`, continue (B11) |
+| `schedule_callback` | 1 | close(`no_callback`) |
+| `transfer_to_agent` | 1 | continue the call; never say "transferred"; the outcome is computed without it |
+| `add_note` | 1 | skip |
+| `close_call` | 0 | end anyway |
+
+- **Exactly-once caps:**
+  - `get_account`: ≤ 1 success per call;
+  - `transfer_to_agent`: ≤ 1 success;
+  - `schedule_callback`: ≤ 1 success;
+  - `create_promise`: ≤ 1 success per product;
+  - `add_note`: ≤ 1 success per product;
+  - `close_call`: exactly one explicit call (the rejected lifecycle duplicate is accepted, §10.8).
+- **A pending call whose counters never moved:** if `st.pending` is set and the run is not a tool run (no counter
+  delta), the pending call counts as a **failure** (`status_code=None`). It goes through the retry table and is never
+  re-issued silently.
+- **One-shot tool edges (risk A):**
+  - The reducer writes `w_go_<tool> = 'go'` together with the args.
+  - The hub edge to `t_<tool>` additionally requires `w_go_<tool> == go`.
+  - The tool node's node-level `response_mapping` writes `status` (the envelope status) into `w_go_<tool>`, so after
+    any successful response it is no longer `go`.
+  - On an HTTP error the mapping is unset (M0 5), so the failure path relies on the counter delta. The hub (when it
+    completes) resets `w_go_<tool>` to `done` on every tool run.
+
+### 11.6 New events: identity decline, purpose, hand-off (G8, 2c)
+- New topic values, always present in the generated grammar:
+  - `t=decline`: refuses to answer a question;
+  - `t=purpose`: "what is this about?".
+- New `who` value: `who=handoff` ("I'll get her", the phone is handed to the customer).
+- **Identity phase (Brief A rule 15):** `decline` and `purpose` both count toward `identity.refusals`.
+  - The first one: the explain-once sentence, then the same question again.
+  - The second: `close(not_verified, declined)`.
+- **`t=stop`:** twice before verification → `close(not_verified, declined)`; twice after → `close(no_promise, refused)`.
+- **Third party (`who=other`):**
+  - `identity`, `amount`, `date_amount` and `accept` events are ignored (A10; PUB-02's relative offers to pay);
+  - only `callback` and `who` events act;
+  - `who=handoff` → re-ask the name question once (counts under `confirm_name`) and return to the opening logic.
+
+### 11.7 A brief value missing from the OAS enum (`api_mismatch`)
+- At build time, every policy value that must be sent to a tool is checked against the OAS enum of that field:
+  queues, note reasons, outcomes, reasons, identity fields, product types.
+- A missing value is recorded as policy input `api_mismatch: [{policy_path, value, field, oas_enum, fallback}]`, with
+  this fallback:
+  - outcome or reason → the closest enum member by name; if there is none, the `unclear`-family row;
+  - queue → `general` if present, else the first enum member;
+  - note reason → skip the note;
+  - identity field → skip that question and use the next.
+- The reducer reads only the mapped values. It never sends a value outside the OAS enum.
+- **The build never fails on a mismatch.** The trace lists every entry.
+
+### 11.8 Close order (unchanged, restated)
+`close` = farewell by tts (`close_say`, passthrough) → `t_close_call` with no user turn → `end` (silent). Probe 13
+passed (`64478bb6`).
+
+### 11.9 Dates (unchanged, restated)
+- Labels only (the `date_spec` grammar); Python computes the ISO day.
+- The extractor never judges calendar consistency. A weekday that contradicts the day of month is detected by
+  `date_from_spec` (it returns `invalid`), and the reducer treats it as `ambiguous`: one counted clarification. This
+  amends §1.2's "makes the event `st=ambiguous`" (see §12, choice 18).
+
+### 11.10 Risk A mitigations (platform load; not fully solvable in the workflow)
+1. **Pre-populated variables.** Every variable used in a tts text or in close args (`say_next`, `farewell`,
+   `close_outcome`, `close_reason`, `talk_hint`) has a safe value from `test_variables` and from the reducer's first
+   run. It is never unset.
+2. **`hub_reset` before `hub`.** Every speaking node's `always` edge goes to a tiny code node `hub_reset`. It writes
+   only `route = 'stale'` and `say_next = ''`, then passes through to `hub`.
+   - If the hub then fails to complete, `route` is `stale`.
+   - The hub's edges send `stale` to `talk_<phase>` (free talk with a safe prompt), NOT to tts, so a stale `say_next`
+     is never re-spoken and no tool edge fires.
+   - Cost: one small code node per turn. Unverified: whether `hub_reset` itself can fail the same way.
+3. **The safe default close** when the hub never completed is the pre-populated unclear-row outcome (11.3).
+4. **One-shot tool edges** (11.5) stop a stale route from re-firing a write.
+5. Residual risk: if the platform stalls (no events at all, `1327758a`), nothing in the workflow helps. Logged.
+
+### 11.11 Graph delta from §6
+```
+speaking nodes (greet, exact_say, talk_pre, talk_post[, talk_third]) --always--> hub_reset --always--> hub
+hub edges, in order:
+  close_say            route == close
+  t_transfer_to_agent  route == t_transfer_to_agent AND w_go_transfer_to_agent == go AND (route_ok == yes OR xfer_pre == yes)
+  t_get_account, t_create_promise, t_add_note      route == t_x AND w_go_x == go AND route_ok == yes
+  t_verify_identity, t_schedule_callback           route == t_x AND w_go_x == go
+  talk_post            (route == talk_post OR route == stale) AND route_ok == yes
+  exact_say            route == say
+  talk_pre             always (last: stale or a refused gate before verification → free talk with the safe prompt; never an empty tts)
+```
+- §6's "last edge = `exact_say` with the safe line" is replaced: the last edge is the phase free-talk node, because
+  `say_next` may be the reset value `''`.
+- A refused gate after verification also lands on `talk_pre`, which has no account facts: safe, but less helpful.
+
+---
+
+## 12. Decisions on the fixture choices (`fixtures-briefs` `fd1409a`, `tests/fixtures/reducer/README.md`)
+
+| # | Choice | Decision |
+|---|---|---|
+| 1 | Identity `ans` holds the normalised value | **Accept.** The extractor writes `ans` in the OAS format (`YYYY-MM-DD`, 4 digits); `verify_identity` gets the same string. The code re-checks the format with a regex from the OAS description; a value that fails the check is treated as `ambiguous`: re-ask the same field once, not a wrong answer. |
+| 2 | The name question counts at `bootstrap.first_hub` with no user event | **Accept, amended.** Rule: **ask counters increment when the ask is SPOKEN (action-driven), never on an event.** Implementation: `greet`'s tts = opening sentence + name question, and the lazy init sets `confirm_name=1`, `q=confirm_name`. Equivalent to the fixture's bootstrap step. |
+| 3 | `customer_id` = `c_pub01`… call variables | **Accept** (harness only). |
+| 4 | Wrong answer = HTTP 200, `ok` true, `verified` false; `wrong_answers_left` is the truth; failure counter only on 500 or `ok` not true | **Accept.** An unreadable answer (`ok` false) → re-ask the same field once, not counted. |
+| 5 | HTTP 500: `ok` null, `data {}`, retry with the same args and no speech | **Accept** (= 11.5). |
+| 6 | `st.offer` is one amount; the joint read-back uses `readback.items` + per-product `offer`; `cur` null; `all_today_asked` on the B ask and on an A "not today" | **Accept.** |
+| 7 | First ask sets offer = full amount today, `proposed`; a day named outranks accept; a bare "Yes" is debatable | **Accept, amended by 11.1:** a `yes` with `q=pay_today` IS an accept of the today offer, so it is no longer debatable for the reducer. The extraction label stays `kind=yes`. |
+| 8 | Attempts are counted when spoken; at the cap → `refused`; attempt 2 = floor on the deadline; proposals don't count; "too much" only offers the floor | **Accept.** |
+| 9 | Vague: drops the today offer, `counters.vague`, no attempt; partial → "Go on, please." and no change | **Accept.** |
+| 10 | Read-back: single product straight to confirm; multi = one joint read-back after all resolved; clamp in the read-back; the event keeps the named date | **Accept** (= 11.4). |
+| 11 | "Recorded" said once after the last success; notes chained before it in wrapup; transfer: user turn → tool with no speech, success → close; no notes on that path | **Accept** (= 11.4). |
+| 12 | Discount → `kind=other` + `speak_free` on `talk_post`; `counters.support_offered`; sympathy substrings `sorry` + `customer support` | **Accept, amended:** the support question sets `q=support_offer` (11.1); `counters.support_offered` stays as its cap-1 counter. |
+| 13 | Close lines: exact where the whole farewell is "Thank you, goodbye."; contains-checks for paid / third wrong answer | **Accept.** |
+| 14 | The opening's "recorded" wording is not required either way | **Accept.** The honesty lint may rewrite it; the fixture requires only "digital assistant" and "Freya Bank". |
+| 15 | A secondary reject has no `why` | **Accept.** |
+| 16 | "Around eleven" → `tm=11:00` | **Accept.** Callback times are normalised to `HH:MM`; "around" is ignored. |
+| 17 | A bare weekday → `wk=none` (coming occurrence); the public sequences say "this Friday" | **Accept.** |
+| 18 | "Friday the 20th" expects `st=ambiguous` | **Reject.** The extractor must not judge calendar consistency (it would need date arithmetic). The label stays `st=complete` with both labels (`d=20;wd=fri`); `date_from_spec` returns `invalid`, and the **reducer** turns that into one counted clarification. **The fixture row should change to `st=complete`.** |
+| 19 | Injection during identity → `t=injection`, not an identity success | **Accept, amended §1.5:** `t=injection` outranks `who`/`identity` in every phase; only the other topics yield to them in the opening and identity phases. |
+| 20 | Tokens: the harness sets `st.tok` to the scripted `n`; `last_tok` starts at `kstart`; tool steps ignore `ev` | **Accept.** |
+
+---
+
+## 13. v3.1: topics found by policy extraction, `api_mismatch` at runtime, the attempts plan
+
+Input: the policy-extract fork's bridge report (`policy-extract` `b07b6c8`, `tests/policy_eval/bridge_eval.txt`). It
+lists the topics its extractor found with no contract topic, plus the `api_mismatch` entries.
+
+### 13.1 Topics: two new `t=` values; the rest map onto existing events
+Rule: a new topic only where a **fixed line** protects a scored check that free LLM talk could break.
+
+| Found topic | Decision | Mechanism |
+|---|---|---|
+| `change_recorded_promise` (A36) | **NEW `t=change_promise`** | Any phase after a product is `persisted`: say `sentences.change_in_app` (A36: "they can change it in the mobile app"), no write, no state change. Also, a `date`/`amount` event aimed at a `persisted` product → the same line (G17). Policy: `events[{topic: change_promise, say: change_in_app}]`. Protects one promise per product and the honesty judge (a free LLM may "update" the promise). |
+| `discount_or_other_terms` (A33) | **NEW `t=terms`** | The customer asks for a discount, a waiver, a lower amount "deal" or any term the brief does not offer: say `sentences.no_other_terms` (a fixed refusal of other terms), then re-ask the open question. No attempt is consumed; it is not a refusal. **Exception:** a request for a new plan or lower instalments stays `t=restructure` (A41 → transfer); the extractor prompt says so. Protects PUB-05's "no discount, waiver or plan offered". **Amends §12 choice 12:** PUB-05's discount line becomes `kind=topic;t=terms`, not `kind=other`; the hardship flow is unchanged. |
+| `busy_or_voicemail` (mut-05, a new outcome reason) | **No new topic.** Maps onto existing events through the policy's `events[].effect` | "I'm busy, call me later" from the customer → `callback` (with or without a time) or `t=stop`. The policy maps that topic/kind in the opening phase to the closing slot `busy`, whose row is the brief's outcome/reason (`events[{kind: callback, phase: opening, effect: end_call(busy)}]`). A voicemail or answering machine is `who=unclear` → the existing unclear row, unless the policy maps it to `busy`. The reducer has no literal `busy`; only the slot does. |
+| `identity_failed` | **No topic.** It is a tool fact | `wrong_answers_left == 0` (or the policy's `max_wrong`) from `verify_identity` → closing slot `id_failed`. The customer cannot "say" it. |
+| `ambiguous_identity_confirmation` (A3: "hello", "who is this" do not count) | **No topic.** Covered by `who=unclear` + `counters.confirm_name` | `who=unclear` → re-ask the name question (counted when spoken, §12 choice 2). At the cap → closing slot `unclear`. A question from the customer is answered first (scam/robot/purpose), and the re-ask that follows is the counted second ask (A3). |
+| `unknown_information` (mut-03), `flat_refusal`, `opening` (raw-a) | **No topic.** Existing | `t=unknown_info`, `kind=reject;why=flat`, and the greet sentence. The bridge should map these names onto the existing ones. |
+
+**New event values in v3 and v3.1, the full list for the fixtures:**
+- topics: `t=decline`, `t=purpose` (v3), `t=change_promise`, `t=terms` (v3.1);
+- who value: `who=handoff` (v3);
+- the `who` payload key `party` replaces `rel` (v2.1).
+
+No new `kind` values in v3.1.
+
+### 13.2 `api_mismatch` at runtime: map at build time to a safe OAS value; block only when no safe value exists
+**One rule. The reducer never sends a string outside the brief's OAS enum.** Sending one would make the mock reject
+the call (an outcome the scorer can't match, or a failed write).
+
+At build time each mismatch gets exactly one of:
+- (a) **`map_to`**: an OAS enum member chosen by the closest name, else the safe family member:
+  - outcome → the `unclear`/not-reached-family outcome;
+  - reason → the closest reason, or omit it if the OAS allows that;
+  - queue → `general`, else the first enum member;
+- (b) **`block`**: no safe member exists (e.g. a note reason with no equivalent).
+  - The reducer skips that tool call and takes the per-tool `on_fail` path (11.5). A note is skipped; an identity
+    field is skipped and the next question is used.
+  - If **every** identity field of the brief is blocked, the OAS enum fields are asked in order, with generic asks
+    (`source: default`).
+
+Example: mut-05's `close_call.outcome: 'no_contact'` → `map_to` = `not_reached` if that is in the OAS, else per the
+rule above. mut-04's `verify_identity.field: postcode, year_of_birth` against an OAS that lacks them → `block`, which
+triggers the all-blocked fallback.
+
+**Failure mode, accepted and logged in the trace:**
+- if the mismatch was REAL (the hidden OAS truly lacks the value), a mapped outcome can still differ from the
+  expected ledger tuple;
+- if the mismatch came from a policy-extraction error, the mapping hides that error.
+
+So the builder treats any mismatch as a **signal to re-check that policy field once**: one targeted re-extraction of
+that field before falling back to `map_to`/`block`. That is the builder's job, outside the reducer.
+
+### 13.3 Attempts plan: referenced, not redefined
+- The policy-extract fork is adding `attempts.plan` to the policy schema: per band and per attempt,
+  `{date_rule, amount_rule}` with closed enums (e.g. `date_rule` ∈ last business day of this week / of next week if
+  today is that day / the deadline …; `amount_rule` ∈ full / floor / floor-again …).
+- The reducer's persuasion step reads `policy.attempts.plan[band][attempt_index]`. It never hard-codes "attempt 1 =
+  Friday, full" or "attempt 2 = floor on the deadline".
+- §7's `attempts` row and §12 choice 8 are read through that plan. The cap is `len(plan[band])`; an empty plan means
+  no persuasion attempts (mut-03: "the early band has no persuasion attempts").
+- Date rules resolve through the date core (`dates.add_business_days`, `deadline_for`, the business-day calendar).
+
+---
+
+## 14. v3.2: event normalisation, prompt fixes, alignment with the policy-extract safety rules
+
+Evidence: the acceptance run `8ce83b3` (`results/EXTRACT-ACCEPT-v31.md`). Raw labels scored 59/67 on kind; after
+normalisation the behaviour matched in 66/67 cases.
+
+### 14.1 Normalisation in the event parser (before `step`, applied to the event only)
+| | Raw event | Normalised to | Applies when |
+|---|---|---|---|
+| (a) | `kind=accept` | `kind=yes` | `st.q` ∈ {`pay_today`, `offer`, `readback`}. In any other `q` both are ignored anyway (§11.1) |
+| (b) | `st=none` with `kind != other` | `st=complete` | always. A real "No." must never be dropped |
+| (c) | `kind=date` (or `date_amount`) | `kind=callback` (the date labels kept; `tm` empty) | `st.phase == third_party` |
+| (d) | `kind=other` | `kind=who;who=unclear` | `st.q == confirm_name` |
+
+Also:
+- A topic name used as a kind (`kind=hardship`) → `kind=topic;t=hardship` (the `event_field.parse` alias).
+- `also` is advisory and is never normalised.
+- The reducer acts only on the normalised event. Both the raw and the normalised event go into the trace.
+
+### 14.2 Prompt fixes (`builder/engine/event_field.py`)
+- "`st=none` only together with `kind=other`."
+- A third-party callback example with a time: "tomorrow around eleven" → `kind=callback;…;rel=tomorrow;tm=11:00`.
+- A topic-over-amount example: "could you take 200 as a discount" → `kind=topic;t=terms;also=amount;amt=200`.
+- The acceptance gate for `kind` is scored after normalisation (14.1); the raw label accuracy is still reported.
+
+### 14.3 Alignment with the policy-extract safety rules (`policy-extract` `eccf11c`, `c662a35`); referenced, not redefined
+- **`api_mismatch`: no fuzzy or closest-name mapping.** Only an exact OAS value or a sourced alias is allowed; anything
+  else is `block`. This **replaces §13.2's `map_to`-by-closest-name.**
+  - The reducer reads the bridge's resolved values. It never sends a value outside the OAS enum.
+  - A blocked tool value takes that tool's `on_fail` path.
+- **A required identity field that is missing from the OAS** → `identity.blocked`. The reducer closes through the
+  identity `on_fail` slot **before any account fact**, and never skips to an unverified state. This **replaces §11.7 /
+  §13.2's "skip that question"** for required fields.
+- **Closing slots** come from `policy.closing.slots`: `unclear`, `declined`, `id_failed`, `busy`, `callback_failed`,
+  `write_failed`. A slot whose value is `null` is not available.
+  - `hangup_default` comes from `policy.hangup_default` (`before_who`, `before_verified`, `after_verified: computed`).
+  - The reducer has no outcome or reason literals of its own.
+- **Bridge format quirks the reducer must accept:**
+  - a `reason` of `"none"` or `null` means no reason;
+  - `events[].topic` is the contract vocabulary and the key the reducer uses;
+  - `events[].brief_topic` is free text and is never matched;
+  - a topic with two rows (hardship: accept or decline support; stop: before or after verification) is told apart by
+    the row's `outcome`.
+
+## §15 Loop breaker (stage-aware, replaces "repeat → free talk")
+
+Every open q has a cap: the same line re-said more than RESAY_CAP (3) times, or one tts line more than RESAY_CAP+1
+times in a row. At the cap `loop_break()` gives the q's on-cap action. Free talk is never the escape.
+
+| stage | q | on cap |
+|---|---|---|
+| before verification | help_first | transfer if the human queue is in pre_verification_queues, else close as below |
+| before verification | third party / callback_time | close on slot callback_failed |
+| before verification | id_* (who=self) | close on slot declined |
+| before verification | anything else (confirm_name, ...) | close on slot unclear |
+| after verification | pay_today / offer / exact_day | the product's next attempt (a non-answer is a no); refusal at the plan cap |
+| after verification | support_offer | the decline path (hardship note, close) |
+| after verification | readback / what_to_change / other | close: precedence, else the refused row |
+
+Test: `loop_caps()` in tests/test_reducer_props.py (22 phase × q starts on two policies): never speak_free, no tts
+loop, the call ends, and pre-verification closes land on the slot above with no account fact.

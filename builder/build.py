@@ -103,7 +103,7 @@ def build(briefs, openapi, slot=None, freya_client=None, out_dir="submission", t
         return result
 
     trace.log("start", slot=slot, briefs=[os.path.basename(b.rstrip("/")) for b in briefs], runs=runs, budget_s=budget_s)
-    _sources(trace, briefs, openapi)
+    brief_text = "\n".join(_sources(trace, briefs, openapi).values())
     # 1. extraction runs, in parallel
     policies = []
     with cf.ThreadPoolExecutor(runs) as ex:
@@ -133,7 +133,7 @@ def build(briefs, openapi, slot=None, freya_client=None, out_dir="submission", t
     attempt_order = [primary] + [p for p in policies[1:]]
     wf = rp = None
     for k, pol in enumerate(attempt_order[:2]):
-        rp, brep = to_reducer(pol, openapi, stable)
+        rp, brep = to_reducer(pol, openapi, stable, brief_text)
         trace.log("bridge", attempt=k + 1, api_mismatch=brep["api_mismatch"], notes=brep["notes"], schema_errors=brep["errors"],
                   topics=brep["events"], identity_blocked=(rp.get("identity") or {}).get("blocked"), hangup_default=rp.get("hangup_default"))
         mism = brep["api_mismatch"]
@@ -151,7 +151,7 @@ def build(briefs, openapi, slot=None, freya_client=None, out_dir="submission", t
                           result="mapped (sourced, in the OAS enum)" if r.get("accepted") else "kept block")
             if any(r.get("accepted") for r in res.values()):
                 pol = apply_reextraction(pol, mism, res)
-                rp, brep = to_reducer(pol, openapi, stable)
+                rp, brep = to_reducer(pol, openapi, stable, brief_text)
                 trace.log("bridge", attempt="1-reextracted", api_mismatch=brep["api_mismatch"], notes=brep["notes"],
                           identity_blocked=(rp.get("identity") or {}).get("blocked"))
         wf = generate(rp, openapi)

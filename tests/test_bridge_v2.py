@@ -206,13 +206,52 @@ def regressions():
           "an explicit refusal stays refuse, and a shift line is never paired with it")
 
 
+def derive_fixes():
+    print("== integration: sentence derive")
+    p = copy.deepcopy(BASE)
+    p["sentences"] = dict(p.get("sentences") or {}, debt_intro={"text": "", "source": []})
+    for k in ("unmapped",):
+        p.pop(k, None)
+    text = "17. Say that you are calling from the collections team about a late payment. State the amount."
+    rp, _ = B.to_reducer(p, OAS, [], text)
+    check(rp["sentences"]["debt_intro"]["text"] == "I am calling from the collections team about a late payment.",
+          "an empty extractor debt_intro is derived from the brief's own line (the run had no quote for it)")
+    p2 = copy.deepcopy(BASE)
+    p2["hooks"] = [{"id": "f", "point": "unsure", "condition": None, "expects_answer": False,
+                    "source": src("Tell the person to use the mobile app or write to the bank.")}]
+    rp2, _ = B.to_reducer(p2, OAS, [], "Tell the person to use the mobile app or write to the bank.")
+    check(rp2["sentences"]["id_fail"]["text"] == "Please use the mobile app or write to the bank.", "id_fail from 'tell the person to X'")
+    check(not [h for h in rp2["hooks"] if h["id"] == "f"], "the id_fail line is not also placed as a hook")
+
+
+def integration_fixes():
+    print("== integration: call roles, hardship decline")
+    p = copy.deepcopy(BASE)
+    p["meta"] = dict(p.get("meta") or {}, call_vars={"customer": "customer_id", "title": "title"})
+    rp, _ = B.to_reducer(p, OAS, [])
+    cv = rp["meta"]["call_vars"]
+    check(all(cv.get(r) == r for r in B.CALL_ROLES), f"every reducer call role is mapped ({cv})")
+    p = copy.deepcopy(BASE)
+    tc = dict(p.get("topic_checklist") or {})
+    tc["hardship"] = {"present": True, "say": "", "effect": "offer support", "outcome": "transferred", "reason": "support",
+                      "note_reason": "", "source": src("If they accept, transfer to support.")}
+    p["topic_checklist"] = tc
+    p["closing"] = dict(p["closing"], table=[r for r in p["closing"]["table"]] +
+                        [{"outcome": "no_promise", "reason": "hardship", "when": "hardship, declined the support transfer"}])
+    rp, _ = B.to_reducer(p, OAS, [])
+    rows = [(e.get("outcome"), e.get("reason")) for e in rp["events"] if e["topic"] == "hardship"]
+    check(("no_promise", "hardship") in rows and ("transferred", "support") in rows, f"hardship accept + decline rows: {rows}")
+    rp, _ = B.to_reducer(p, OAS, [], "31. If the person mentions job loss, offer to connect them with the wellbeing team.")
+    check({e.get("desk") for e in rp["events"] if e["topic"] == "hardship"} == {"wellbeing team"}, "hardship desk name from the brief's words")
+
+
 def gap2_exact():
     q = {"field": "postcode", "format": "postcode", "format_evidence": {"source": src("Send the postcode exactly as said, letters and digits.")}}
     check(B.answer_format(q)[0] == "free", "'exactly as said' wins over the postcode format -> free")
 
 
 if __name__ == "__main__":
-    for g in (gap1, gap2, gap2_exact, gap3, gap4, regressions):
+    for g in (gap1, gap2, gap2_exact, gap3, gap4, regressions, derive_fixes, integration_fixes):
         g()
     print("RESULT:", "PASS" if not fails else f"FAIL ({len(fails)})")
     sys.exit(1 if fails else 0)

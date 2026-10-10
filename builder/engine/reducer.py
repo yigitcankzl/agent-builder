@@ -17,7 +17,7 @@ import re
 
 try:  # local runs; in the code node the date core is concatenated above this file
     from builder.engine.dates import date_from_spec, parse_spec, decide, deadline_for, add_business_days, \
-        is_business_day, say_date
+        is_business_day, say_date, shift_to_business_day
 except Exception:
     pass
 
@@ -51,6 +51,7 @@ def desk_name(row):
 D_PROTECT = 'These questions protect your account.'
 D_REACH = 'Could you tell me when I can reach {title} {last_name}?'   # the kit (PUB-02) checks 'when'
 D_OVERDUE = 'The rest stays overdue.'
+D_WHICH_DAY = 'Which day would suit you?'
 COUNTERS = ['confirm_name', 'clarify', 'vague', 'stop_talking', 'human_asks', 'decline_explain', 'support_offered']
 TOOL_NODE = dict(verify_identity='t_verify_identity', get_account='t_get_account', create_promise='t_create_promise',
                  add_note='t_add_note', schedule_callback='t_schedule_callback',
@@ -240,6 +241,11 @@ def vocab(policy):
     others = [w for w in policy.get('who_rules') or [] if w.get('who') == 'other' and w.get('party', 'relative') in ('relative', '', None)]
     cb_ok = next((w for w in others if pair(w) != out['callback_failed'] and pair(w)[0]), others[0] if others else None)
     out['callback'] = pick('who_rules other (callback)', pair(cb_ok))
+    if out['callback'][0] and not out['callback'][1]:    # a reason-less callback row: the closing row named callback
+        row = next((r for r in table if _none(r.get('outcome')) == out['callback'][0] and _none(r.get('reason')) == 'callback'), None)
+        if row:
+            log.append('who_rules other (callback) has no reason: closing row callback used')
+            out['callback'] = pair(row)
     out['callback_say'] = (cb_ok or dict()).get('say') or ''
     cb_no = next((w for w in policy.get('who_rules') or [] if pair(w) == out['callback_failed']), None)
     out['callback_retry_say'] = (cb_no or dict()).get('say') or ''
@@ -274,16 +280,70 @@ def init_state(policy, call_vars=None):
               _pd=[], _tc=dict(), _last_ask='', _queue=[], _cb_out=0, _ask_time=0, _xfer_pre='no',
               _wrapup_said=False, _what_change=0, _id_hint=0, _id_retry=0)
     st['counters']['confirm_name'] = 1          # the greet speaks the name question (§12 choice 2)
+    for h in policy.get('hooks') or []:
+        if isinstance(h, dict) and h.get('expects_answer'):
+            st.setdefault('_hook_skip', []).append(str(h.get('id')) + ':expects_answer')
+        elif isinstance(h, dict) and h.get('point') == 'opening':
+            st.setdefault('_hooks_said', []).append(h.get('id'))
     st['_last_ask'] = name_question(policy, call_vars or dict())
     return st
 
 
 # ---------------------------------------------------------------- products
+def _round(v, how, to):
+    q = 1.0 if str(to or '').lower() in ('unit', 'units', 'whole', 'integer', '1') else 0.01
+    x = v / q
+    x = -int(-x // 1) if how == 'up' and abs(x - round(x)) > 1e-9 else (int(x // 1) if how == 'down' and abs(x - round(x)) > 1e-9 else round(x))
+    return round(x * q, 2)
+
+
+def _num(x):
+    try:
+        return float(x)
+    except Exception:
+        return None
+
+
 def _floor(policy, row):
-    fb = ((policy.get('products') or dict()).get('floor_by_type') or dict()).get(str(row.get('type')))
-    if isinstance(fb, dict) and fb.get('field') and row.get(fb['field']) is not None:
-        return float(row.get(fb['field']))
-    return float(row.get('past_due') or 0)      # no floor rule for this type in the policy: the full amount
+    """floor_by_type[type] (or '*'): kind field|account_field (field), percent|percent_of_past_due (percent),
+    fixed (amount), max_fixed_percent (amount, percent); round up|down|nearest to cents (default) or units. Never above
+    the full amount; no rule -> the full amount. acceptance full_only -> the full amount."""
+    full = float(row.get('past_due') or 0)
+    if accept_rule(policy)[0] == 'full_only':
+        return full
+    fbt = (policy.get('products') or dict()).get('floor_by_type') or dict()
+    fb = fbt.get(str(row.get('type'))) or fbt.get('*') or fbt.get('default')
+    if not isinstance(fb, dict):
+        return full
+    kind = str(fb.get('kind') or ('account_field' if fb.get('field') else '')).lower()
+    pct, fix = _num(fb.get('percent')), _num(fb.get('amount') if fb.get('amount') is not None else fb.get('fixed'))
+    how, to = str(fb.get('round') or fb.get('rounding') or 'nearest').lower(), fb.get('round_to') or fb.get('to')
+    if kind in ('field', 'account_field') and fb.get('field') and row.get(fb['field']) is not None:
+        v = float(row.get(fb['field']))
+    elif kind in ('percent', 'percent_of_past_due') and pct is not None:
+        v = _round(full * pct / 100.0, how, to)
+    elif kind == 'fixed' and fix is not None:
+        v = fix
+    elif kind in ('max_fixed_percent', 'max') and fix is not None and pct is not None:
+        v = max(fix, _round(full * pct / 100.0, how, to))
+    else:
+        return full
+    return min(v, full)
+
+
+def amount_fits(policy, pd, amt):
+    kind, x = accept_rule(policy)
+    low = x if kind == 'min_x' and x is not None else pd['floor']
+    return min(low, pd['past_due']) - 0.005 <= amt and (amt <= pd['past_due'] + 0.005 or kind == 'above_full_allowed')
+
+
+def accept_rule(policy):
+    """amounts.acceptance: floor_to_full (default) | full_only | min_x (with min) | above_full_allowed; a string or
+    dict(kind=, min=)."""
+    a = (policy.get('amounts') or dict()).get('acceptance')
+    if isinstance(a, dict):
+        return str(a.get('kind') or 'floor_to_full'), _num(a.get('min') if a.get('min') is not None else a.get('x'))
+    return (str(a), None) if a in ('floor_to_full', 'full_only', 'min_x', 'above_full_allowed') else ('floor_to_full', None)
 
 
 def _name(policy, row):
@@ -362,7 +422,7 @@ def load_products(policy, st, rows, today):
         dline = deadline_for(today, dl, policy)
         st['products'].append(dict(id=str(r.get('product_id')), status='open', attempts=0, floor_offered=False,
                                    write_failures=0, offer=None, note=None))
-        st['_pd'].append(dict(id=str(r.get('product_id')), name=_name(policy, r), past_due=float(r.get('past_due') or 0),
+        st['_pd'].append(dict(id=str(r.get('product_id')), type=str(r.get('type')), name=_name(policy, r), past_due=float(r.get('past_due') or 0),
                               days_late=dl, floor=_floor(policy, r), band=band.get('name'), deadline=iso(dline),
                               plan=_plan(policy, band), too_much=False, note_reason=None, refused_offers=[]))
 
@@ -423,10 +483,13 @@ def ask(st, text, q):
     return dict(type='say_exact', text=text)
 
 
+OUR_OFFERS = ('floor', 'attempt_n')   # offers the agent proposed (PUB-06); a read-back of the customer's own date is re-said
 RESAY_CAP = 3   # DEFAULT cap for every q: the same open question re-said this many times in a row, then loop_break()
 
 
 def resay(st, prefix=''):
+    if st.get('q') == 'offer' and (st.get('offer') or dict()).get('kind') in OUR_OFFERS:   # heard, not answered: only the day
+        return ask(st, ((prefix + ' ') if prefix else '') + D_WHICH_DAY, 'exact_day')
     st['_resay_n'] = st.get('_resay_n', 0) + 1
     if st['_resay_n'] > RESAY_CAP:
         st['_resay_n'] = 0
@@ -530,6 +593,14 @@ def normalise(ev, st):
         e['kind'] = 'callback'
     if e.get('kind') == 'other' and st['q'] == 'confirm_name':
         e['kind'], e['who'] = 'who', 'unclear'
+    # §1.5: in the opening a stated speaker ranks above any topic but injection (PUB-02 live: 'No, I'm her husband.
+    # What is this about?' came as t=purpose;also=who;who=other and was re-asked into an unclear close); in the security
+    # questions an answer ranks above any topic but injection. The topic stays as also_t (an answer topic is answered).
+    if e.get('kind') == 'topic' and e.get('t') != 'injection':
+        if st['phase'] == 'opening' and e.get('who') in ('self', 'other', 'unclear', 'handoff', 'busy'):
+            e['kind'], e['also_t'], e['also'] = 'who', e.get('t'), 'topic'
+        elif st['phase'] == 'identity' and str(e.get('ans') or '').strip() and str(st.get('q') or '').startswith('id_'):
+            e['kind'], e['also_t'], e['also'] = 'identity', e.get('t'), 'topic'
     a = e.get('also_t') or e.get('also')
     # only hardship (A32: before persuasion and restructuring) and injection outrank the primary event through also=;
     # any other also-topic never outranks a date / amount / accept / yes (a proposal is never a refusal, A29)
@@ -565,7 +636,17 @@ def step(policy, st, event, tool_event, now, call_vars=None):
                                        no_delta=True), today, cv)
     else:
         ev = normalise(event, st)
+        info = ev.get('also_t') if ev and ev.get('kind') != 'topic' and ev.get('also_t') in TOPIC_INFO else None
+        if info:       # PUB-04: a date (or any event) plus "are you a robot?": the event once, the answer line first
+            ev = dict(ev, also='none', also_t='')
         act = on_user(policy, st, ev, today, cv) if ev else resay(st)
+        if info:
+            line = info_line(policy, st, info)
+            if line:
+                st['_info_next'] = ((st.get('_info_next') or '') + ' ' + line).strip()
+    if st.get('_info_next') and act.get('type') in ('say_exact', 'close'):   # an answer line waits for a spoken line
+        key = 'text' if act['type'] == 'say_exact' else 'farewell'
+        act = dict(act, **dict([(key, (st.pop('_info_next') + ' ' + (act.get(key) or '')).strip())]))
     if act.get('type') == 'say_exact' and not str(act.get('text') or '').strip():
         act = dict(type='say_exact', text=sentence(policy, 'safe_repeat', D_SAFE))
     # never loop on one tts line: the same words more than RESAY_CAP + 1 times in a row break the loop by stage
@@ -586,6 +667,10 @@ def step(policy, st, event, tool_event, now, call_vars=None):
     if act.get('type') == '_loop':
         st['_said_n'], st['_said_last'], st['_resay_n'] = 0, None, 0
         act = loop_break(policy, st, today, cv)
+    if policy.get('hooks'):
+        act = attach_hooks(policy, st, act)
+    else:
+        st.pop('_hp', None)
     if act.get('type') == 'call_tool':   # canonical argument roles -> the brief's OAS body fields (bridge tool_args)
         ta = (policy.get('tool_args') or dict()).get(act['tool']) or dict()
         act = dict(act, args=dict((ta.get(k) or k, v) for k, v in (act.get('args') or dict()).items()))
@@ -711,6 +796,7 @@ def account_statement(policy, st, today):
         st['all_today_asked'] = True
         text = ' '.join(x for x in lines + [D_ALL_TODAY] if x)
     st['phase'] = 'negotiation'
+    hook_point(st, 'after_debt')
     return ask(st, text, 'pay_today')
 
 
@@ -742,6 +828,7 @@ def next_write(policy, st, cv):
             words = ((policy.get('honesty_words') or dict()).get('words') or []) + ['saved']
             rec = '' if any(w in sms.lower() for w in words) else D_RECORDED   # the SMS line may already say it
         text = (rec + ' ' + sms).strip()
+        hook_point(st, 'on_promise_recorded')
         st['_last_ask'] = text
         return dict(type='say_exact', text=text.strip())
     o, r = precedence(policy, st)
@@ -798,11 +885,12 @@ def plan_date(rule, today, pd, policy):
 
 
 def plan_amount(rule, pd):
+    below = pd['floor'] < pd['past_due'] - 0.005     # a floor equal to the full amount is not a floor offer
     if rule in ('floor', 'floor_again'):
-        return pd['floor'], True
+        return pd['floor'], below
     if rule == 'full':
         return pd['past_due'], False
-    return (pd['floor'], True) if pd['too_much'] else (pd['past_due'], False)
+    return (pd['floor'], below) if pd['too_much'] else (pd['past_due'], False)
 
 
 def start_attempt(policy, st, i, today, from_today_ask=True):
@@ -810,6 +898,8 @@ def start_attempt(policy, st, i, today, from_today_ask=True):
     st['cur'] = i
     if p['attempts'] >= len(pd['plan']):
         return refuse_product(policy, st, i, today)
+    if p['attempts'] >= 1:
+        hook_point(st, 'on_refusal')
     rule = pd['plan'][p['attempts']]
     date = plan_date(rule.get('date_rule'), today, pd, policy)
     amount, is_floor = plan_amount(rule.get('amount_rule'), pd)
@@ -825,6 +915,7 @@ def start_attempt(policy, st, i, today, from_today_ask=True):
 def refuse_product(policy, st, i, today, cv=None):
     p, pd = _p(st, i)
     p['status'] = 'refused'
+    hook_point(st, 'on_refusal')
     pd['note_reason'] = pd.get('note_reason') or V(policy)['note']['refused']
     st['offer'] = None
     if len(st['products']) == 1:
@@ -874,9 +965,15 @@ def date_event(policy, st, ev, today, cv):
         return after_resolved(policy, st, today, cv)
     i = targets[0]
     p, pd = _p(st, i)
-    amount = float(amt) if amt else ((st['offer'] or dict()).get('amount') or (pd['floor'] if pd['too_much'] else pd['past_due']))
-    r = decide(today, pd['days_late'], 'exact', named, 0, policy)
+    r = date_verdict(policy, today, pd, named)
     reason = r['reason']
+    if amt and _num(amt) is not None and not amount_fits(policy, pd, float(amt)):
+        if reason == 'ok':     # the date stands; the amount goes through the acceptance rule
+            st['cur'] = i
+            st['offer'] = dict(product_ids=[p['id']], amount=None, date=iso(r['accepted']), kind='customer')
+            return amount_event(policy, st, ev, today, cv)
+        amt = None
+    amount = float(amt) if amt else ((st['offer'] or dict()).get('amount') or (pd['floor'] if pd['too_much'] else pd['past_due']))
     if reason == 'ok':
         if multi and st['cur'] is not None and i != st['cur'] or (multi and st['cur'] is None):
             p['status'], p['offer'] = 'agreed', dict(amount=amount, date=iso(r['accepted']))
@@ -888,13 +985,92 @@ def date_event(policy, st, ev, today, cv):
         st['cur'] = i
         st['offer'] = dict(product_ids=[p['id']], amount=amount, date=d,
                            kind='customer' if reason == 'non_business_day' else 'deadline')
-        sec = policy.get('on_non_business_day' if reason == 'non_business_day' else 'on_after_deadline') or dict()
-        tpl = str(sec.get('say') or '')
-        for token, val in (('<NAMED>', r['named']), ('<DATE>', r['accepted']), ('<DEADLINE>', r['deadline'])):
-            tpl = tpl.replace(token, say_date(val) if val else '')
+        tpl = fill_date(r['say'], r)
         text = (tpl + ' ' + 'That is ' + money(amount) + ' for your ' + pd['name'] + '.').strip()
         return ask(st, text, 'offer')
-    return ask(st, 'That date has passed. ' + (st.get('_last_ask') or D_SAFE), st['q'])
+    # refuse: the brief's sentence (else a true contract default), then ask for another day; nothing is proposed
+    if p['status'] == 'proposed' and st['cur'] == i:
+        p['status'], p['offer'] = 'open', None
+    st['offer'] = None
+    st['cur'] = i
+    text = fill_date(r['say'], r)
+    return ask(st, text if text.endswith('?') else (text + ' ' + D_OTHER_DAY).strip(), 'exact_day')
+
+
+D_OTHER_DAY = 'Which other date would work?'
+D_DATE_SAY = dict(past='That date has passed.', today_not_allowed='I cannot record a payment for today.',
+                  weekend='<NAMED> is not a business day, so I cannot record it.',
+                  holiday='<NAMED> is not a business day, so I cannot record it.',
+                  after_deadline='I cannot record a date after <DEADLINE>.',
+                  shift='<NAMED> is not a business day. The next business day is <DATE>. Could you pay on <DATE>?',
+                  offer_deadline='The latest date I can record is <DEADLINE>. Could you pay on <DEADLINE>?')
+
+
+def fill_date(tpl, r):
+    for token, val in (('<NAMED>', r.get('named')), ('<DATE>', r.get('accepted')), ('<DEADLINE>', r.get('deadline'))):
+        tpl = tpl.replace(token, say_date(val) if val else '')
+    return tpl.strip()
+
+
+def date_action(policy, sit):
+    """policy.date_rules[situation] = dict(action=shift_next_business_day|shift_previous_business_day|offer_deadline|
+    refuse, say=...); without it the older sections decide (on_non_business_day, on_after_deadline, earliest)."""
+    rule = (policy.get('date_rules') or dict()).get(sit)
+    if isinstance(rule, dict) and rule.get('action'):
+        return str(rule['action']), str(rule.get('say') or '')
+    if sit in ('weekend', 'holiday'):
+        sec = policy.get('on_non_business_day') or dict()
+        a = str(sec.get('action') or 'next_business_day')
+        a = dict(next_business_day='shift_next_business_day', previous_business_day='shift_previous_business_day',
+                 reject='refuse').get(a, a)
+        say = str(sec.get('say') or '')
+        return a, (say if a.startswith('shift') or '<DATE>' not in say else '')
+    if sit == 'after_deadline':
+        sec = policy.get('on_after_deadline') or dict()
+        a = 'offer_deadline' if sec.get('action', 'offer_deadline') == 'offer_deadline' else 'refuse'
+        say = str(sec.get('say') or '')
+        return a, (say if a == 'offer_deadline' or '<DEADLINE>?' not in say else '')
+    return 'refuse', ''
+
+
+def date_verdict(policy, today, pd, named):
+    """The named day for one product -> dict(reason ok|non_business_day|after_deadline|refuse, named, accepted,
+    deadline, sit, say). Situations in order: past, today_not_allowed, after_deadline, holiday, weekend."""
+    dl = _d(pd['deadline'])
+    out = dict(reason='ok', named=named, accepted=named, deadline=dl, sit='', say='')
+    allow_today = (policy.get('earliest') or dict()).get('allow_today', True) and \
+        not ((policy.get('date_rules') or dict()).get('today_not_allowed') or dict()).get('action')
+    bd = policy.get('business_days') or dict()
+
+    def sit_of(d):
+        if d < today:
+            return 'past'
+        if d == today and not allow_today:
+            return 'today_not_allowed'
+        if d > dl:
+            return 'after_deadline'
+        if d.isoformat() in (bd.get('holidays') or []):
+            return 'holiday'
+        if d.weekday() not in (bd.get('weekdays') or [0, 1, 2, 3, 4]):
+            return 'weekend'
+        return ''
+    sit = sit_of(named)
+    if not sit:
+        return out
+    act, say = date_action(policy, sit)
+    out['sit'] = sit
+    if act.startswith('shift') and sit in ('weekend', 'holiday'):
+        alt = shift_to_business_day(named, policy, 1 if act == 'shift_next_business_day' else -1)
+        alt_sit = sit_of(alt) if alt else 'after_deadline'
+        if not alt_sit:
+            return dict(out, reason='non_business_day', accepted=alt, say=say or D_DATE_SAY['shift'])
+        sit = alt_sit
+        act, say = date_action(policy, sit)
+        out['sit'] = sit
+    if act == 'offer_deadline' and sit in ('after_deadline', 'weekend', 'holiday') and not sit_of(dl):
+        pre = '<NAMED> is not a business day. ' if sit in ('weekend', 'holiday') and not say else ''
+        return dict(out, reason='after_deadline', accepted=dl, say=say or pre + D_DATE_SAY['offer_deadline'])
+    return dict(out, reason='refuse', accepted=None, say=say or D_DATE_SAY.get(sit, D_DATE_SAY['past']))
 
 
 def vague_event(policy, st, today):
@@ -929,7 +1105,7 @@ def reject_event(policy, st, ev, today, cv):
     p, pd = _p(st, i)
     if st['q'] == 'pay_today' and ev.get('why') != 'too_much':   # a "not today" answers the today ask
         st['all_today_asked'] = True
-    if ev.get('why') == 'too_much' and not p['floor_offered']:
+    if ev.get('why') == 'too_much' and not p['floor_offered'] and pd['floor'] < pd['past_due'] - 0.005:
         pd['too_much'] = True
         p['floor_offered'] = True
         date = (st['offer'] or dict()).get('date') or iso(today)
@@ -951,17 +1127,24 @@ def amount_event(policy, st, ev, today, cv):
     except Exception:
         return resay(st)
     date = (st['offer'] or dict()).get('date') or iso(today)
-    if amt < pd['floor'] - 0.005:
+    kind, x = accept_rule(policy)
+    full = pd['past_due']
+    low = x if kind == 'min_x' and x is not None else pd['floor']
+    if amt < min(low, full) - 0.005:
         if p['floor_offered']:
             return start_attempt(policy, st, i, today)
         p['floor_offered'] = True
-        p['status'], p['offer'] = 'proposed', dict(amount=pd['floor'], date=date)
-        st['offer'] = dict(product_ids=[p['id']], amount=pd['floor'], date=date, kind='floor')
-        return ask(st, 'I cannot record ' + money(amt) + '. ' + offer_line(pd, pd['floor'], date, True), 'offer')
-    amt = min(amt, pd['past_due'])
+        ofr = max(low, pd['floor']) if kind == 'min_x' else pd['floor']
+        ofr = min(ofr, full)
+        p['status'], p['offer'] = 'proposed', dict(amount=ofr, date=date)
+        st['offer'] = dict(product_ids=[p['id']], amount=ofr, date=date, kind='floor')
+        return ask(st, 'I cannot record ' + money(amt) + '. ' + offer_line(pd, ofr, date, ofr < full - 0.005), 'offer')
+    pre = ''
+    if amt > full + 0.005 and kind != 'above_full_allowed':     # never clamped silently
+        pre, amt = 'The amount due is ' + money(full) + '. ', full
     p['status'], p['offer'] = 'proposed', dict(amount=amt, date=date)
     st['offer'] = dict(product_ids=[p['id']], amount=amt, date=date, kind='customer')
-    return ask(st, offer_line(pd, amt, date), 'offer')
+    return ask(st, pre + offer_line(pd, amt, date), 'offer')
 
 
 def yes_event(policy, st, today, cv):
@@ -1088,6 +1271,91 @@ def no_restated_amount(st, act):
     return dict(act, **dict([(key, t.strip())]))
 
 
+HOOK_POINTS = ('opening', 'after_debt', 'on_refusal', 'on_no_promise', 'before_close', 'on_promise_recorded')
+HOOK_HONESTY = r'\b(recorded|scheduled|transferr?ed|saved|booked)\b'
+
+
+def hook_point(st, point):
+    st['_hp'] = (st.get('_hp') or []) + [point]
+
+
+def hook_ok(h, st, act, pd_cur):
+    """condition: a closed set of key=value terms joined by ';', ',' or '&': band=, product_type=, outcome=."""
+    for term in re.split(r'[;,&]', str(h.get('condition') or '')):
+        if not term.strip():
+            continue
+        k, _, v = term.strip().partition('=')
+        k, v = k.strip(), v.strip()
+        pds = [pd_cur] if pd_cur else st.get('_pd') or []
+        if k == 'band':
+            ok = any(str(pd.get('band')) == v for pd in pds)
+        elif k == 'product_type':
+            ok = any(str(pd.get('type')) == v for pd in pds)
+        elif k == 'outcome':
+            ok = act.get('type') == 'close' and str(act.get('outcome')) == v
+        else:
+            st['_hook_skip'] = (st.get('_hook_skip') or []) + [str(h.get('id')) + ':condition']
+            return False
+        if not ok:
+            return False
+    return True
+
+
+def attach_hooks(policy, st, act):
+    """Brief sentences at fixed points (policy.hooks), each once per call, added to the line said anyway: before the
+    closing question of a say_exact, or before the farewell of a close. A point reached on a tool call waits for the
+    next spoken line. expects_answer hooks are not supported (logged); a hook that claims a write is only allowed after
+    a recorded promise (honesty lint)."""
+    pts = list(st.get('_hp') or [])
+    if act.get('type') == 'close':
+        v = V(policy)
+        if act.get('outcome') in set(x[0] for x in (v['refused'], v['hardship'], v['dispute'], v['write_failed']) if x[0]):
+            pts.append('on_no_promise')
+        pts.append('before_close')
+    if not pts:
+        return act
+    if act.get('type') not in ('say_exact', 'close'):
+        st['_hp'] = pts
+        return act
+    st['_hp'] = []
+    said = st.get('_hooks_said') or []
+    pd_cur = st['_pd'][st['cur']] if st.get('cur') is not None and st.get('_pd') else None
+    lines = []
+    for point in pts:
+        for h in policy.get('hooks') or []:
+            if not isinstance(h, dict) or h.get('point') != point or h.get('id') in said or h.get('expects_answer'):
+                continue
+            text = str(h.get('text') or '').strip()
+            if not text or not hook_ok(h, st, act, pd_cur):
+                continue
+            if point != 'on_promise_recorded' and re.search(HOOK_HONESTY, text, re.I) and not re.search(r'\bcall\b', text, re.I):
+                st['_hook_skip'] = (st.get('_hook_skip') or []) + [str(h.get('id')) + ':honesty']
+                said = said + [h.get('id')]
+                continue
+            said = said + [h.get('id')]
+            lines.append(text)
+    st['_hooks_said'] = said
+    if not lines:
+        return act
+    add = ' '.join(lines)
+    if act['type'] == 'close':
+        return dict(act, farewell=(add + ' ' + (act.get('farewell') or '')).strip())
+    parts = re.split(r'(?<=[.?!])\s+', act['text'].strip())
+    qi = [i for i, x in enumerate(parts) if x.endswith('?')]
+    if qi:                       # before the last question: the customer answers the question, not the hook
+        return dict(act, text=' '.join(parts[:qi[-1]] + [add] + parts[qi[-1]:]))
+    return dict(act, text=act['text'].strip() + ' ' + add)
+
+
+def info_line(policy, st, t):
+    """The answer line of an answer topic (robot, scam, unknown_info: the brief's say; terms: the no-other-terms line
+    at most once, never 'I am sorry' unless the brief says it)."""
+    if t == 'terms':
+        st['_terms_n'] = st.get('_terms_n', 0) + 1
+        return brief_sentence(policy, 'no_other_terms', D_NO_TERMS) if st['_terms_n'] == 1 else ''
+    return (event_row(policy, t) or dict()).get('say') or ''
+
+
 def loop_break(policy, st, today, cv):
     """The on-cap action of every open question (contract default; never free talk, never a tts loop).
     Before verification: a permitted transfer for a help-first loop, else a safe close on the stage's slot.
@@ -1133,12 +1401,19 @@ def topic_event(policy, st, ev, today, cv):
         row = event_row(policy, 'human')
         st['_q_prev'], st['_ask_prev'] = st['q'], st.get('_last_ask') or ''
         return ask(st, (row or dict()).get('say') or D_HELP_FIRST, 'help_first')
-    if t in TOPIC_INFO:
-        if t == 'terms':     # the no-other-terms line at most once, never "I am sorry" unless the brief says it
-            st['_terms_n'] = st.get('_terms_n', 0) + 1
-            line = brief_sentence(policy, 'no_other_terms', D_NO_TERMS) if st['_terms_n'] == 1 else ''
-        else:
+    if st['q'] == 'support_offer' and t in TOPIC_INFO + ('decline', 'purpose', 'hardship'):
+        line = ''        # PUB-05: "no, can I get a discount?" declines the support offer; it is never offered again
+        if t == 'terms' and st.get('_terms_n', 0) < 1:
+            st['_terms_n'] = 1
+            line = brief_sentence(policy, 'no_other_terms', D_NO_TERMS)
+        elif t in TOPIC_INFO and t != 'terms':
             line = (event_row(policy, t) or dict()).get('say') or ''
+        act = no_event(policy, st, ev, today, cv)
+        if line and act.get('type') == 'close':
+            act = dict(act, farewell=line + ' ' + act['farewell'])
+        return act
+    if t in TOPIC_INFO:
+        line = info_line(policy, st, t)
         if st['phase'] == 'opening':
             return reask_name(policy, st, cv, line)
         if st.get('verified') == 'yes' and ev.get('also') in SUBSTANTIVE:
@@ -1152,6 +1427,8 @@ def topic_event(policy, st, ev, today, cv):
         return dict(type='say_exact', text=(row or dict()).get('say') or D_CHANGE)
     if t in ('decline', 'purpose') and st['phase'] == 'opening':
         return reask_name(policy, st, cv)        # rule 3: a question first, the ask that follows is counted
+    if t in ('decline', 'purpose') and st['q'] == 'offer' and (st.get('offer') or dict()).get('kind') in OUR_OFFERS:
+        return resay(st, (event_row(policy, t) or dict()).get('say') or '')   # answer briefly, then only the day
     if t in ('decline', 'purpose'):
         if st['phase'] == 'identity':
             st['identity']['refusals'] += 1
@@ -1182,6 +1459,9 @@ def topic_event(policy, st, ev, today, cv):
     i = st['cur'] if st['cur'] is not None else 0
     if ev.get('prod') and str(ev.get('prod')).isdigit():
         i = _valid_prod(st, ev, i)
+    if t == 'hardship' and st['counters']['support_offered'] >= 1:   # offered once: a second hardship is the decline path
+        st['q'] = 'support_offer'
+        return no_event(policy, st, ev, today, cv)
     if t == 'hardship':
         row = next((e for e in policy.get('events') or [] if e.get('topic') == 'hardship' and not _none(e.get('note_reason'))), None)
         st['counters']['support_offered'] += 1
@@ -1258,6 +1538,8 @@ def on_user(policy, st, ev, today, cv):
         return date_event(policy, st, ev, today, cv)
     if k == 'amount':
         return amount_event(policy, st, ev, today, cv)
+    if st['q'] == 'offer' and (st.get('offer') or dict()).get('kind') in OUR_OFFERS:
+        st['q'], st['_last_ask'] = 'exact_day', D_WHICH_DAY    # the free reply never re-proposes the heard offer
     return dict(type='speak_free', node=_talk_node(st), hint=reask_line(st) if st.get('_last_ask') else '')
 
 
@@ -1371,17 +1653,70 @@ def third_party(policy, st, ev, today, cv):
     return ask(st, V(policy)['callback_retry_say'] or 'Could you suggest another time?', 'callback_time')
 
 
+def answer_format(fmt):
+    """identity.questions[].format -> (kind, n). Closed set: date, digits(n), name, alnum, postcode, free; older
+    free-text formats ('YYYY-MM-DD', '4 digits', 'YYYY') are read too. Unknown -> free."""
+    f = str(fmt or '').strip().lower()
+    for w, d in NUM_WORDS:
+        f = re.sub(r'\b' + w + r'\b', d, f)
+    m = re.match(r'^digits\s*\(\s*(\d+)\s*\)$', f) or re.match(r'^(\d+) digits\b', f)
+    if m:
+        return 'digits', int(m.group(1))
+    if f in ('date', 'name', 'alnum', 'postcode', 'free', 'digits'):
+        return f, 0
+    if f.startswith('yyyy-mm-dd'):
+        return 'date', 0
+    if f == 'yyyy':
+        return 'digits', 4
+    if re.search(r'\b(inward|outward) code\b', f):
+        return 'postcode', 0
+    return 'free', 0
+
+
+NUM_WORDS = (('one', '1'), ('two', '2'), ('three', '3'), ('four', '4'), ('five', '5'), ('six', '6'), ('seven', '7'),
+             ('eight', '8'), ('nine', '9'), ('ten', '10'), ('eleven', '11'), ('twelve', '12'))
+
+
+def norm_answer(fmt, ans):
+    """The answer as the verify tool should get it, or '' when it does not fit the format (re-ask, not counted)."""
+    kind, n = answer_format(fmt)
+    a = re.sub(r'\s+', ' ', str(ans or '')).strip()
+    if kind == 'date':
+        m = re.match(r'^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})$', a)
+        return '%s-%02d-%02d' % (m.group(1), int(m.group(2)), int(m.group(3))) if m else ''
+    if kind == 'digits':
+        d = re.sub(r'\D', '', a)
+        return d if d and (not n or len(d) == n) else ''
+    if kind == 'name':
+        a = re.sub(r"[^\w '\-]|\d|_", '', a).strip()
+        return re.sub(r'[^\W\d_]+', lambda m: m.group(0)[:1].upper() + m.group(0)[1:].lower(), a)
+    if kind == 'alnum':
+        return re.sub(r'[^0-9A-Za-z]', '', a).upper()
+    if kind == 'postcode':     # uppercase, one space; a UK-style 'inward code' format gets the space before the last 3
+        p = re.sub(r'[^0-9A-Za-z]', '', a).upper()
+        if re.search(r'\b(inward|outward) code\b', str(fmt).lower()) and 5 <= len(p) <= 7:
+            return p[:-3] + ' ' + p[-3:]
+        return re.sub(r'[^0-9A-Za-z ]', '', a).upper().strip()
+    return a
+
+
 def identity(policy, st, ev, today, cv):
     k = ev.get('kind')
     idt = st['identity']
     qs = (policy.get('identity') or dict()).get('questions') or []
     if k == 'identity':
         field = idt['order'][idt['idx']]
-        ans = str(ev.get('ans') or '').strip()
         fmt = str(qs[idt['idx']].get('format') or '') if idt['idx'] < len(qs) else ''
-        if ('YYYY-MM-DD' in fmt and not re.match(r'^[0-9]{4}-[0-9]{2}-[0-9]{2}$', ans)) or \
-                (re.search(r'\b4 digits\b', fmt) and not re.match(r'^[0-9]{4}$', ans)) or not ans:
+        ans = norm_answer(fmt, ev.get('ans'))
+        if not ans:          # not in the field's format: ask again, not a wrong answer
             return resay(st)
+        if answer_format(fmt)[0] == 'date' and 'y' in ev:
+            y = re.sub(r'\D', '', str(ev.get('y') or ''))
+            if len(y) != 4 or not ans.startswith(y):
+                # PUB-03 live (48a9827a): 'It is the twenty-first of July' came as ans=1992-07-21, the year taken from
+                # the previous wrong answer. A year the customer did not say in these words is never sent: the
+                # customer goes on (not a wrong answer)
+                return dict(type='say_exact', text=sentence(policy, 'continue_line', D_CONTINUE))
         st['_last_args'] = dict(customer_id=cid(cv), field=field, answer=ans)
         return call(st, 'verify', 'verify_identity', dict(st['_last_args']))
     if k == 'topic':
@@ -1427,6 +1762,8 @@ def parse_event(raw, st, topics=()):
     out['n'] = tok
     if out.get('also') in TOPIC_RANK and out.get('also') != 'other':
         out['also_t'], out['also'] = out.get('also_t') or out['also'], 'topic'
+    if out.get('also') == 'topic' and not out.get('also_t') and out.get('kind') != 'topic' and out.get('t') in TOPIC_RANK:
+        out['also_t'] = out['t']    # PUB-04 live: kind=date;also=topic;t=robot (the secondary topic in t=)
     if out.get('also') == 'topic' and not out.get('also_t'):
         out['also'] = 'none'
     if out.get('kind') in topics and out.get('kind') not in ('identity', 'who', 'date', 'amount', 'date_amount', 'accept',
@@ -1553,6 +1890,8 @@ def hub_main(vars, policy):
     vars['close_outcome'], vars['close_reason'] = o or '', r or ''
     vars['route_ok'] = 'yes' if st2.get('verified') == 'yes' else 'no'
     vars['xfer_pre'] = st2.get('_xfer_pre') or 'no'
+    if st2.get('_hook_skip'):
+        vars['hook_skip'] = ','.join(st2['_hook_skip'])
     new = _token(st2.get('runs', 0))
     st2['tok'] = new
     vars['ev_tok'] = new
