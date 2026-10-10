@@ -89,7 +89,23 @@ def floor_once():
     return True
 
 
+def blocked_identity():
+    """mut-04 (policy-extract f8a2aca, copied read-only): identity.blocked -> after the name is confirmed, close on the
+    blocked/on_fail slot; no blocked question is ever asked, no account fact, no get_account."""
+    import json
+    pol = json.load(open(os.path.join(ROOT, "tests/generated/mut-04.reducer_policy.json")))
+    idp = pol["identity"]
+    asks = [q["ask"] for q in idp["questions"] if q.get("blocked") or q["field"] in idp["blocked"]["fields"]]
+    st = R.init_state(pol, CV)
+    st, a = say(pol, st, "kind=who;also=none;st=complete;prod=;who=self;party=")
+    check(a["type"] == "close", f"blocked identity must close at once: {a}")
+    check((a["outcome"], a["reason"]) == (idp["blocked"]["close"]["outcome"], idp["blocked"]["close"]["reason"]), f"blocked slot: {a}")
+    check(not any(q in a.get("farewell", "") for q in asks), f"a blocked question was asked: {a}")
+    return True
+
+
 if __name__ == "__main__":
+    print("blocked identity (mut-04):", blocked_identity())
     print("floor once (PUB-06):", floor_once())
     for name, pol in POL.items():
         v = R.V(pol)

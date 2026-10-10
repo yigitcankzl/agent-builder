@@ -49,7 +49,7 @@ def desk_name(row):
 
 
 D_PROTECT = 'These questions protect your account.'
-D_REACH = 'When can I reach {title} {last_name}?'
+D_REACH = 'Could you tell me when I can reach {title} {last_name}?'   # the kit (PUB-02) checks 'when'
 D_OVERDUE = 'The rest stays overdue.'
 COUNTERS = ['confirm_name', 'clarify', 'vague', 'stop_talking', 'human_asks', 'decline_explain', 'support_offered']
 TOOL_NODE = dict(verify_identity='t_verify_identity', get_account='t_get_account', create_promise='t_create_promise',
@@ -1231,7 +1231,15 @@ def opening(policy, st, ev, today, cv):
     party = ev.get('party') or ''
     if who == 'self':
         st['who'], st['phase'] = 'self', 'identity'
-        qs = (policy.get('identity') or dict()).get('questions') or []
+        idp = policy.get('identity') or dict()
+        qs = idp.get('questions') or []
+        blk = idp.get('blocked') if isinstance(idp.get('blocked'), dict) else dict()
+        if blk.get('fields') or any(q.get('blocked') for q in qs):
+            # §14.3: a required identity field the API cannot verify; identity cannot pass, so close on the fail slot
+            # before any blocked question and before any account fact
+            c = blk.get('close') or idp.get('on_fail') or dict()
+            o, r = (_none(c.get('outcome')), _none(c.get('reason'))) if c.get('outcome') else V(policy)['id_failed']
+            return do_close(policy, st, o, r, (id_fail_line(policy) + ' ' + D_FAREWELL).strip())
         if not qs:
             o, r = slot(policy, 'declined')
             return do_close(policy, st, o, r, D_FAREWELL)
@@ -1518,8 +1526,10 @@ def hub_source(policy):
     """The full code-node string: date core + reducer + policy literal + call. No double braces."""
     import os
     here = os.path.dirname(os.path.abspath(__file__))
-    dates_src = open(os.path.join(here, 'dates.py')).read()
-    red_src = open(os.path.join(here, 'reducer.py')).read()
+    with open(os.path.join(here, 'dates.py')) as f:
+        dates_src = f.read()
+    with open(os.path.join(here, 'reducer.py')) as f:
+        red_src = f.read()
     def strip(x):   # source quotes are for the trace, not the runtime (keeps the node small)
         if isinstance(x, dict):
             return dict((k, strip(v)) for k, v in x.items() if k not in ('source', 'superseded'))

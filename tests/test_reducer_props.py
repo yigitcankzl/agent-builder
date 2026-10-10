@@ -137,12 +137,21 @@ def props(n=3000, seed=11):
     return n
 
 
-def replay_hub():
-    """The 13 sequences through the code-node string: vars in, vars out."""
+def pack(src):
+    """The same shape as policy-extract's pack_hub (zlib + base64 loader exec'd with the node's vars)."""
+    import base64, zlib
+    blob = base64.b64encode(zlib.compress(src.encode(), 9)).decode()
+    return ("import zlib, base64\nexec(compile(zlib.decompress(base64.b64decode(" + json.dumps(blob)
+            + ")).decode(), 'hub', 'exec'), dict(vars=vars, __name__='hub'))\n")
+
+
+def replay_hub(packed=False):
+    """The 13 sequences through the code-node string: vars in, vars out (optionally packed as the platform runs it)."""
     ok = 0
     for c in FIX["cases"]:
         pol = POL[c["policy"]]
-        code = compile(R.hub_source(pol), "hub", "exec")
+        src = R.hub_source(pol)
+        code = compile(pack(src) if packed else src, "hub", "exec")
         vars_ = dict(c["call_variables"])
         counts = dict()
         problems = []
@@ -284,3 +293,6 @@ if __name__ == "__main__":
     print("invariants: ok over", props(n), "random calls")
     k = replay_hub()
     print(f"hub replay: {k}/13 sequences match through the code-node string")
+    print("packed hub bytes:", dict((k, len(pack(R.hub_source(v)))) for k, v in POL.items()))
+    k = replay_hub(packed=True)
+    print(f"packed hub replay: {k}/13 sequences match through the zlib+base64 loader")
