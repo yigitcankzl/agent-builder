@@ -89,6 +89,34 @@ def floor_once():
     return True
 
 
+def offer_chatter_live():
+    """Brief A PUB-06 live (talkative, call aebcf2a9): the floor offer, then a partial chat, then kind=other.
+    Neither turn is free talk, and neither restates 637.50 or 'The rest stays overdue.'"""
+    c = [c for c in FIX["cases"] if c["id"] == "PUB-06"][0]
+    pol, cv = POL[c["policy"]], c["call_variables"]
+    st = R.init_state(pol, cv)
+    for s in c["steps"][:7]:
+        if s["source"] == "user":
+            st["tok"] = s["event_fields"]["n"]
+            st, a = R.step(pol, st, R.parse_event(s["event"], st, TOPICS), None, c["now"], cv)
+            st["last_tok"] = st["tok"]
+        else:
+            st, a = R.step(pol, st, None, s["tool_event"], c["now"], cv)
+    check("637.50" in a["text"] and "overdue" in a["text"], f"the floor offer is said once: {a}")
+    check(st["q"] == "offer", f"the offer stays open: {st['q']}")
+    for i, body in enumerate(("kind=other;also=none;st=partial;prod=", "kind=other;also=none;st=none;prod=")):
+        st["tok"] = "kc" + "abcdefghjk"[i] * 4
+        st, a = R.step(pol, st, R.parse_event("n=" + st["tok"] + ";src=user;" + body, st, TOPICS), None, c["now"], cv)
+        st["last_tok"] = st["tok"]
+        said = a.get("text") or a.get("hint") or ""
+        check(a["type"] == "say_exact", f"chatter must not go to free talk: {a}")
+        check("637.50" not in said and "overdue" not in said.lower() and "Could you pay" not in said,
+              f"the offer was stated again after {body}: {said}")
+        check(said == R.D_OFFER_NUDGE, f"neutral re-ask: {said}")
+        check(st["q"] == "offer", f"the offer stays the open question: {st['q']}")
+    return True
+
+
 def blocked_identity():
     """mut-04 (policy-extract f8a2aca, copied read-only): identity.blocked -> after the name is confirmed, close on the
     blocked/on_fail slot; no blocked question is ever asked, no account fact, no get_account."""
@@ -599,6 +627,7 @@ if __name__ == "__main__":
         print("live fixes (PUB-05 precedence, stale, terms once, robot+date):", name, live_fixes(pol, name))
     print("blocked identity (mut-04):", blocked_identity())
     print("floor once (PUB-06):", floor_once())
+    print("offer chatter does not restate the floor (PUB-06 live):", offer_chatter_live())
     for name, pol in POL.items():
         v = R.V(pol)
         # 1. an event that does not answer the name question: counted re-ask, never a bare safe_repeat; cap -> unclear

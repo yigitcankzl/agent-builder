@@ -623,6 +623,24 @@ def ask(st, text, q):
 
 OUR_OFFERS = ('floor', 'attempt_n')   # offers the agent proposed (PUB-06); a read-back of the customer's own date is re-said
 RESAY_CAP = 3   # DEFAULT cap for every q: the same open question re-said this many times in a row, then loop_break()
+D_OFFER_NUDGE = "Sorry, I didn't catch that. Can you manage that?"   # contract default: no amount, date, or floor clause
+
+
+def offer_is_open(st):
+    return st.get('q') == 'offer' and (st.get('offer') or dict()).get('kind') in OUR_OFFERS
+
+
+def offer_chatter(st):
+    """Chatter (kind=other or a partial) while our offer is open: a short neutral line, never free talk.
+    The offer itself is spoken in full only once per attempt. After the cap, the open question's on-cap path."""
+    key = (st['offer'].get('amount'), st['offer'].get('date'), st['offer'].get('kind'))
+    if st.get('_offer_chat_key') != key:
+        st['_offer_chat'], st['_offer_chat_key'] = 0, key
+    st['_offer_chat'] = st.get('_offer_chat', 0) + 1
+    if st['_offer_chat'] > RESAY_CAP:
+        st['_offer_chat'] = 0
+        return dict(type='_loop')
+    return ask(st, D_OFFER_NUDGE, 'offer')
 
 
 def resay(st, prefix=''):
@@ -1515,11 +1533,15 @@ def no_restated_amount(st, act):
     said, spoken = list(st.get('_offered') or []), st.get('_spoken') or []
     key = 'text' if act['type'] == 'say_exact' else 'hint'
     t = act.get(key) or ''
+    repeated = False
     for a in re.findall(AMT, t):
         if a in said:
+            repeated = True
             t = re.sub(r'pay ' + re.escape(a) + r' for', 'make that payment for', t)
         if a in said or (a in spoken and (st.get('offer') or dict()).get('kind') == 'customer'):   # PUB-07 / PUB-04
             t = re.sub(r'\s*That is ' + re.escape(a) + r' for your [^.?]*\.', '', t)
+    if repeated:
+        t = t.replace(D_OVERDUE, '')   # the floor clause belongs to the one full statement of that offer
     new = [a for a in re.findall(r'(?:pay|That is) (' + AMT + r') for', t) if a not in said]
     if new:
         st['_offered'] = said + new
@@ -1809,6 +1831,8 @@ def topic_event(policy, st, ev, today, cv):
 # ---------------------------------------------------------------- per-phase user handling
 def on_user(policy, st, ev, today, cv):
     if ev.get('st') == 'partial':
+        if offer_is_open(st) and ev.get('kind') in (None, '', 'other'):
+            return offer_chatter(st)     # a cut-off chat is not a second statement of the offer
         if st['phase'] == 'identity' and ev.get('kind') == 'identity' and str(st.get('q') or '').startswith('id_'):
             idt, qs = st['identity'], (policy.get('identity') or dict()).get('questions') or []
             fmt = str(qs[idt['idx']].get('format') or '') if idt['idx'] < len(qs) else ''
@@ -1861,6 +1885,8 @@ def on_user(policy, st, ev, today, cv):
         return date_event(policy, st, ev, today, cv)
     if k == 'amount':
         return amount_event(policy, st, ev, today, cv)
+    if k == 'other' and offer_is_open(st):
+        return offer_chatter(st)         # do not hand the open offer to free talk
     if st['q'] == 'offer' and (st.get('offer') or dict()).get('kind') in OUR_OFFERS:
         st['q'], st['_last_ask'] = 'exact_day', D_WHICH_DAY    # the free reply never re-proposes the heard offer
     return dict(type='speak_free', node=_talk_node(st), hint=reask_line(st) if st.get('_last_ask') else '')

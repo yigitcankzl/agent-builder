@@ -172,6 +172,12 @@ def _text(rp, *ids):
     return ""
 
 
+# Free talk never speaks an offer. Only exact_say (the reducer) may state an amount, a date, or a policy clause.
+NO_RESTATE = (" Do not restate any amount, date, offer, or policy clause, and do not repeat a line about what "
+              "stays overdue. Acknowledge briefly and ask the customer to continue or to answer the open question "
+              "in generic words, for example: Take your time — what would you like to do? Never re-propose.")
+
+
 def _soft_rules(rp, phase):
     """Only run-stable unmapped rules (the bridge already dropped unstable ones), as soft text for free talk."""
     rules = [u["quote"] for u in rp.get("unmapped_rules") or [] if u.get("quote")
@@ -316,11 +322,12 @@ def generate(rp, oas_path):
                       "transitions": [_always("hub_reset")]},
         "talk_pre": {"name": "talk_pre", "node_type": "conversation", "on_enter": {"type": "llm"},
                      "task_message": "Identity is NOT verified. Say nothing about why the bank calls, any product, amount "
-                                     "or debt. Answer briefly and politely. {{talk_hint}} No tool call is allowed." + _soft_rules(rp, "pre"),
+                                     "or debt. Answer briefly and politely. {{talk_hint}} No tool call is allowed."
+                                     + NO_RESTATE + _soft_rules(rp, "pre"),
                      "extraction_schema": [ev], "max_node_turns": 80, "transitions": [_always("hub_reset")]},
         "talk_post": {"name": "talk_post", "node_type": "conversation", "on_enter": {"type": "llm"},
                       "task_message": "Identity is verified. Answer briefly. Facts: {{talk_hint}} No tool call is allowed. "
-                                      "Never offer terms, dates or amounts yourself." + _soft_rules(rp, "post"),
+                                      "Never offer terms, dates or amounts yourself." + NO_RESTATE + _soft_rules(rp, "post"),
                       "extraction_schema": [ev], "max_node_turns": 80, "transitions": [_always("hub_reset")]},
         "close_say": {"name": "close_say", "node_type": "conversation", "on_enter": {"type": "tts", "text": "{{farewell}}"},
                       "passthrough": True, "passthrough_default_transition": "t_close_call",
