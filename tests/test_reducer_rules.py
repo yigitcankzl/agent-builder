@@ -391,7 +391,25 @@ def identity_chatter():
     return True
 
 
+def opening_self_topics():
+    """nightmare-1 PUB-09 live (55e7838b): 'Yes, this is Victor Ionescu. I want to make a complaint.' came as t=dispute
+    with the who lost; the name was re-asked to the cap. An account topic in the opening implies the customer: the
+    security questions follow, nothing is disclosed. A who=self kept in the payload with a callback books it (PUB-07)."""
+    for name, pol in POL.items():
+        st = R.init_state(pol, CV)
+        st, a = say(pol, st, "kind=topic;also=none;st=complete;prod=;t=dispute")
+        check(st["phase"] == "identity" and st["q"].startswith("id_") and "540" not in a["text"], f"{name}: dispute in the opening -> identity: {a}")
+        st = R.init_state(pol, CV)
+        st, a = say(pol, st, "kind=topic;also=none;st=complete;prod=;t=robot")
+        check(st["phase"] == "opening", f"{name}: a question topic does not imply the customer: {a}")
+        st = R.init_state(pol, CV)
+        st, a = say(pol, st, "kind=callback;also=none;st=complete;prod=;rel=tomorrow;d=;m=;wd=;wk=none;vague=no;tm=15:00;who=self;party=")
+        check(a["type"] == "call_tool" and a["tool"] == "schedule_callback", f"{name}: callback with who=self: {a}")
+    return True
+
+
 if __name__ == "__main__":
+    print("opening: account topics imply the customer (nightmare PUB-09 live):", opening_self_topics())
     print("identity chatter is not a refusal (clean-1 surface PUB-07):", identity_chatter())
     print("split identity answers (clean-1 surface PUB-06):", split_answers())
     print("rehearsal clean-1 PUB-07:", clean1_pub07())
