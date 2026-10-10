@@ -69,6 +69,7 @@ def props(n=3000, seed=11):
         persisted_ever, callback_ok, transfer_ok = False, False, False
         push = it % 2 == 0      # half the runs are pushed through identity so negotiation, read-back and writes get coverage
         names = []
+        run_len, last_text = 0, None
         for k in range(40):
             if st["phase"] == "closed":
                 break
@@ -95,12 +96,18 @@ def props(n=3000, seed=11):
                     check(R.parse_event("n=" + tok + ";src=user;" + body, st2, TOPICS) is None or st2["tok"] != tok or True, "stale")
                 if ev and ev.get("st") == "partial":
                     a = dict(st2); b = dict(st)
-                    for x in ("runs", "last_tok", "hangup"):
+                    for x in ("runs", "last_tok", "hangup", "_said_n", "_said_last"):
                         a.pop(x, None); b.pop(x, None)
                     check(a == b, "partial changed state")
                     check(act["type"] == "say_exact", "partial must speak the continue line")
                 st = st2
             check(isinstance(act, dict) and act.get("type") in ("say_exact", "speak_free", "call_tool", "close"), f"one action {act}")
+            # never loop: the same tts text more than RESAY_CAP + 1 times in a row is a stuck question
+            key = act.get("text") if act["type"] == "say_exact" else None
+            run_len = run_len + 1 if key is not None and key == last_text else 1
+            last_text = key
+            if key and key != R.sentence(pol, "continue_line", R.D_CONTINUE):
+                check(run_len <= R.RESAY_CAP + 1, f"stuck on the same question {run_len}x: {key}")
             if act["type"] == "say_exact":
                 check(act["text"].strip(), "empty tts")
                 low = act["text"].lower()
@@ -179,7 +186,26 @@ def replay_hub():
     return ok
 
 
+def no_human_loop():
+    import copy as _c
+    for name, pol0 in POL.items():
+        pol = _c.deepcopy(pol0)
+        pol["transfer"]["pre_verification_queues"] = []
+        st = R.init_state(pol, CV)
+        for i in range(12):
+            if st["phase"] == "closed":
+                break
+            st["tok"] = "kz" + "abcdefghjkmn"[i] * 4
+            body = "kind=topic;also=none;st=complete;prod=;t=human" if i % 2 == 0 else "kind=no;also=none;st=complete;prod="
+            ev = R.parse_event("n=" + st["tok"] + ";src=user;" + body, st, TOPICS)
+            st, act = R.step(pol, st, ev, None, NOW, CV)
+            st["last_tok"] = ev["n"]
+        check(st["phase"] == "closed" and st["counters"]["human_asks"] <= 1, f"{name}: human/no must end, asks={st['counters']['human_asks']}")
+    return True
+
+
 if __name__ == "__main__":
+    print("human loop without pre-verification queue: ends", no_human_loop())
     n = int(sys.argv[1]) if len(sys.argv) > 1 else 3000
     print("invariants: ok over", props(n), "random calls")
     k = replay_hub()

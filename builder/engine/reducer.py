@@ -353,12 +353,20 @@ def readback_line(policy, st, items, clamped):
 
 
 def ask(st, text, q):
+    st['_resay_n'] = st.get('_resay_n', 0) + 1 if text == st.get('_last_ask') else 0   # the same words again count as a repeat
     st['q'] = q
     st['_last_ask'] = text
     return dict(type='say_exact', text=text)
 
 
+RESAY_CAP = 3   # DEFAULT: the same open question re-said this many times in a row, then free talk (never a tts loop)
+
+
 def resay(st, prefix=''):
+    st['_resay_n'] = st.get('_resay_n', 0) + 1
+    if st['_resay_n'] > RESAY_CAP:
+        st['_resay_n'] = 0
+        return dict(type='speak_free', node=_talk_node(st), hint='Answer briefly, then ask again: ' + (st.get('_last_ask') or ''))
     text = ((prefix + ' ') if prefix else '') + (st.get('_last_ask') or D_SAFE)
     return dict(type='say_exact', text=text.strip())
 
@@ -467,6 +475,15 @@ def step(policy, st, event, tool_event, now, call_vars=None):
         act = on_user(policy, st, ev, today, cv) if ev else resay(st)
     if act.get('type') == 'say_exact' and not str(act.get('text') or '').strip():
         act = dict(type='say_exact', text=sentence(policy, 'safe_repeat', D_SAFE))
+    # never loop on one tts line: the same words more than RESAY_CAP + 1 times in a row become free talk
+    if act.get('type') == 'say_exact' and act['text'] != sentence(policy, 'continue_line', D_CONTINUE):
+        st['_said_n'] = st.get('_said_n', 0) + 1 if act['text'] == st.get('_said_last') else 1
+        st['_said_last'] = act['text']
+        if st['_said_n'] > RESAY_CAP + 1:
+            st['_said_n'], st['_said_last'] = 0, None
+            act = dict(type='speak_free', node=_talk_node(st), hint='Answer briefly, then ask again: ' + (st.get('_last_ask') or ''))
+    else:
+        st['_said_n'], st['_said_last'] = 0, None
     update_hangup(policy, st)
     return st, act
 
@@ -900,7 +917,9 @@ def transfer(policy, st, key, cv):
     queue = qmap.get(key) or key
     pre = (policy.get('transfer') or dict()).get('pre_verification_queues') or []
     if st['verified'] != 'yes' and queue not in pre:
-        return resay(st)
+        # no transfer before verification for this queue: never loop on the help-first question, close politely
+        o, r = V(policy)['declined'] if st['who'] == 'self' else V(policy)['unclear']
+        return do_close(policy, st, o, r, D_FAREWELL)
     st['_xfer_pre'] = 'yes' if (st['verified'] != 'yes' and queue in pre) else 'no'
     st['_xfer_queue'] = queue
     st['_xfer_close'] = list(V(policy)['xfer'].get(key) or V(policy)['unclear'])
@@ -923,7 +942,8 @@ def topic_event(policy, st, ev, today, cv):
     if t == 'injection':
         return resay(st)
     if t == 'human':
-        if st['q'] == 'help_first' or st['counters']['human_asks'] >= 1:
+        cap = int((event_row(policy, 'human') or dict()).get('max_times') or 1)
+        if st['q'] == 'help_first' or st['counters']['human_asks'] >= cap:
             return transfer(policy, st, 'human', cv)
         st['counters']['human_asks'] += 1
         row = event_row(policy, 'human')
