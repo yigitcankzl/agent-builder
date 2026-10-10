@@ -1074,17 +1074,20 @@ def explicit_queues(brief_text, topics, e_q):
     return out
 
 
-_NOTE_NO = re.compile(r"\b(do not|don't|never)\s+(use|call|write|add)\s+(add_note|a note|notes)\b|\bno notes\b", re.I)
+# an unconditional ban only ('Do not use add_note.'); 'no notes after a transfer' is a condition, not a ban
+_NOTE_NO = re.compile(r"\b(do not|don't|never)\s+(use|call)\s+add_note\b|\b(do not|don't|never)\s+(add|write|leave|log)\s+(any\s+)?notes?\s*(?:[.;]|$)",
+                      re.I | re.M)
 _NOTE_DO = re.compile(r"\b(add|write|log|leave|record)\b(?:\s+\w+){0,2}\s+notes?\b|\bcall add_note\b", re.I)
 
 
 def notes_asked(brief_text):
-    """True when the brief tells the agent to write notes (add_note), not when it only asks the customer a 'Can I note
-    ...?' question or lists add_note among the tools."""
+    """True when the brief tells the agent to add / write / leave / log a note in any wording, not when it only asks
+    the customer a 'Can I note ...?' question, lists add_note among the tools, or bans add_note outright. A negation
+    counts only right before the verb ('do not add a note'), never elsewhere in the clause ('with no promise')."""
     if _NOTE_NO.search(brief_text):
         return False
-    return any(_NOTE_DO.search(c) and not re.search(r"\b(do not|don't|never|no)\b", c, re.I)
-               for c in re.split(r"(?<=[.;])\s+|\n", brief_text))
+    return any(not re.search(r"\b(do not|don't|never|not)\s*$", brief_text[max(0, m.start() - 12):m.start()], re.I)
+               for m in _NOTE_DO.finditer(brief_text))
 
 
 NOTE_KEYS = ("refused", "dispute", "hardship", "paid", "service_error")

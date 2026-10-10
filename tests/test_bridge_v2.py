@@ -395,6 +395,10 @@ def synthetic_fixes():
           "a 'Can I note ...?' question does not enable notes")
     check(not B.notes_asked("Do not use add_note. Any transfer suppresses all notes."), "'Do not use add_note' disables notes")
     check(B.notes_asked("For paid or dispute on one product, add the matching note and continue."), "'add the matching note' enables notes")
+    check(B.notes_asked("Then create_promise once per product. For each product with no promise, add a note: refused, hardship.\n"
+                        "Everything else still applies, including notes on products with no promise, and no notes after a transfer."),
+          "raw-2: 'For each product with no promise, add a note' enables notes ('no notes after a transfer' is no ban)")
+    check(not B.notes_asked("Do not add a note for a paid product. Can I note that you are not paying?"), "'do not add a note' is no instruction")
     check(B.note_reasons(["refused", "dispute_x"], "note_reason,dispute,DISPUTE_NOTE,dispute_x\n") == {"refused": "refused", "dispute": "dispute_x"},
           "note reasons: the same OAS value or the codes row, else left out")
     check(B.default_ask({"field": "phone_last4"}) == "Could you confirm the last four digits of your phone number, please?",
