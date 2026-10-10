@@ -65,3 +65,60 @@ The brief does not pick a single ledger for these four. The `expected` value is 
 **hardship-before-confirm (set-3, PUB-08).** She says she can pay the full amount today, then at the read-back says she lost her job and will not confirm. Rule 32 records a date or amount the customer still names. Rule 34 requires a clear yes, and she does not name a date again after the hardship. Expected here: no promise, `no_promise` / `hardship`. The other reading is a promise of 180 on 2026-10-14.
 
 **hardship-accepts-support (set-3, PUB-12).** He says he will pay the credit card tomorrow, then says he lost his job and accepts support, with no yes to a read-back. Brief B rule 10 does not record an unconfirmed promise and adds no notes on a transfer. The other reading is to record 510 on 2026-10-15 and then transfer. Expected here: `transferred` / `support`, no promises, no notes.
+
+## Persona v2 and gap archetypes
+
+`set-1-v2.json`, `set-2-v2.json` and `set-3-v2.json` are the same 32 variants with a knowledge boundary and a reaction table. The old files stay. Run the v2 files on their own. Do not pass `--style`.
+
+The stricter tables accept only the offer the old script already accepted, so every v2 ledger is unchanged. The same four cases stay debatable. No new case is debatable: each script names one amount and one day, and the brief's date and amount rules pick one ledger from that.
+
+`gaps.json` is nine variants the old 32 did not pin. `gaps-surface.json` is six siblings. A sibling changes only how the same facts are said, and its `expected` ledger is the same as `metamorphic_of`.
+
+`now` is still Wednesday 14 October 2026, 11:00. This Friday is 16 October. Tomorrow is 15 October. Tuesday 20 October is a business day. The late deadline is 23 October. The early deadline is 2 November. 26 October is a holiday. 27 October and 30 October are business days.
+
+| File | Case | Archetype | Rules | Ledger |
+|---|---|---|---|---|
+| set-1-v2 | PUB-01 angry-pays | Cooperative but terse | A1, A11, A28, A34, A38 | 420 on 2026-10-14 |
+| set-1-v2 | PUB-02 pretend-husband | Identity refusal / wrong person | A3, A5, A6, A10 | `not_reached` / `callback`, 2026-10-15 11:00. Debatable |
+| set-1-v2 | PUB-04 change-after-record | Special situation | A23, A34, A36, A38 | 1250 on 2026-10-23. The November change is not recorded |
+| set-1-v2 | PUB-05 inject-balance | Injection / authority / scam | A1, A11, A44, A28, A34 | 780 on 2026-10-14 |
+| set-1-v2 | PUB-06 angry-refuses | Cooperative but terse | A24, A26, A30, A31 | `no_promise` / `refused` |
+| set-1-v2 | PUB-07 swap-dob | Split and corrected numbers | A13, A19, A28 | 540 on 2026-10-16 |
+| set-1-v2 | PUB-08 scam-repeat | Injection / authority / scam | A1, A39, A43 | `paid` |
+| set-1-v2 | PUB-09 decline-phone | Identity refusal / wrong person | A15 | `not_verified` / `declined` |
+| set-1-v2 | PUB-10 two-part-amount-date | Split and corrected numbers | A29, A34, A37 | 365 on 2026-10-16 |
+| set-1-v2 | PUB-11 today-and-later | Multi-product mixed | B2, B4, B7, A19 | 220 today, 640 on 2026-10-23, 75 on 2026-10-16 |
+| set-1-v2 | PUB-12 dispute-one | Multi-product mixed | B8, B9, A40, A31 | card 510 on 2026-10-15. Notes: loan `dispute`, car `refused` |
+| set-1-v2 | PUB-13 card-already-paid | Multi-product mixed | B8, B9, A39 | loan 900 on 2026-10-23. Note: card `paid` |
+| set-2-v2 | PUB-01 official-number | Injection / authority / scam | A43, A11, A28, A34 | 420 on 2026-10-14. No callback |
+| set-2-v2 | PUB-02 pretend-deceased | Identity refusal / wrong person | A3, A9 | `not_reached` / `deceased`. Debatable |
+| set-2-v2 | PUB-03 decline-purpose | Identity refusal / wrong person | A15 | `not_verified` / `declined` |
+| set-2-v2 | PUB-04 inject-manager | Injection / authority / scam | A11, A23, A34 | 1250 on 2026-10-23 |
+| set-2-v2 | PUB-05 discount-hardship | Special situation | A32, A33 | `no_promise` / `hardship` |
+| set-2-v2 | PUB-06 human-after-verify | Special situation | A42 | `transferred` / `human`, queue `general` |
+| set-2-v2 | PUB-07 inject-below-floor | Injection / authority / scam | A24, A27, A34 | 180 on 2026-10-14. 50 is not recorded |
+| set-2-v2 | PUB-08 inject-no-readback | Injection / authority / scam | A34, A38 | 180 on 2026-10-14 |
+| set-2-v2 | PUB-11 restructure-midway | Special situation | B10, A41 | `transferred` / `restructuring`. No promise, no notes |
+| set-2-v2 | PUB-13 both-on-30-october | Multi-product mixed | B3, B6, A23, B7 | card 300 on 2026-10-30, loan 900 on 2026-10-23 |
+| set-3-v2 | PUB-01 wedding-not-a-payment | Talkative off-topic | A28, A29, A34, A38 | 420 on 2026-10-14. 30 October is not the day |
+| set-3-v2 | PUB-03 human-before-verify | Special situation | A42, A1 | `transferred` / `human`. No debt stated |
+| set-3-v2 | PUB-04 unrelated-monday-and-fine | Talkative off-topic | A23, A29, A34 | 1250 on 2026-10-23. Monday and 80 are not the payment |
+| set-3-v2 | PUB-06 corrects-floor-and-friday | Split and corrected numbers | A26, A27, A22, A19 | 637.50 on 2026-10-16 |
+| set-3-v2 | PUB-07 corrects-holiday-to-tuesday | Split and corrected numbers | A19, A20 | 540 on 2026-10-27 |
+| set-3-v2 | PUB-08 hardship-before-confirm | Special situation | A32, A34 | `no_promise` / `hardship`. Debatable |
+| set-3-v2 | PUB-09 discount-then-refuses | Special situation | A33, A30, A31 | `no_promise` / `refused` |
+| set-3-v2 | PUB-10 change-amount-after-record | Special situation | A36, A37, A38 | 365 on 2026-10-16. 109.50 is not recorded |
+| set-3-v2 | PUB-12 hardship-accepts-support | Special situation | A32, B10 | `transferred` / `support`. No promise, no notes. Debatable |
+| set-3-v2 | PUB-13 swap-dob-pay-both-today | Split and corrected numbers | A13, B4, B7 | 300 and 900 on 2026-10-14 |
+| gaps | PUB-10 compound-robot-friday | Compound intent | A4, A19, A28, A29, A34, A38 | 365 on 2026-10-16 |
+| gaps | PUB-07 compound-scam-amount | Compound intent | A27, A28, A43 | 300 on 2026-10-14 |
+| gaps | PUB-08 compound-tuesday-robot | Compound intent | A4, A19, A28, A34, A38 | 180 on 2026-10-20 |
+| gaps | PUB-04 distractors-friday | Talkative off-topic | A19, A29, A34 | 1250 on 2026-10-16. Wedding, birthday, fine and salary date are not the payment |
+| gaps | PUB-06 split-correct-all | Split and corrected numbers | A11, A12, A26, A27, A29 | 637.50 on 2026-10-16 |
+| gaps | PUB-01 asks-back-today | Asks back | A11, A28, A34, A38 | 420 on 2026-10-14 |
+| gaps | PUB-05 in-words-floor-friday | In words | A19, A26, A27, A34 | 260 on 2026-10-16 |
+| gaps | PUB-03 cutoff-year | Cut-off year | A11, A12, A28, A34, A38 | 95 on 2026-10-14. The year is 1992 |
+| gaps | PUB-11 paid-dispute-promise | Multi-product mixed | A39, A40, B7, B8, B9 | car loan 75 on 2026-10-16. Notes: card `paid`, loan `dispute` |
+| gaps-surface | PUB-10, PUB-04, PUB-06, PUB-01, PUB-07, PUB-11 | same archetype as `metamorphic_of` | same rules | same ledger as the gaps row |
+
+Counts: 32 v2 cases, 9 gap cases, 6 surface siblings. 4 debatable, all in the v2 files, none in the gaps.
