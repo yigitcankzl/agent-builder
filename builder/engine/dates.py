@@ -61,7 +61,9 @@ def deadline_for(today, days_late, policy):
             band = b
             break
     if dl.get('rule', 'business_days_after_today') == 'calendar_days_after_today':
-        return today + datetime.timedelta(days=band['days'])
+        # a calendar deadline on a non-business day: the last recordable day is the business day before it
+        d = shift_to_business_day(today + datetime.timedelta(days=band['days']), policy, -1)
+        return d if d is not None and d >= today else today
     return add_business_days(today, band['days'], policy)
 
 

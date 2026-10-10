@@ -11,6 +11,7 @@ Schema (every rule section carries `source`: exact quotes from the brief, checke
   "on_after_deadline":   {"action": "offer_deadline" | "reject", "say": str, "source": [...]},
   "on_vague":   {"asks": int, "then": "offer_deadline" | "ask_again", "say_ask": str, "say_final": str, "source": [...]},
   "on_before_earliest": {"say": str},  "on_invalid": {"say": str},  "on_ok": {"say": ""},
+  "weekday_words": {"rule": str, "source": [...]},                    optional: the brief's meaning of "next Friday"
   "inputs":     {"date_var": "date_said", "products_var", "current_product_var", "product_id_field",
                  "days_late_field", "days_late_var"}
 }
@@ -65,7 +66,7 @@ def validate(policy, brief_text=None):
                         errs.append(f"{sec}.{key} uses unknown tokens {sorted(bad)}")
                     if "{{" in val or "}}" in val:
                         errs.append(f"{sec}.{key} must not contain double braces")
-    for sec in RULED:
+    for sec in RULED + tuple(k for k in ("weekday_words",) if isinstance(policy.get(k), dict)):
         src = policy[sec].get("source")
         if not src:
             errs.append(f"{sec}.source: at least one quote from the brief is required")

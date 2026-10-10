@@ -12,7 +12,7 @@ from builder.engine import date_graph as G
 POLICY = json.load(open(os.path.join(ROOT, "tests", "fixtures", "brief_a_date_policy.json")))
 NOW = "2026-10-14T11:00"
 SCRIPTS = [  # (days_late, customer turns, expected (status, record) after the last date turn)
-    (5, ["I can't pay today.", "Monday the 26th"], ("non_business", "2026-10-27")),
+    (5, ["I can't pay today.", "Monday the 26th"], ("non_business_day", "2026-10-27")),
     (14, ["Not today.", "On the sixth of November, when my salary comes"], ("after_deadline", "2026-10-23")),
     (5, ["Not today.", "Next Friday"], ("ok", "2026-10-23")),
     (5, ["Not today.", "The week after next"], ("vague", "")),
@@ -43,7 +43,7 @@ if __name__ == "__main__":
         vt = {}
         for m in freya.get_call(call)["messages"]:
             vt.update({k: x.get("value") for k, x in ((m.get("workflowSnapshot") or {}).get("variableTable") or {}).items()})
-        got = (vt.get("date_status"), vt.get("date_record") or "")
+        got = (vt.get("date_reason"), vt.get("accepted_date") or "")
         good = got == exp; ok += good
-        print(("OK " if good else "BAD"), turns[-1], "| got", got, "exp", exp, "| iso", vt.get("date_iso"), "spec", vt.get("date_spec"), "\n")
+        print(("OK " if good else "BAD"), turns[-1], "| got", got, "exp", exp, "| said", vt.get("date_said"), "\n")
     print(f"{ok}/{len(SCRIPTS)}")
