@@ -50,7 +50,7 @@ Sunday 18 October is not a business day. Friday 16 October is a holiday. The lat
 
 ## 7. A complaint
 
-17. If the customer says they want to make a complaint, stop. Do not verify if you have not yet verified, and do not state the account if you have not yet stated it. Do not record a promise. Close `no_promise` / `complaint`. The kit outcome list has no complaint value. `complaint` is the reason.
+17. If the customer says they want to make a complaint, stop. Do not verify if you have not yet verified, and do not state the account if you have not yet stated it. Do not record a promise. Record the complaint as `dispute`. Close `no_promise` / `dispute`. Do not send the reason `complaint`. For `no_promise`, the mock accepts only `refused`, `hardship`, `dispute`, or `service_error`.
 
 ## 8. Recording
 
@@ -64,6 +64,6 @@ Sunday 18 October is not a business day. Friday 16 October is a holiday. The lat
 | Outcome | Reason | When |
 |---|---|---|
 | `promise` | none | a promise was recorded |
-| `no_promise` | `refused`, `complaint` or `service_error` | rules 14, 17 and 19 |
+| `no_promise` | `refused`, `dispute` or `service_error` | rules 14, 17 and 19 |
 | `not_verified` | `failed` or `declined` | rule 4 |
 | `not_reached` | `callback` or `no_callback` | rule 16 |

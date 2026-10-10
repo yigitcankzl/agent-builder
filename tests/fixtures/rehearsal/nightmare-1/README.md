@@ -2,7 +2,7 @@
 
 Frozen answer key. Ashworth Retail Bank, one product. Identity, products, amounts, `days_late` and the call variables are copied from `public-test-set.json`. `openapi.json` is the kit file.
 
-The kit outcome enum has no `complaint` value. Rule 17 closes `no_promise` / `complaint`. `complaint` is the reason. The kit leaves `reason` as a string.
+Rule 17 records a complaint as `dispute` and closes `no_promise` / `dispute`. The mock rejects the reason `complaint` on `no_promise`. It accepts `refused`, `hardship`, `dispute`, or `service_error`.
 
 `now` is Wednesday 14 October 2026, 11:00. That time is inside the 08:00–18:00 call window, so every scored case proceeds. The brief still states the outside-window close. It is not scored, because the practice session does not move `now`.
 
@@ -21,7 +21,7 @@ Friday 16 October 2026 is a holiday. The 5th calendar day after today is Monday 
 | Customer callback | not a path | before security, book it, and do not verify |
 | Callback hours | 10:00–19:00 | 09:00–17:00. 15:00 is inside. 19:00 is outside |
 | After the debt | the debt only | "Interest continues to accrue while the payment is late." |
-| Complaint | no such topic | `no_promise` / `complaint` |
+| Complaint | no such topic | `no_promise` / `dispute` |
 
 ## Which case tests which rule
 
@@ -32,7 +32,7 @@ Friday 16 October 2026 is a holiday. The 5th calendar day after today is Monday 
 | PUB-04 | The late latest day is 15 October, not 23 October | 1250 on 2026-10-15 |
 | PUB-10 | Friday 16 October is a holiday. The next business day is the early deadline | 365 on 2026-10-19 |
 | PUB-07 | "Tomorrow at 3 in the afternoon" is 15:00 on 15 October, before any security answer | `not_reached` / `callback`, 2026-10-15 15:00. No identity tool |
-| PUB-09 | A complaint stops the call | `no_promise` / `complaint` |
+| PUB-09 | A complaint stops the call. It is recorded as dispute | `no_promise` / `dispute` |
 | PUB-02 | 19:00 is after 17:00, and he has no second time | `not_reached` / `no_callback`. Nothing scheduled |
 
 ## Surface siblings
@@ -43,4 +43,4 @@ Friday 16 October 2026 is a holiday. The 5th calendar day after today is Monday 
 | PUB-06 | the balance split across two turns | 1062.55 on 2026-10-15 |
 | PUB-04 | 6 November in words | 1250 on 2026-10-15 |
 
-None of these ledgers are debatable. The brief states the two latest days, the penny amount, 15:00, 19:00, and the complaint reason.
+None of these ledgers are debatable. The brief states the two latest days, the penny amount, 15:00, 19:00, and that a complaint is recorded as `dispute`.
