@@ -6,7 +6,7 @@ import os, sys
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 from builder.engine import reducer as R
-from tests.test_reducer_sequences import POL
+from tests.test_reducer_sequences import POL, FIX, TOPICS
 
 NOW = "2026-10-14T11:00"
 CV = dict(customer_id="c_r", first_name="Ann", last_name="Lee", title="Ms", now=NOW)
@@ -54,7 +54,43 @@ def check(c, m):
         raise AssertionError(m)
 
 
+def floor_once():
+    """Invariant 14 on PUB-06: after the floor offer (637.50), whatever the customer says, no later offer line restates
+    the amount (re-asks, next attempts, date shifts, terms, free-talk hints); the read-back still names it."""
+    c = [c for c in FIX["cases"] if c["id"] == "PUB-06"][0]
+    pol, cv = POL[c["policy"]], c["call_variables"]
+    st = R.init_state(pol, cv)
+    for s in c["steps"][:7]:
+        if s["source"] == "user":
+            st["tok"] = s["event_fields"]["n"]
+            st, a = R.step(pol, st, R.parse_event(s["event"], st, TOPICS), None, c["now"], cv)
+            st["last_tok"] = st["tok"]
+        else:
+            st, a = R.step(pol, st, None, s["tool_event"], c["now"], cv)
+    check("637.50" in a["text"], "PUB-06 step 7 offers the floor")
+    replies = ["kind=other;also=none;st=none;prod=", "kind=no;also=none;st=complete;prod=",
+               "kind=reject;also=none;st=complete;prod=;why=too_much", "kind=reject;also=none;st=complete;prod=;why=flat",
+               "kind=amount;also=none;st=complete;prod=;amt=637.5", "kind=topic;also=none;st=complete;prod=;t=terms",
+               "kind=date;also=none;st=complete;prod=;rel=;d=;m=;wd=sat;wk=this;vague=no", "kind=topic;also=none;st=complete;prod=;t=robot", ""]
+    for first in replies:
+        for second in replies:
+            x = R.json.loads(R.json.dumps(st))
+            for k, body in enumerate((first, second)):
+                if x["phase"] == "closed" or x.get("pending"):
+                    break
+                x["tok"] = "kf" + "abcdefghjk"[k] * 4
+                ev = R.parse_event("n=" + x["tok"] + ";src=user;" + body, x, TOPICS) if body else None
+                x, a = R.step(pol, x, ev, None, c["now"], cv)
+                if ev:
+                    x["last_tok"] = x["tok"]
+                said = a.get("text") if a["type"] == "say_exact" else a.get("hint") if a["type"] == "speak_free" else ""
+                if x["q"] != "readback":
+                    check("637.50" not in (said or ""), f"floor restated after {first!r} / {body!r}: {said}")
+    return True
+
+
 if __name__ == "__main__":
+    print("floor once (PUB-06):", floor_once())
     for name, pol in POL.items():
         v = R.V(pol)
         # 1. an event that does not answer the name question: counted re-ask, never a bare safe_repeat; cap -> unclear

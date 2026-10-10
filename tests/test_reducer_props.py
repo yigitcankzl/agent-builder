@@ -275,6 +275,9 @@ def loop_caps():
 
 
 if __name__ == "__main__":
+    sizes = dict((k, len(R.hub_source(v).encode())) for k, v in POL.items())
+    check(max(sizes.values()) <= 96000, f"hub over budget (code_exec: code + data <= 131072, ~34 KB data): {sizes}")
+    print("hub_source bytes:", sizes)
     print("human loop without pre-verification queue: ends", no_human_loop())
     print("loop caps: on-cap action for", loop_caps(), "phase x q starts")
     n = int(sys.argv[1]) if len(sys.argv) > 1 else 3000

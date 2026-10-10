@@ -41,6 +41,8 @@ D_DESK = 'customer support team'
 def desk_name(row):
     """The support desk's name in the brief's own words ("offer the hardship desk" -> hardship desk), read from the row's
     verbatim source quotes only (the effect is the bridge's paraphrase). Else the contract default."""
+    if (row or dict()).get('desk'):
+        return row['desk']
     quotes = ' '.join(str(q.get('quote') or '') for q in (row or dict()).get('source') or [] if isinstance(q, dict))
     m = re.search(r'\boffer (?:the |our |a )?([a-z][a-z ]{0,30}?\b(?:team|desk|unit|department|line))\b', quotes, re.I)
     return m.group(1).lower() if m else D_DESK
@@ -539,6 +541,12 @@ def step(policy, st, event, tool_event, now, call_vars=None):
             act = dict(type='_loop')
     else:
         st['_said_n'], st['_said_last'] = 0, None
+    if st.get('verified') == 'yes' and st.get('q') == 'offer' and act.get('type') in ('say_exact', 'speak_free'):
+        act = no_restated_amount(st, act)
+    if st.get('verified') == 'yes' and act.get('type') == 'say_exact':   # amounts already spoken (statement, offers)
+        new = [a for a in re.findall(AMT, act['text']) if a not in (st.get('_spoken') or [])]
+        if new:
+            st['_spoken'] = (st.get('_spoken') or []) + new
     if act.get('type') == '_loop':
         st['_said_n'], st['_said_last'], st['_resay_n'] = 0, None, 0
         act = loop_break(policy, st, today, cv)
@@ -1024,6 +1032,26 @@ def transfer(policy, st, key, cv):
     return call(st, 'transfer', 'transfer_to_agent', dict(st['_last_args']))
 
 
+AMT = r'\d[\d,]*\.\d\d'
+
+
+def no_restated_amount(st, act):
+    """Invariant 14: an amount once offered is never restated in a later offer line (re-asks, next attempts, date
+    shifts): 'Could you pay X for your ...' -> 'Could you make that payment for your ...', 'That is X for your ...' goes."""
+    said, spoken = list(st.get('_offered') or []), st.get('_spoken') or []
+    key = 'text' if act['type'] == 'say_exact' else 'hint'
+    t = act.get(key) or ''
+    for a in re.findall(AMT, t):
+        if a in said:
+            t = re.sub(r'pay ' + re.escape(a) + r' for', 'make that payment for', t)
+        if a in said or (a in spoken and (st.get('offer') or dict()).get('kind') == 'customer'):   # PUB-07 / PUB-04
+            t = re.sub(r'\s*That is ' + re.escape(a) + r' for your [^.?]*\.', '', t)
+    new = [a for a in re.findall(r'(?:pay|That is) (' + AMT + r') for', t) if a not in said]
+    if new:
+        st['_offered'] = said + new
+    return dict(act, **dict([(key, t.strip())]))
+
+
 def loop_break(policy, st, today, cv):
     """The on-cap action of every open question (contract default; never free talk, never a tts loop).
     Before verification: a permitted transfer for a help-first loop, else a safe close on the stage's slot.
@@ -1401,8 +1429,8 @@ def _token(runs):
     return out
 
 
-def _dump(st):
-    s = json.dumps(st)
+def _dump(st, sep=None):
+    s = json.dumps(st, separators=sep)
     two_c, two_o = '}' * 2, '{' * 2      # built, so this source never contains the pair itself
     while two_c in s or two_o in s:
         s = s.replace(two_c, '} }').replace(two_o, '{ {')
@@ -1454,6 +1482,38 @@ def hub_main(vars, policy):
     vars['st'] = _dump(st2)
 
 
+def minify(src):
+    """The shipped string (code_exec limit: code + data <= 131072 bytes): no docstrings or comments, no local-only
+    import, and only the top-level names reachable from hub_main."""
+    import ast
+    tree = ast.parse(src)
+    for n in ast.walk(tree):
+        b = getattr(n, 'body', None)
+        if isinstance(n, (ast.Module, ast.FunctionDef, ast.ClassDef)) and b and isinstance(b[0], ast.Expr) \
+                and isinstance(b[0].value, ast.Constant) and isinstance(b[0].value.value, str):
+            n.body = b[1:] or [ast.Pass()]
+    body = [n for n in tree.body if not isinstance(n, ast.Try)]   # the local 'from builder.engine.dates import'
+    defs = dict()
+    for n in body:
+        for t in ([n.name] if isinstance(n, (ast.FunctionDef, ast.ClassDef)) else
+                  [x.id for x in getattr(n, 'targets', []) if isinstance(x, ast.Name)]):
+            defs[t] = n
+    keep, todo = set(), ['hub_main']
+    while todo:
+        k = todo.pop()
+        if k in keep or k not in defs:
+            continue
+        keep.add(k)
+        todo += [x.id for x in ast.walk(defs[k]) if isinstance(x, ast.Name)]
+    named = lambda n: isinstance(n, (ast.FunctionDef, ast.ClassDef, ast.Assign))
+    tree.body = [n for n in body if not named(n) or any(defs.get(k) is n for k in keep)]   # a redefined name: the last
+    out = []
+    for line in ast.unparse(tree).split('\n'):   # unparse indents by 4 and puts no newline inside a literal
+        body = line.lstrip(' ')
+        out.append(' ' * ((len(line) - len(body)) // 4) + body)
+    return '\n'.join(out)
+
+
 def hub_source(policy):
     """The full code-node string: date core + reducer + policy literal + call. No double braces."""
     import os
@@ -1466,8 +1526,13 @@ def hub_source(policy):
         if isinstance(x, list):
             return [strip(v) for v in x]
         return x
-    lit = json.dumps(_dump(strip(policy)))
-    code = dates_src + '\n\n' + red_src + '\n\nPOLICY = json.loads(' + lit + ')\nhub_main(vars, POLICY)\n'
+    pol = strip(policy)
+    for r in pol.get('events') or []:          # the desk name is read from source quotes: keep it, not the quotes
+        if r.get('topic') == 'hardship':
+            r['desk'] = desk_name(next((x for x in policy.get('events') or [] if x.get('topic') == 'hardship'
+                                        and x.get('effect') == r.get('effect')), r))
+    lit = repr(_dump(pol, (',', ':')))
+    code = minify(dates_src + '\n\n' + red_src) + '\nPOLICY = json.loads(' + lit + ')\nhub_main(vars, POLICY)\n'
     if '{' * 2 in code or '}' * 2 in code:
         raise ValueError('hub source contains double braces')
     compile(code, 'hub', 'exec')
