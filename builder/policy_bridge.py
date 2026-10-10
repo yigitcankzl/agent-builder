@@ -17,7 +17,7 @@ to_reducer(policy, oas_path, stable_unmapped=None) -> (reducer_policy, report)
 import copy, json, os, re, sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from builder.engine.date_policy import _norm, validate
+from builder.engine.date_policy import _norm, validate, unsupported_rules
 from builder.policy_extract import oas_summary
 from builder.oas import load_oas
 
@@ -882,7 +882,7 @@ def identity_gate(p, brief_text):
     g = {"ask": c["ask"], "quote": c.get("quote", "")}
     if c["on_no"] == "third_party":
         g["on_no"] = "callback"
-        for line in str(brief_text or "").splitlines() + [str(c.get("quote") or "")]:
+        for line in [str(c.get("quote") or "")] + str(brief_text or "").splitlines():
             m = re.search(r"\bask when (an? |the )?([a-z][a-z ]{2,40}?) can be (reached|contacted|called)\b", line, re.I)
             if m:
                 g["callback_ask"] = f"When can {(m.group(1) or '').lower()}{m.group(2)} be {m.group(3).lower()}?"
@@ -1120,6 +1120,12 @@ def default_ask(q):
 
 def to_reducer(policy, oas_path, stable_unmapped=None, brief_text=None):
     oas = oas_summary(oas_path)
+    from builder.generator import arg_map, oas_tools
+    # Enum checks must use the same role-to-field binding as the generated request.
+    for tool, spec in oas_tools(oas_path).items():
+        for field, role in arg_map(tool, spec)[0].items():
+            if spec["props"][field].get("enum"):
+                oas.setdefault(tool, {})[role] = spec["props"][field]["enum"]
     p = copy.deepcopy(policy)
     mism, notes = [], []
 
@@ -1215,10 +1221,10 @@ def to_reducer(policy, oas_path, stable_unmapped=None, brief_text=None):
     slots = {"unclear": row(*WHO_CUES["unclear"]), "declined": row("declin\\w*"), "id_failed": row("fail\\w*"),
              "busy": row("busy", "voicemail"), "callback_failed": row("no callback"),
              "write_failed": row("service\\w*", "error")}
-    # promise / paid slots: reason-less rows told apart by their `when` text (a success row vs an already-paid row)
+    # Success rows may require a reason too; preserve the sourced pair, not just its outcome.
     nulls = [r for r in live if not r["reason"]]
-    paid_row = next((r for r in nulls if re.search(r"\b(paid|settled|already)\b", str(r.get("when", "")) + " " + str(r["outcome"]), re.I)), None)
-    promise_row = next((r for r in nulls if r is not paid_row and re.search(r"\b(promise|arrangement|recorded|saved|agreed)\w*", str(r.get("when", "")) + " " + str(r["outcome"]), re.I)), None) \
+    paid_row = next((r for r in live if re.search(r"\b(paid|settled|already)\b", str(r.get("when", "")) + " " + str(r["outcome"]), re.I)), None)
+    promise_row = next((r for r in live if r is not paid_row and re.search(r"\b(promise|arrangement|recorded|saved|agreed)\w*", str(r.get("when", "")) + " " + str(r["outcome"]), re.I)), None) \
         or next((r for r in nulls if r is not paid_row), None)
     slots.update(promise=promise_row, paid=paid_row)
     cl["slots"] = {k: ({"outcome": v["outcome"], "reason": v["reason"]} if v else None) for k, v in slots.items()}
@@ -1288,22 +1294,26 @@ def to_reducer(policy, oas_path, stable_unmapped=None, brief_text=None):
         if v:
             qtopic["human"] = v
     for t, q in explicit_queues(brief_text, set(qtopic) | {"restructure", "human", "hardship"}, e_q).items():
-        if qtopic.get(t) != q:      # the brief's literal "<topic> ... transfer to <queue>" wins over the extractor
-            notes.append(f"transfer.queue_map.{t}: {qtopic.get(t)!r} -> {q!r} (the brief names the queue)")
+        if not qtopic.get(t):
+            notes.append(f"ASSUMPTION transfer.queue_map.{t}: filled {q!r} from raw text (extractor left it empty)")
             qtopic[t] = q
     p["transfer"] = {"queue_map": qtopic, "pre_verification_queues": pre,
                      "source": (hr.get("source") or []) + (w.get("source") or []) or DEFAULT}
     if not tr.get("pre_verification_queues"):
         notes.append("transfer.pre_verification_queues not stated by the brief: empty (no transfer before verification)")
     nt = w.setdefault("notes", {})
-    nt["enabled"] = bool(nt.get("enabled", str(nt.get("when", "")).strip().lower() not in ("", "never", "none")))
-    if brief_text is not None:
-        asked = notes_asked(brief_text)
-        if nt["enabled"] and not asked:
-            notes.append("writes.notes.enabled -> false: the brief never asks the agent to write a note")
-        nt["enabled"] = nt["enabled"] and asked
+    if nt.get("enabled") is None:
+        when = str(nt.get("when") or "").strip().lower()
+        nt["enabled"] = when not in ("never", "none") if when else notes_asked(brief_text or "")
+        if not when:
+            notes.append("ASSUMPTION writes.notes.enabled: filled from raw text (extractor left it empty)")
     e_n = _enum(oas, "add_note", "reason")
-    nt["reasons"] = note_reasons(e_n, brief_text)
+    reasons = nt.setdefault("reasons", {})
+    for key, value in list(reasons.items()):
+        reasons[key] = resolve(f"writes.notes.reasons.{key}", value, "add_note.reason", e_n)
+    for key, value in note_reasons(e_n, brief_text).items():
+        if key not in reasons:
+            reasons[key] = value
     for i, ev in enumerate(p.get("events") or []):
         nr = str(ev.get("note_reason") or "").strip().lower()
         if nr in ("none", "null", "n/a", "-"):
@@ -1401,7 +1411,7 @@ def to_reducer(policy, oas_path, stable_unmapped=None, brief_text=None):
     desk = next((m.group(1).lower() for q in hard_lines for m in [desk_re.search(q)] if m), "")
     if desk:
         for e_ in evs:
-            if e_["topic"] == "hardship":
+            if e_["topic"] == "hardship" and not e_.get("desk"):
                 e_["desk"] = desk
     for t in V3_ALWAYS:
         if not any(e_["topic"] == t for e_ in evs):
@@ -1515,18 +1525,20 @@ def to_reducer(policy, oas_path, stable_unmapped=None, brief_text=None):
     p["opening_checks"], onotes = opening_checks(p)
     notes += onotes
     notes += third_party_ask(p, brief_text)
-    gate = identity_gate(p, brief_text)
+    gate = None if (p.get("identity") or {}).get("gate") else identity_gate(p, brief_text)
     if gate:
         p.setdefault("identity", {})["gate"] = gate
         notes.append(f"identity.gate: {gate['ask']!r}, on no {gate['on_no']!r}")
     p["tool_status"] = tool_status(p, oas_path)
-    if re.search(r"\b(do not|don't|never)\s+(say|mention|disclose|reveal|tell)\w*\s+(that\s+)?(you are|it is|you're)\s+(an?\s+)?"
+    if meta.get("assistant_disclosure_forbidden") is None and re.search(r"\b(do not|don't|never)\s+(say|mention|disclose|reveal|tell)\w*\s+(that\s+)?(you are|it is|you're)\s+(an?\s+)?"
                  r"(ai|assistant|digital assistant|bot|robot|automated|virtual)", str(brief_text or ""), re.I):
         p.setdefault("meta", {})["assistant_disclosure_forbidden"] = True
         notes.append("the brief forbids saying the agent is an assistant: the greet adds no disclosure")
     notes += placeholder_lint(p)
     notes += [f"tool {t} BLOCKED: {v['why']}" for t, v in p["tool_status"].items() if v["status"] == "blocked"]
-    report = {"api_mismatch": mism, "notes": notes, "errors": validate(p),
+    unsupported = unsupported_rules(p)
+    notes += [f"ASSUMPTION unsupported source rule: {e}; deterministic build rejected, use L3" for e in unsupported]
+    report = {"api_mismatch": mism, "notes": notes, "errors": validate(p) + unsupported,
               "events": [(e_["brief_topic"], e_["topic"]) for e_ in evs], "who": [(x["brief_topic"], x["who"]) for x in who]}
     return p, report
 

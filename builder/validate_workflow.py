@@ -30,6 +30,7 @@ validate(wf, rp, oas_path, unstable_quotes=()) -> list of problems (empty = pass
 21 the bank name appears once per sentence in composed self-descriptions (greet, system prompt, task messages)
 22 every {{x}} in a spoken tts text is a workflow variable or a declared call variable
 23 the saved line (recorded + text_message) has no greeting or recording disclosure and one saved claim
+24 unsupported source rules cannot silently turn into a different runtime rule
 """
 import argparse, json, os, re, sys
 
@@ -78,7 +79,8 @@ def _nulls(x, path="$"):
 
 
 def validate(wf, rp, oas_path, unstable_quotes=()):
-    errs = []
+    from builder.engine.date_policy import unsupported_rules
+    errs = [f"24: unsupported source rule: {e}" for e in unsupported_rules(rp)]
     nodes = wf.get("nodes") or {}
     tools = oas_tools(oas_path)
     oas = load_oas(oas_path)
@@ -288,7 +290,8 @@ def validate(wf, rp, oas_path, unstable_quotes=()):
             errs.append(f"13: tool_results.{tool}.verified_value without its quote")
     # 14 every enum value the agent may send is an exact OAS member: slots, product types, identity fields (unless
     #    blocked), note reasons, outcomes/reasons of tables, events and who rules, queues
-    enum = lambda tool, f: (tools.get(tool, {}).get("props", {}).get(f) or {}).get("enum")
+    roles = {t: {role: spec["props"][field] for field, role in arg_map(t, spec)[0].items()} for t, spec in tools.items()}
+    enum = lambda tool, f: (roles.get(tool, {}).get(f) or {}).get("enum")
     e_out, e_rsn, e_q, e_n = enum("close_call", "outcome"), enum("close_call", "reason"), enum("transfer_to_agent", "queue"), enum("add_note", "reason")
     for k, v in ((rp.get("closing") or {}).get("slots") or {}).items():
         if v and e_out and v.get("outcome") not in e_out:
@@ -332,6 +335,22 @@ def validate(wf, rp, oas_path, unstable_quotes=()):
             errs.append(f"14: {path} outcome {o!r} not in the OAS enum (a rejected close_call leaves the ledger empty)")
         if e_rsn and isinstance(r, str) and r and r not in e_rsn:
             errs.append(f"14: {path} reason {r!r} not in the OAS enum (a rejected close_call leaves the ledger empty)")
+    # A required mapped close field cannot be filled by dropping a missing source value.
+    from builder.graph_walk import validate as validate_value
+    spec = tools.get("close_call")
+    if spec:
+        close_fields = {role: field for field, role in arg_map("close_call", spec)[0].items()}
+        for path, outcome, reason in closes({k: v for k, v in rp.items() if k not in
+                                            ("api_mismatch", "unmapped_topics", "tool_args", "tool_results")}, "$"):
+            for role, value in (("outcome", outcome), ("reason", reason)):
+                field = close_fields.get(role)
+                if not field:
+                    continue
+                if value is None or value == "":
+                    if field in spec["required"]:
+                        errs.append(f"14: close_call.{field} required but {path}.{role} is empty")
+                else:
+                    errs += [f"14: close_call source {e}" for e in validate_value(oas, spec["props"][field], value, path + "." + field)]
     for k, q in ((rp.get("transfer") or {}).get("queue_map") or {}).items():
         if e_q and q not in e_q:
             errs.append(f"14: transfer.queue_map.{k} {q!r} not in the OAS enum")

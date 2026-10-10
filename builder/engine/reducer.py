@@ -231,7 +231,7 @@ def vocab(policy):
                refused=pick('events stop (after verification)', pair(stop_after), 'refused'),
                hardship=pick('events hardship (declined)', pair(hard_decline), 'hardship'),
                dispute=pick('events dispute', pair(dispute_row), 'dispute'),
-               paid=pick('events paid', (pair(paid_row)[0], None)))
+               paid=pick('events paid', pair(paid_row) if paid_row else slot(policy, 'paid')))
     out['xfer'] = dict(restructuring=pick('events restructure', pair((rows('restructure') or [None])[0])),
                        human=pick('events human', pair((rows('human') or [None])[0])),
                        hardship=pick('events hardship (accepted)', pair(hard_accept)))
@@ -244,16 +244,16 @@ def vocab(policy):
     # the promise outcome: the closing-table row that no event, who rule or slot uses and whose "when" names a promise
     used = set(x[0] for x in (out['refused'], out['hardship'], out['dispute'], out['paid'], unclear, out['declined'],
                               out['id_failed']) if x[0]) | set(v[0] for v in out['xfer'].values() if v[0])
-    prom = slot(policy, 'promise')[0]
-    if not prom:   # the reason-less closing-table row that no event, who rule or slot uses
+    prom = slot(policy, 'promise')
+    if not prom[0]:   # the reason-less closing-table row that no event, who rule or slot uses
         for r in (policy.get('closing') or dict()).get('table') or []:
             if _none(r.get('outcome')) and _none(r.get('outcome')) not in used and not _none(r.get('reason')):
-                prom = _none(r.get('outcome'))
+                prom = pair(r)
                 break
-    if not prom:
+    if not prom[0]:
         log.append('promise outcome missing: unclear slot used')
-        prom = unclear[0]
-    out['promise'] = (prom, None)
+        prom = unclear
+    out['promise'] = prom
     others = [w for w in policy.get('who_rules') or [] if w.get('who') == 'other' and w.get('party', 'relative') in ('relative', '', None)]
     cb_ok = next((w for w in others if pair(w) != out['callback_failed'] and pair(w)[0]), others[0] if others else None)
     if not cb_ok or not pair(cb_ok)[0]:
@@ -1966,13 +1966,16 @@ D_JUST_CHECK = 'Just to be sure:'
 
 
 def _callback_ok(policy, st, d, tm, today, now_time):
+    if not re.fullmatch(r'(?:[01][0-9]|2[0-3]):[0-5][0-9]', tm):
+        return False
     cb = (policy.get('writes') or dict()).get('callback') or dict()
     nb = add_business_days(today, 1, policy)
-    days = [today, nb] if cb.get('days', 'today_or_next_business_day') else [today, nb]
+    days = {'today_or_next_business_day': [today, nb], 'next_business_day_only': [nb],
+            'today_only': [today]}.get(cb.get('days', 'today_or_next_business_day'), [])
     if d not in days or not is_business_day(d, policy) and d != today:
         return False
     start, end = cb.get('start', '00:00'), cb.get('end', '23:59')
-    if not (start <= tm <= end):
+    if not ((start <= tm <= end) if cb.get('inclusive', True) else (start < tm < end)):
         return False
     if cb.get('after_now', True) and d == today and tm <= now_time:
         return False
@@ -2304,8 +2307,7 @@ CLOSE_PREF = dict(refused=('refused', 'dispute', 'hardship', 'write'), dispute=(
 
 def close_retry(policy, st, data):
     """close_call came back rejected (ok false or an error): the same outcome once more, with the reason the error
-    allows (contract-closest by the close's family: refused, dispute, hardship, write failure), else the outcome's
-    first reason in the closing table. -> (outcome, reason) or None when already retried."""
+    explicitly allows, otherwise preserving the source outcome/reason pair. -> pair or None when already retried."""
     if st.get('_close_retried'):
         return None
     st['_close_retried'] = True
@@ -2313,6 +2315,8 @@ def close_retry(policy, st, data):
     text = json.dumps(data) if not isinstance(data, str) else data
     m = re.search(r'reasons?[^:]*:\s*([a-z_ ,]+)', text, re.I)
     allowed = [x.strip() for x in re.split(r'[ ,]+', m.group(1)) if x.strip() and x.strip() not in ('and', 'or')] if m else []
+    if r in allowed:
+        return o, r
     fam = next((k for k in ('dispute', 'hardship', 'write_failed') if tuple(v[k]) == (o, r)), 'refused')
     names = dict(refused=v['refused'][1], dispute=v['dispute'][1], hardship=v['hardship'][1], write=v['write_failed'][1])
     for key in CLOSE_PREF[fam]:
@@ -2321,9 +2325,7 @@ def close_retry(policy, st, data):
                 return o, cand
     if allowed:
         return o, allowed[0]
-    row = next((x for x in (policy.get('closing') or dict()).get('table') or [] if _none(x.get('outcome')) == o
-                and _none(x.get('reason')) and _none(x.get('reason')) != r), None)
-    return o, (_none(row.get('reason')) if row else None)
+    return o, r
 
 
 def close_hub(vars, policy, st):

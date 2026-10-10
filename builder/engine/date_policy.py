@@ -104,6 +104,29 @@ DATE_RULES = ("last_business_day_this_week",   # rolls to the last business day 
               "deadline", "today", "next_business_day", "customer_named")
 AMOUNT_RULES = ("full", "floor", "floor_if_too_much_else_full", "same_as_previous")
 ATTEMPT_FLAGS = ("flat_refusal_uses_attempt", "proposal_never_refusal", "no_repeat_refused_offer", "stop_when_exhausted")
+CALLBACK_DAYS = ("today_or_next_business_day", "next_business_day_only", "today_only")
+
+
+def unsupported_rules(policy):
+    """Source rules the deterministic runtime cannot honor: reject, never substitute another rule."""
+    errors = []
+    for band, steps in ((policy.get("attempts") or {}).get("plan") or {}).items():
+        for i, step in enumerate(steps):
+            for key, value in (("date_rule", "customer_named"), ("amount_rule", "same_as_previous")):
+                if step.get(key) == value:
+                    errors.append(f"attempts.plan.{band}[{i}].{key}={value!r} is unsupported by the reducer")
+    cb = (policy.get("writes") or {}).get("callback") or {}
+    if cb.get("days", CALLBACK_DAYS[0]) not in CALLBACK_DAYS:
+        errors.append(f"writes.callback.days={cb.get('days')!r} is unsupported by the reducer")
+    for key in ("inclusive", "after_now"):
+        if key in cb and not isinstance(cb[key], bool):
+            errors.append(f"writes.callback.{key} must be a boolean")
+    for key in ("start", "end"):
+        if key in cb and not re.fullmatch(r"(?:[01][0-9]|2[0-3]):[0-5][0-9]", str(cb[key])):
+            errors.append(f"writes.callback.{key} must be a valid HH:MM")
+    if str(cb.get("start", "00:00")) > str(cb.get("end", "23:59")):
+        errors.append("writes.callback.start must not be after end")
+    return errors
 
 
 def _src_items(src):

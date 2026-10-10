@@ -15,7 +15,6 @@ from builder.validate_workflow import validate
 OAS = os.path.join(ROOT, "tools", "openapi.json")
 V3 = os.path.join(ROOT, "tests", "policy_eval", "v3")
 BRIEFS = ["brief-a", "brief-ab", "mut-01", "mut-02", "mut-03", "mut-04", "mut-05", "raw-a"]
-OUT = os.path.join(ROOT, "tests", "generated")
 
 
 def build(name):
@@ -59,13 +58,10 @@ def public_constants():
 
 
 if __name__ == "__main__":
-    os.makedirs(OUT, exist_ok=True)
     bad = 0
     print("== generate + validate")
     for b in BRIEFS:
         rp, rep, wf, unstable = build(b)
-        json.dump(wf, open(os.path.join(OUT, b + ".workflow.json"), "w"), indent=1)
-        json.dump(rp, open(os.path.join(OUT, b + ".reducer_policy.json"), "w"), indent=1)
         errs = validate(wf, rp, OAS, unstable)
         bad += bool(errs)
         blocked = (rp.get("identity") or {}).get("blocked")
