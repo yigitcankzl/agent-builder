@@ -35,10 +35,10 @@ def inject(name, t_end):
     elif name == "validator_core":                       # S5 on a core rule
         B.validate = lambda *a, **k: ["2: identity gate: get_account is reachable before verify_identity (injected)"]
     elif name == "binding_core":                         # a core response fact of get_account unbound -> validator check 13 -> S5
-        def tr(oas_path, policy):
-            t, missing = saved["tool_results"](oas_path, policy)
+        def tr(*a, **k):
+            t, missing = saved["tool_results"](*a, **k)
             acc = t.get("get_account") or {}
-            acc.pop(next(iter(acc), None), None)
+            acc.pop("products", None)      # a core fact (validator check 13); the first key is the non-core "ok"
             return t, missing
         oas_bindings.tool_results = tr
 
