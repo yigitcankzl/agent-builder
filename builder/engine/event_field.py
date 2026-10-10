@@ -36,7 +36,8 @@ def field(vocab):
         "for a discount, a waiver or other terms (a new payment plan or lower instalments is t=restructure); "
         "t=unknown_info: asks something the agent cannot know; t=stop: does not want to talk.\n"
         "S: complete; partial = the customer was cut off mid number or date (then leave d, m and amt empty); ambiguous = "
-        "two readings of the words; none = nothing relevant. Never check whether a weekday matches a date: write both "
+        "two readings of the words; none = nothing relevant, only together with kind=other (a short yes, no or refusal is "
+        "st=complete). Never check whether a weekday matches a date: write both "
         "labels as said, with st=complete.\n"
         "Date payload, labels only, never compute a date: rel=today|tomorrow or empty;d=day of month or empty;m=month "
         "number or empty;wd=mon..sun or empty;wk=this|next|after_next|none;vague=yes|no. Amount payload: amt=digits with "
@@ -48,6 +49,10 @@ def field(vocab):
         "vague=no\n"
         "code kqqhst, 'nice weather today' -> n=kqqhst;src=user;kind=other;also=none;st=none;prod=\n"
         "code kpwrnd, 'I can pay 300 but not today' -> n=kpwrnd;src=user;kind=amount;also=reject;st=complete;prod=;amt=300\n"
+        "code kfrbte, someone else answers and says 'she is back tomorrow around eleven' -> n=kfrbte;src=user;kind=callback;"
+        "also=none;st=complete;prod=;rel=tomorrow;d=;m=;wd=;wk=none;vague=no;tm=11:00\n"
+        "code khsnmw, 'could you take 200 as a discount' -> n=khsnmw;src=user;kind=topic;also=amount;st=complete;prod=;t=terms;"
+        "amt=200\n"
         f"code kdvmse, a {vocab['topics'][0]} topic -> n=kdvmse;src=user;kind=topic;also=none;st=complete;prod=;t={vocab['topics'][0]}\n"
         "{{extractor.type_preamble}}\n{{extractor.variables_list}}\nConversation:\n{{extractor.conversation.last-10}}\n"
         "Last message: {{extractor.speech}}")
@@ -55,6 +60,16 @@ def field(vocab):
             "description": "A code label like n=kbmtpq;src=user;kind=date;also=none;st=complete;prod=;d=27;m=;wd=;wk=none;vague=no. "
                            "Never the customer's own words.",
             "extraction_prompt": prompt}
+
+
+CONTRACT_TOPICS = ["injection", "hardship", "dispute", "paid", "restructure", "human", "stop", "decline", "purpose",
+                   "change_promise", "terms", "scam", "robot", "unknown_info", "other"]
+
+
+def ev_field(policy):
+    """The extraction field for a bridged policy: contract topics (always), identity fields from policy.identity."""
+    idf = [q.get("field") for q in (policy.get("identity") or {}).get("questions") or [] if q.get("field")]
+    return field({"topics": CONTRACT_TOPICS, "identity_fields": idf or ["answer"]})
 
 
 def parse(value, topics=()):
