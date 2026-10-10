@@ -298,6 +298,13 @@ def validate(wf, rp, oas_path, unstable_quotes=()):
         for e in rp.get(coll) or []:
             if e.get("say") and INSTRUCTION.search(str(e["say"])):
                 errs.append(f"15: {coll} {e.get('topic') or e.get('who')} say is instruction prose: {str(e['say'])[:60]!r}")
+    # 16 code_exec input limit (code + data <= 128 KB on the platform): the hub code must leave room for the data
+    limit_kb = float(os.environ.get("HUB_LIMIT_KB", "45"))
+    hub = nodes.get("hub") or {}
+    for a in hub.get("pre_actions") or []:
+        code = (((a.get("function") or {}).get("parameters") or {}).get("properties") or {}).get("code", {}).get("default", "")
+        if len(code) / 1024 > limit_kb:
+            errs.append(f"16: hub code is {len(code)/1024:.1f} KB, over the {limit_kb:g} KB limit (code_exec takes code + data <= 128 KB)")
     # 9 unstable unmapped
     # only where unmapped rules are compiled: the policy's unmapped_rules (reducer input) and the free-talk prompts.
     # (A short generic phrase like "Ask once more." can legitimately appear elsewhere, e.g. a fixed sentence.)

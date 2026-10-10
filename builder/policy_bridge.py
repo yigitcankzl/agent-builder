@@ -207,6 +207,47 @@ def _walk_sources(x):
             yield from _walk_sources(v)
 
 
+_SAY = re.compile(r"\b(?:say|tell (?:the customer|them|the caller))(?: that)? (.+)$", re.I)
+_OFFER = re.compile(r"\boffer to (connect (?:them|the customer) with .+)$", re.I)
+_CUT = re.compile(r"\s*(?:[,;.]|\band (?:then |also )?(?:continue|close|take|call|ask|make|do not|end)\b|\bthen\b|\(rule)", re.I)
+
+
+def _person(text):
+    """Third-person brief wording -> what the agent says to the customer (fixed word swaps only)."""
+    t = " " + text.strip() + " "
+    # in "say (that) X", a leading "you" is the agent itself; "they/them/their" is the customer
+    t = re.sub(r"^ you are ", " I am ", t, flags=re.I)
+    t = re.sub(r"^ you ", " I ", t, flags=re.I)
+    for a, b in ((" the agent is ", " I am "), (" they can ", " you can "), (" they are ", " you are "),
+                 (" their ", " your "), (" them ", " you "), (" the customer's ", " your ")):
+        t = re.sub(a, b, t, flags=re.I)
+    t = t.strip()
+    return t[:1].upper() + t[1:] if t else t
+
+
+def speakable(quotes):
+    """Rule-based rewrite of a brief instruction into the line it asks for: 'say (that) X' / 'tell the customer (that) X'
+    -> X in the first person; 'offer to connect them with Y' -> 'Would you like me to connect you with Y?'. The content
+    words stay the quote's own. Returns '' when no rule applies safely (the contract default is used instead)."""
+    for q in quotes:
+        for part in re.split(r"(?<=[.!?])\s+", str(q)):
+            part = part.strip().strip('"')
+            m = _SAY.search(part)
+            if m and not re.match(r"(one|a) (short )?sentence|goodbye|thank", m.group(1), re.I):
+                x = _CUT.split(m.group(1).strip().strip('"“”'), maxsplit=1)[0].strip().strip('"“”')
+                if 3 <= len(x.split()) <= 30 and "`" not in x:
+                    line = _person(x)
+                    line = line if line.endswith((".", "?", "!")) else line + "."
+                    if not INSTRUCTION.search(line):
+                        return line
+            m = _OFFER.search(part)
+            if m:
+                x = _CUT.split(m.group(1).strip(), maxsplit=1)[0].strip()
+                if 3 <= len(x.split()) <= 20 and "`" not in x:
+                    return "Would you like me to " + _person(x)[0].lower() + _person(x)[1:] + "?"
+    return ""
+
+
 def _map_sentence_keys(p):
     """Map the extractor's own sentence ids onto the fixed keys by the sentence's form (its text is kept verbatim)."""
     sent, notes = p.setdefault("sentences", {}), []
@@ -467,11 +508,15 @@ def to_reducer(policy, oas_path, stable_unmapped=None):
         if not any(e_["topic"] == t for e_ in evs):
             evs.append({"topic": t, "brief_topic": None, "precedence": len(evs), "source": DEFAULT})
     # an event's `say` is speakable text: the brief's exact words (found in its own quotes) or empty, never effect prose
-    for ev in evs:
+    for ev in evs + who:
         s_ = str(ev.get("say") or "").strip()
-        quotes = " ".join(str(x.get("quote") if isinstance(x, dict) else x) for x in (ev.get("source") or []))
-        if s_ and (_norm(s_.strip('"')) not in _norm(quotes) or INSTRUCTION.search(s_)):
+        quotes = [str(x.get("quote") if isinstance(x, dict) else x) for x in (ev.get("source") or [])]
+        if s_ and (_norm(s_.strip('"')) not in _norm(" ".join(quotes)) or INSTRUCTION.search(s_)):
             ev["say_dropped"], ev["say"] = s_, ""
+        if not ev.get("say"):
+            line = speakable(quotes)
+            if line:
+                ev["say"], ev["say_rewritten_from"] = line, True
     # outcomes/reasons carried by event and who rules are sent to close_call too: same enum rule, same block
     for coll, name in ((evs, "events"), (who, "who_rules")):
         for i, ev in enumerate(coll):

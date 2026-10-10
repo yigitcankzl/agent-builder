@@ -153,6 +153,42 @@ def _soft_rules(rp, phase):
     return ("\nSoft rules from the brief:\n- " + "\n- ".join(rules)) if rules else ""
 
 
+def _minify(src):
+    """Lossless: an AST round trip drops comments and docstrings; anything odd -> the source unchanged."""
+    import ast
+    try:
+        tree = ast.parse(src)
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Module)) and node.body and \
+                    isinstance(node.body[0], ast.Expr) and isinstance(getattr(node.body[0], "value", None), ast.Constant) \
+                    and isinstance(node.body[0].value.value, str):
+                node.body = node.body[1:] or [ast.Pass()]
+        out = ast.unparse(tree)
+        compile(out, "hub", "exec")
+        return out if "{{" not in out and "}}" not in out else src
+    except Exception:
+        return src
+
+
+def pack_hub(src, safe="Sorry, could you say that again?"):
+    """Package the hub as a small loader: zlib + base64 payload, exec'd with the node's `vars` (probe m0-zlib: Python
+    3.14, exec/compile allowed, ~65 ms). The code_exec input limit (code + data <= 128 KB) makes this necessary.
+    PACK_HUB=0 keeps the plain source (fallback)."""
+    if os.environ.get("PACK_HUB", "1") == "0":
+        return src
+    import base64, zlib
+    blob = base64.b64encode(zlib.compress(_minify(src).encode(), 9)).decode()
+    loader = ("import zlib, base64\n"
+              "try:\n"
+              "    exec(compile(zlib.decompress(base64.b64decode(" + json.dumps(blob) + ")).decode(), 'hub', 'exec'), "
+              "dict(vars=vars, __name__='hub'))\n"
+              "except Exception as e:\n"
+              "    vars['hub_error'] = 'loader: ' + str(e)[:150]\n"
+              "    vars['route'] = 'say'\n"
+              "    vars['say_next'] = " + json.dumps(safe) + "\n")
+    return loader if "{{" not in loader and "}}" not in loader else src
+
+
 def _compose_opening(meta):
     """Self-introduction from the policy meta, without repeating the bank name if the description already has it."""
     desc = (meta.get("agent_self_description") or "digital assistant").strip().rstrip(".")
@@ -189,6 +225,10 @@ def generate(rp, oas_path):
     id_enum = (tools.get("verify_identity", {}).get("props", {}).get("field") or {}).get("enum") or []
     ev, ev_src = ev_field(rp, id_enum)
     hub_src, hub_from = hub_code(rp)
+    plain_kb = len(hub_src) / 1024
+    hub_src = pack_hub(hub_src, _text(rp, "safe_repeat") or "Sorry, could you say that again?")
+    GENERATED_FROM.update(hub_plain_kb=round(plain_kb, 1), hub_kb=round(len(hub_src) / 1024, 1),
+                          hub_packed=hub_src is not None and "zlib.decompress" in hub_src)
     lang = meta.get("language") or "English"
     sysp = (f"You are the {meta.get('agent_self_description') or 'digital assistant'} of {meta.get('bank_name') or 'the bank'}. "
             f"Speak {lang}, one or two short sentences per turn. Never say that anything was recorded, scheduled or "
