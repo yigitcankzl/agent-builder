@@ -96,5 +96,70 @@ class OracleMechanicsTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             expected_ledger(self.policy, self.customer, {"kind": "identity_fail", "wrong_answers": 2})
 
+
+class FrozenHardSampleTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.root = HERE / "sample2"
+        cls.public = {case["id"]: case for case in json.loads((ROOT / "public-test-set.json").read_text())}
+        cls.manifest = json.loads((cls.root / "manifest.json").read_text())
+
+    def policy(self, number: int) -> dict:
+        return json.loads((self.root / f"gen-{number:03d}" / "expected_policy.json").read_text())
+
+    def test_frozen_cases_are_oracle_checked_and_keep_public_inputs(self) -> None:
+        self.assertEqual([item["id"] for item in self.manifest["briefs"]], [f"GEN-{n:03d}" for n in range(7, 13)])
+        for item in self.manifest["briefs"]:
+            directory = self.root / item["directory"]
+            policy = json.loads((directory / "expected_policy.json").read_text())
+            cases = json.loads((directory / "cases.json").read_text())
+            with self.subTest(brief=item["id"]):
+                self.assertEqual(len(cases), 10)
+                self.assertGreaterEqual(len(item["axes"]), 2)
+                self.assertEqual(item["axes"], policy["generation"]["axes"])
+                self.assertEqual([path.name for path in directory.glob("*.md")], ["brief.md"])
+                self.assertIn("LATER OVERRIDE MESSAGE", (directory / "brief.md").read_text())
+                self.assertGreaterEqual(len(policy["generation"]["memo_overrides"]), 1)
+                for override in policy["generation"]["memo_overrides"]:
+                    value = policy
+                    for part in override["path"].split("."):
+                        value = value[int(part)] if part.isdigit() else value[part]
+                    self.assertEqual(value, override["after"])
+                for case in cases:
+                    source = self.public[case["id"]]
+                    self.assertEqual(case["identity"], source["identity"])
+                    self.assertEqual(case["products"], source["products"])
+                    self.assertEqual(expected_ledger(policy, case, case["intent"]), case["expected"])
+
+    def test_hard_axes_have_concrete_ground_truth(self) -> None:
+        gen7 = self.policy(7)
+        self.assertEqual(gen7["codes"]["outcomes"]["promise"], "commitment_logged")
+        self.assertEqual(gen7["codes"]["reasons"]["refused"], "payment_declined")
+        self.assertEqual(gen7["codes"]["queues"]["restructuring"], "support")
+
+        gen8 = self.policy(8)
+        self.assertEqual(gen8["identity"]["questions"], ["phone_last4", "full_name", "date_of_birth"])
+        self.assertEqual(deadline_for(gen8, self.public["PUB-01"]["products"][0], date(2026, 10, 14)).isoformat(), "2026-10-16")
+
+        gen9 = self.policy(9)
+        oas9 = json.loads((self.root / "gen-009" / "openapi.json").read_text())
+        self.assertNotIn("/add_note", oas9["paths"])
+        self.assertEqual(floor_for(gen9, self.public["PUB-04"]["products"][0]), 416.65)
+
+        gen10 = self.policy(10)
+        oas10 = json.loads((self.root / "gen-010" / "openapi.json").read_text())
+        self.assertNotIn("/transfer_to_agent", oas10["paths"])
+        promise_schema = oas10["paths"]["/create_promise"]["post"]["requestBody"]["content"]["application/json"]["schema"]
+        self.assertIn("pledged_amount", promise_schema["required"])
+        self.assertIn("due_on", promise_schema["required"])
+
+        gen11 = self.policy(11)
+        self.assertEqual(gen11["accepted_amount_range"]["partial_mode"], "exact_floor")
+        self.assertEqual(gen11["lateness_bands"][0]["persuasion_attempts"][0]["date"]["type"], "last_business_day_this_or_next_week")
+
+        gen12 = self.policy(12)
+        self.assertEqual(floor_for(gen12, self.public["PUB-04"]["products"][0]), 47.5)
+        self.assertEqual(deadline_for(gen12, self.public["PUB-01"]["products"][0], date(2026, 10, 14)).isoformat(), "2026-10-20")
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

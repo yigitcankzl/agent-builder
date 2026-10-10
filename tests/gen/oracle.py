@@ -146,6 +146,10 @@ def _attempt_date(rule: dict, today: date, deadline: date, policy: dict) -> date
 
 def _amount_in_range(policy: dict, amount: float, floor: float, past_due: float) -> bool:
     rule = policy["accepted_amount_range"]
+    if amount == past_due:
+        return True
+    if rule.get("partial_mode", "range") == "exact_floor":
+        return amount == floor
     lower = floor if rule["minimum"] == "floor" else past_due
     upper = past_due
     low_ok = amount >= lower if rule["minimum_inclusive"] else amount > lower
@@ -268,8 +272,11 @@ def expected_ledger(policy: dict, customer: dict, intent: str | dict) -> dict:
         product_kind = product_intent["kind"]
         if product_kind in ("restructure", "human") or (product_kind == "hardship" and product_intent.get("accept_transfer", False)):
             situation = policy["special_situations"][product_kind]
-            transfer = (situation.get("transfer_reason", situation["reason"]), situation["queue"])
-            break
+            if "transfer_to_agent" in policy["tools"]:
+                transfer = (situation.get("transfer_reason", situation["reason"]), situation["queue"])
+                break
+            notes.append((product, situation["reason"]))
+            continue
         if product_kind in ("dispute", "paid", "hardship"):
             notes.append((product, policy["special_situations"][product_kind]["reason"]))
             continue
