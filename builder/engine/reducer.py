@@ -1914,7 +1914,12 @@ def reask_name(policy, st, cv, prefix=''):
     out = ask(st, q, 'confirm_name')
     if prefix:
         out['text'] = (prefix + ' ' + out['text']).strip()
+    elif out['text'] == q:                   # worded differently from the greet's question
+        out['text'] = (D_JUST_CHECK + ' ' + q).strip()
     return out
+
+
+D_JUST_CHECK = 'Just to be sure:'
 
 
 def _callback_ok(policy, st, d, tm, today, now_time):
@@ -2241,6 +2246,54 @@ def _dump(st, sep=None):
     return s
 
 
+CLOSE_PREF = dict(refused=('refused', 'dispute', 'hardship', 'write'), dispute=('dispute', 'refused', 'hardship', 'write'),
+                  hardship=('hardship', 'refused', 'dispute', 'write'), write_failed=('write', 'refused', 'dispute', 'hardship'))
+
+
+def close_retry(policy, st, data):
+    """close_call came back rejected (ok false or an error): the same outcome once more, with the reason the error
+    allows (contract-closest by the close's family: refused, dispute, hardship, write failure), else the outcome's
+    first reason in the closing table. -> (outcome, reason) or None when already retried."""
+    if st.get('_close_retried'):
+        return None
+    st['_close_retried'] = True
+    v, o, r = V(policy), st.get('outcome'), st.get('reason')
+    text = json.dumps(data) if not isinstance(data, str) else data
+    m = re.search(r'reasons?[^:]*:\s*([a-z_ ,]+)', text, re.I)
+    allowed = [x.strip() for x in re.split(r'[ ,]+', m.group(1)) if x.strip() and x.strip() not in ('and', 'or')] if m else []
+    fam = next((k for k in ('dispute', 'hardship', 'write_failed') if tuple(v[k]) == (o, r)), 'refused')
+    names = dict(refused=v['refused'][1], dispute=v['dispute'][1], hardship=v['hardship'][1], write=v['write_failed'][1])
+    for key in CLOSE_PREF[fam]:
+        for cand in (names.get(key), key if key != 'write' else None):
+            if cand and cand in allowed:
+                return o, cand
+    if allowed:
+        return o, allowed[0]
+    row = next((x for x in (policy.get('closing') or dict()).get('table') or [] if _none(x.get('outcome')) == o
+                and _none(x.get('reason')) and _none(x.get('reason')) != r), None)
+    return o, (_none(row.get('reason')) if row else None)
+
+
+def close_hub(vars, policy, st):
+    """The hub run after close_call: accepted -> end; rejected -> one retry (route close_retry, no second farewell);
+    rejected again -> end, never a loop."""
+    s0, f0 = st['_close_snap']
+    s, f = _int(vars.get('t_close_call_success_count')), _int(vars.get('t_close_call_failure_count'))
+    data = _jsonish(vars.get('close_call_data'))
+    if not isinstance(data, dict):
+        data = _flat_data(vars, 't_close_call_response.data.')
+    ok = str((data or dict()).get('ok')).lower()
+    rejected = f > f0 or (s > s0 and ok == 'false') or (s == s0 and f == f0 and ok == 'false')
+    st['_close_snap'] = [s, f]
+    nxt = close_retry(policy, st, data) if rejected else None
+    if nxt:
+        st['outcome'], st['reason'] = nxt
+        vars['route'], vars['close_outcome'], vars['close_reason'] = 'close_retry', nxt[0] or '', nxt[1] or ''
+    else:
+        vars['route'] = 'end'
+    vars['st'] = _dump(st)
+
+
 def hub_main(vars, policy):
     cvmap = (policy.get('meta') or dict()).get('call_vars') or dict()
     cv = dict((role, vars.get(name)) for role, name in cvmap.items())
@@ -2249,6 +2302,8 @@ def hub_main(vars, policy):
     if not isinstance(st, dict):
         st = init_state(policy, cv)
     st['tok'] = str(vars.get('ev_tok') or st.get('tok') or 'kstart')
+    if st.get('phase') == 'closed' and st.get('_close_snap') is not None:
+        return close_hub(vars, policy, st)        # back from t_close_call: a rejected close is retried once
     try:
         te = read_tool(vars, st)
         extra = [x.get('id') for x in policy.get('extra_topics') or [] if isinstance(x, dict) and x.get('id')]
@@ -2279,6 +2334,8 @@ def hub_main(vars, policy):
         if not o:
             o, r = slot(policy, 'unclear')
     vars['close_outcome'], vars['close_reason'] = o or '', r or ''
+    if t == 'close':     # the counters before close_call: a later hub run can see whether it was accepted
+        st2['_close_snap'] = [_int(vars.get('t_close_call_success_count')), _int(vars.get('t_close_call_failure_count'))]
     vars['route_ok'] = 'yes' if st2.get('verified') == 'yes' else 'no'
     vars['xfer_pre'] = st2.get('_xfer_pre') or 'no'
     if st2.get('_hook_skip'):
