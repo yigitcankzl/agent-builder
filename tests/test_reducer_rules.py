@@ -382,7 +382,7 @@ def identity_chatter():
         st, a = say(pol, st, "kind=who;also=none;st=complete;prod=;who=self;party=")
         for _ in range(R.ID_OTHER_CAP + 1):
             st, a = say(pol, st, "kind=other;also=none;st=none;prod=")
-        check(a["type"] == "close" and (a["outcome"], a["reason"]) == tuple(v["unclear"]), f"{name}: hard cap -> unclear: {a}")
+        check(a["type"] == "close" and (a["outcome"], a["reason"]) == tuple(R.id_unfinished(pol)), f"{name}: hard cap -> not verified (unfinished): {a}")
         st = R.init_state(pol, CV)
         st, a = say(pol, st, "kind=who;also=none;st=complete;prod=;who=self;party=")
         for _ in range(2):
@@ -482,7 +482,30 @@ def hedged_denial():
     return True
 
 
+def offer_echo_accepts():
+    """biz-1 live PUB-07 (a6c54fef): offered 540 on Tuesday 20 October, 'Yes, I can pay the full 540' came as
+    kind=amount;amt=540 and the offer was re-proposed. The open offer's own amount, date, or date and amount is an
+    acceptance -> read-back. A different amount is still a proposal."""
+    for name, pol in POL.items():
+        st0 = to_readback(pol)
+        st0["q"], st0["phase"] = "pay_today", "negotiation"
+        st0["products"][0]["status"], st0["products"][0]["offer"] = "open", None
+        st0, a = say(pol, st0, "kind=no;also=none;st=complete;prod=")
+        o = st0["offer"]
+        check(st0["q"] == "offer" and o, f"{name}: an open offer: {a}")
+        y, m, d = o["date"].split("-")
+        for body in ("kind=amount;also=none;st=complete;prod=;amt=%s" % o["amount"],
+                     "kind=date;also=accept;st=complete;prod=;rel=;d=%d;m=%d;wd=;wk=none;vague=no" % (int(d), int(m)),
+                     "kind=date;also=amount;st=complete;prod=;rel=;d=%d;m=%d;wd=;wk=none;vague=no;amt=%s" % (int(d), int(m), o["amount"])):
+            x, a = say(pol, R.json.loads(R.json.dumps(st0)), body)
+            check(x["q"] == "readback" and "Do you confirm" in a["text"], f"{name}: {body} accepts: {a}")
+        x, a = say(pol, R.json.loads(R.json.dumps(st0)), "kind=amount;also=none;st=complete;prod=;amt=%s" % (float(o["amount"]) - 10))
+        check(x["q"] != "readback", f"{name}: a different amount is a proposal: {a}")
+    return True
+
+
 if __name__ == "__main__":
+    print("the open offer's own amount/date accepts (biz-1 PUB-07):", offer_echo_accepts())
     print("hedged denial re-asks the name:", hedged_denial())
     print("close_call rejected -> one retry:", close_rejected())
     print("ev bank shapes (date+amount, no, call time, quoted amount):", ev_bank_shapes())

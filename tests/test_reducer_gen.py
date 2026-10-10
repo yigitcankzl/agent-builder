@@ -509,9 +509,11 @@ def rehearsal_rules():
     pol = copy.deepcopy(POL["A"]); pol["amounts"] = dict(acceptance="full_or_floor")
     st, a = to_statement(pol, EARLY)
     st, a = say(pol, st, "kind=no;also=none;st=complete;prod=")
-    for amt, ok in ((180, True), (540, True), (300, False)):
+    for amt, ok in ((180, True), (300, False)):
         x, a = say(pol, R.json.loads(R.json.dumps(st)), "kind=amount;also=none;st=complete;prod=;amt=%s" % amt)
         check(((x["offer"] or {}).get("amount") == float(amt)) == ok and (("cannot record" in a["text"]) != ok), f"full_or_floor {amt}: {a}")
+    x, a = say(pol, R.json.loads(R.json.dumps(st)), "kind=amount;also=none;st=complete;prod=;amt=540")
+    check(x["q"] == "readback" and "540.00" in a["text"], f"full_or_floor 540 (the open offer's amount) accepts: {a}")
     return True
 
 

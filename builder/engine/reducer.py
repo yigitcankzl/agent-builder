@@ -596,7 +596,8 @@ def readback_line(policy, st, items, clamped):
         if it['product_id'] in clamped:
             s += ', the latest date I can record for it'
         parts.append(s)
-    conf = sentence(policy, 'confirm') or sentence(policy, 'readback_confirm') or sentence(policy, 'confirm_readback') or 'Do you confirm?'
+    conf = sentence(policy, 'confirm') or sentence(policy, 'readback_confirm') or sentence(policy, 'confirm_readback') or \
+        sentence(policy, 'confirm_arrangement') or 'Do you confirm?'
     return 'To confirm, ' + '; '.join(parts) + '. ' + conf
 
 
@@ -1330,6 +1331,9 @@ def amount_event(policy, st, ev, today, cv):
     except Exception:
         return resay(st)
     date = (st['offer'] or dict()).get('date') or iso(today)
+    o = st.get('offer') or dict()
+    if st['q'] in ('offer', 'pay_today') and o.get('amount') is not None and abs(amt - float(o['amount'])) < 0.005:
+        return yes_event(policy, st, today, cv)     # 'Yes, I can pay the full 540': the open offer's own amount (biz-1 PUB-07)
     kind, x = accept_rule(policy)
     full = pd['past_due']
     low = x if kind == 'min_x' and x is not None else pd['floor']
@@ -1637,7 +1641,9 @@ def loop_break(policy, st, today, cv):
         if st['who'] == 'other' or q == 'callback_time':
             o, r = v['callback_failed']
         elif st['who'] == 'self' and q.startswith('id_') and st['identity'].get('refusals', 0) >= 1:
-            o, r = v['declined']        # declined only after an explicit refusal; no answer at all is unclear
+            o, r = v['declined']        # an explicit refusal
+        elif st['who'] == 'self' and q.startswith('id_'):
+            o, r = id_unfinished(policy)  # no answer: the brief's 'not verified before the end' close
         else:
             o, r = v['unclear']
         return do_close(policy, st, o, r, D_FAREWELL)
@@ -2103,6 +2109,15 @@ def identity(policy, st, ev, today, cv):
     return resay(st)
 
 
+def id_unfinished(policy):
+    """A customer who confirmed the name but never finished the security questions (biz-1 surface PUB-10): the brief's
+    hangup_default.before_verified close, else the declined slot (the not-verified family, never a callback code)."""
+    h = (policy.get('hangup_default') or dict()).get('before_verified') or dict()
+    if isinstance(h, dict) and _none(h.get('outcome')):
+        return _none(h.get('outcome')), _none(h.get('reason'))
+    return tuple(V(policy)['declined'])
+
+
 ID_OTHER_CAP = 6     # DEFAULT hard cap: this many turns with no answer to a security question, then the unclear slot
 
 
@@ -2111,7 +2126,7 @@ def id_reask(policy, st):
     unclear slot (no refusal was said)."""
     st['_id_other'] = st.get('_id_other', 0) + 1
     if st['_id_other'] > ID_OTHER_CAP:
-        o, r = V(policy)['unclear']
+        o, r = id_unfinished(policy) if st.get('who') == 'self' else V(policy)['unclear']
         return do_close(policy, st, o, r, D_FAREWELL)
     idt, qs = st['identity'], (policy.get('identity') or dict()).get('questions') or []
     q = (qs[idt['idx']].get('ask') if idt['idx'] < len(qs) else '') or D_SAFE
