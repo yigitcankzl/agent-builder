@@ -58,8 +58,8 @@ except Exception as e:
 """
 
 
-def workflow(vocab):
-    ev = EF.field(vocab)
+def workflow(vocab, policy=None):
+    ev = EF.ev_field(policy) if policy else EF.field(vocab)
     conv = lambda name, on_enter: {"name": name, "node_type": "conversation", "on_enter": on_enter, "max_node_turns": 80,
                                    "task_message": "Reply with one short neutral sentence. No tool call is allowed.",
                                    "extraction_schema": [ev], "transitions": [{"target_node": "hub", "description": "always", "condition": {"operator": "always"}}]}
@@ -120,6 +120,7 @@ def from_cursor(c):
         e["prod"] = exp["prod"]
     agents = ([PHASE_ASK.get(ctx.get("phase"), "Yes?")] + ["Go on, please."] * (len(earlier) - 1) if earlier else []) + [ctx["agent"]]
     return {"id": c["id"], "now": ctx.get("now", "2026-10-14T11:00"), "agents": agents, "customer": earlier + [c["customer"]],
+            "q": ctx.get("q") or "none", "phase": ctx.get("phase") or "",
             "expected": e, "debatable": bool(c.get("debatable")), "tags": [c.get("covers", "")]}
 
 
@@ -189,6 +190,14 @@ def score(case, res):
         f["identity_skip"] = gk != "identity" or (got or {}).get("ans", "") != exp.get("ans", (got or {}).get("ans", ""))
     if gk in TRIGGER_KINDS and gk != exp["kind"]:
         f["wrong_trigger"] = True
+    # contract v3.2 §14.1: the reducer acts on the normalised event, so the kind gate and the wrong-action gate are
+    # scored after normalising BOTH sides with the case's open question and phase
+    from builder.engine.reducer import normalise
+    ctx = dict(q=case.get("q") or "none", phase=case.get("phase") or "negotiation")
+    ng = normalise(dict(got or {}), ctx) if got else {}
+    ne = normalise(dict(exp), ctx)
+    f["kind_norm_ok"] = ng.get("kind") == ne.get("kind")
+    f["wrong_trigger_norm"] = ng.get("kind") in TRIGGER_KINDS | {"yes"} and ng.get("kind") != ne.get("kind")
     if exp.get("st") == "ambiguous":
         f["unsure_case"] = True
         f["unsure_ok"] = gs in ("ambiguous", "partial", "none") or gk == "other"
@@ -222,7 +231,9 @@ def report(cases, results):
     un = [s for _, _, s in rows if s["unsure_case"]]
     m = dict(
         extracted=pct(sum(s["extracted"] for _, _, s in rows), n),
-        kind=pct(sum(s["kind_ok"] for _, _, s in rows), n),
+        kind_raw=pct(sum(s["kind_ok"] for _, _, s in rows), n),
+        kind_normalised=pct(sum(s["kind_norm_ok"] for _, _, s in rows), n),
+        wrong_action_normalised=f"{sum(s['wrong_trigger_norm'] for _, _, s in rows)} / {n}",
         status=pct(sum(s["st_ok"] for _, _, s in rows), n),
         all_expected_fields=pct(sum(s["fields_ok"] and s["kind_ok"] for _, _, s in rows), n),
         date_amount_fields=pct(sum(s["date_amount_ok"] for s in da), len(da)),
@@ -230,10 +241,10 @@ def report(cases, results):
         identity_skip=f"{sum(s['identity_skip'] for s in idc)} / {len(idc)}",
         wrong_trigger_kind=f"{sum(s['wrong_trigger'] for _, _, s in rows)} / {n}",
         unsure_to_clarify_or_talk=pct(sum(s["unsure_ok"] for s in un), len(un)))
-    gates = dict(identity_and_trigger_zero=sum(s["identity_skip"] for s in idc) + sum(s["wrong_trigger"] for _, _, s in rows) == 0,
+    gates = dict(identity_and_wrong_action_zero=sum(s["identity_skip"] for s in idc) + sum(s["wrong_trigger_norm"] for _, _, s in rows) == 0,
                  date_amount_100=all(s["date_amount_ok"] for s in da),
                  partial_none_zero=not any(s["state_change_violation"] for s in pn),
-                 kind_95=n > 0 and sum(s["kind_ok"] for _, _, s in rows) / n >= 0.95,
+                 kind_95_normalised=n > 0 and sum(s["kind_norm_ok"] for _, _, s in rows) / n >= 0.95,
                  unsure_all=all(s["unsure_ok"] for s in un))
     print("\nMETRICS", json.dumps(m, indent=1))
     print("GATES", json.dumps(gates), "PASS" if all(gates.values()) else "FAIL")
@@ -255,8 +266,9 @@ if __name__ == "__main__":
         cases = [from_cursor(c) for c in cases]
     if simulation_active():
         sys.exit("a simulation is running in this workspace; extraction eval is chat-only and waits for it to finish")
-    TOPICS = (spec.get("vocab") or VOCAB)["topics"]
-    wf = workflow(spec.get("vocab") or VOCAB)
+    TOPICS = EF.CONTRACT_TOPICS
+    POLICY = json.load(open(os.path.join(ROOT, "tests", "generated", "brief-ab.reducer_policy.json")))
+    wf = workflow(None, POLICY)    # contract v3.2: ev_field(policy) of the bridged A+B policy
     print("dry run:", freya.validate_workflow("eval-ev", wf))
     ids = freya.save_workflow("eval-ev", wf, state_file=STATE)
     results = []
