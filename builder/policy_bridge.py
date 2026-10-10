@@ -362,6 +362,15 @@ def to_reducer(policy, oas_path, stable_unmapped=None):
     for t in V3_ALWAYS:
         if not any(e_["topic"] == t for e_ in evs):
             evs.append({"topic": t, "brief_topic": None, "precedence": len(evs), "source": DEFAULT})
+    # outcomes/reasons carried by event and who rules are sent to close_call too: same enum rule, same block
+    for coll, name in ((evs, "events"), (who, "who_rules")):
+        for i, ev in enumerate(coll):
+            o = ev.get("outcome")
+            if o and e_out and o not in e_out:
+                ev["brief_outcome"], ev["outcome"] = o, resolve(f"{name}[{i}].outcome", o, "close_call.outcome", e_out)
+                ev["blocked"] = ev["outcome"] is None
+                if ev["outcome"] is None:
+                    ev.pop("outcome")
     p["events"], p["who_rules"] = evs, who
     if unknown:
         notes.append(f"event topics with no contract topic (kept out of the reducer, for review): {unknown}")

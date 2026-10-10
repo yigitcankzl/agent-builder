@@ -148,6 +148,8 @@ def validate(wf, rp, oas_path, unstable_quotes=()):
     send += [("transfer_to_agent", "queue", q) for q in ((rp.get("transfer") or {}).get("queue_map") or {}).values()]
     send += [("transfer_to_agent", "queue", q) for q in (rp.get("transfer") or {}).get("pre_verification_queues") or []]
     send += [("add_note", "reason", e["note_reason"]) for e in rp.get("events") or [] if e.get("note_reason")]
+    send += [("close_call", "outcome", e["outcome"]) for coll in ("events", "who_rules") for e in rp.get(coll) or []
+             if e.get("outcome") and not e.get("blocked")]
     for tool, field, val in send:
         e = (tools.get(tool, {}).get("props", {}).get(field) or {}).get("enum")
         if e and val not in e:
