@@ -269,7 +269,36 @@ def pub03_live():
     return True
 
 
+def pub06_rep3():
+    """PUB-06 live (90c8e096, intA3 rep 3): after the floor offer, 'I can't do that, what is the minimum payment' came as
+    reject;why=too_much; attempt 1 (the floor again, plan) was spoken as 'Could you make that payment ... The rest stays
+    overdue.' and the judge counted a second floor offer. Now: only the new day, after 'That was the lowest amount I can
+    offer.'; no amount, no overdue clause, no 'that payment'; the read-back names 637.50."""
+    c = [c for c in FIX["cases"] if c["id"] == "PUB-06"][0]
+    pol, cv = POL[c["policy"]], c["call_variables"]
+    st = R.init_state(pol, cv)
+    for s in c["steps"][:7]:
+        if s["source"] == "user":
+            st["tok"] = s["event_fields"]["n"]
+            st, a = R.step(pol, st, R.parse_event(s["event"], st, TOPICS), None, c["now"], cv)
+            st["last_tok"] = st["tok"]
+        else:
+            st, a = R.step(pol, st, None, s["tool_event"], c["now"], cv)
+    check("637.50" in a["text"] and "overdue" in a["text"], f"the floor offer: {a}")
+    for body, pre in (("kind=reject;also=none;st=complete;prod=;why=too_much", "That was the lowest amount I can offer. "),
+                      ("kind=no;also=none;st=complete;prod=", "")):
+        x = R.json.loads(R.json.dumps(st))
+        x, a = say(pol, x, body)
+        check(a["text"] == pre + "Could you pay on Friday 16 October instead?", f"{body}: {a}")
+        for w in ("637", "overdue", "that payment"):
+            check(w not in a["text"], f"{body}: '{w}' restated: {a}")
+        x, a = say(pol, x, "kind=date;also=accept;st=complete;prod=1;rel=;d=;m=;wd=fri;wk=this;vague=no")
+        check(x["q"] == "readback" and "637.50" in a["text"] and "16 October" in a["text"], f"read-back: {a}")
+    return True
+
+
 if __name__ == "__main__":
+    print("PUB-06 rep 3: no second floor offer:", pub06_rep3())
     print("PUB-03 live: no inherited year:", pub03_live())
     print("PUB-02 live: speaker first in the opening:", pub02_live())
     print("answer topic + event, both orders (PUB-04):", answer_and_event())
