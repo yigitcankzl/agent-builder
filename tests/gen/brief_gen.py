@@ -27,13 +27,30 @@ TOOLS = [
     "close_call",
 ]
 PARAMETER_SPACE = {
-    "identity_questions": ["date_of_birth", "phone_last4", "postcode", "birth_year"],
+    "identity_questions": ["date_of_birth", "phone_last4", "postcode", "birth_year", "full_name"],
     "floor_types": ["account_field", "percent", "fixed", "max_fixed_percent"],
     "deadline_units": ["business", "calendar"],
     "business_weekdays": [[0, 1, 2, 3, 4], [0, 1, 2, 3, 4, 5], [1, 2, 3, 4, 5]],
     "product_order": ["account", "highest_days_late"],
 }
 LIVE_IDENTITY_FIELDS = ["date_of_birth", "phone_last4"]
+DEFAULT_TOOL_FIELDS = {
+    "verify_identity": {"customer_id": "customer_id", "field": "field", "answer": "answer"},
+    "get_account": {"customer_id": "customer_id"},
+    "create_promise": {"customer_id": "customer_id", "product_id": "product_id", "amount": "amount", "date": "date"},
+    "add_note": {"customer_id": "customer_id", "product_id": "product_id", "reason": "reason", "text": "text"},
+    "schedule_callback": {"customer_id": "customer_id", "date": "date", "time": "time"},
+    "transfer_to_agent": {"customer_id": "customer_id", "queue": "queue"},
+    "close_call": {"customer_id": "customer_id", "outcome": "outcome", "reason": "reason"},
+}
+HARD_AXES = {
+    7: ["renamed outcome/reason codes", "counter-intuitive queue mapping", "single-file raw brief"],
+    8: ["calendar deadline landing on a holiday", "three-step identity with full-name confirmation", "single-file raw brief"],
+    9: ["add_note absent from OAS", "33.33% floor with nearest-0.05 tie rounding", "single-file raw brief"],
+    10: ["transfer tool absent from OAS", "renamed create_promise/close_call fields", "single-file raw brief"],
+    11: ["exactly-37.5% partial floor", "last business day of this week offer", "single-file raw brief"],
+    12: ["absolute 47.50 minimum floor", "three business-day deadline skipping a holiday", "reversed identity order", "single-file raw brief"],
+}
 
 
 def brief_a_policy() -> dict:
@@ -274,6 +291,96 @@ def generate_policy(
     }
 
 
+def hard_policy(index: int, seed: int) -> dict:
+    """Build one deterministic adversarial policy from the GEN-007..012 matrix."""
+    if index not in HARD_AXES:
+        raise ValueError(f"hard profile is defined only for GEN-007..012, not GEN-{index:03d}")
+    rng = random.Random(seed + index)
+    policy = generate_policy(rng, f"GEN-{index:03d}", LIVE_IDENTITY_FIELDS)
+    policy["schema_version"] = 2
+    policy["codes"] = _codes()
+    policy["special_situations"] = _special_situations()
+    policy["tools"] = list(TOOLS)
+    policy["tool_fields"] = copy.deepcopy(DEFAULT_TOOL_FIELDS)
+    policy["identity"]["confirm_full_name"] = False
+    policy["accepted_amount_range"]["minimum"] = "floor"
+    policy["accepted_amount_range"]["partial_mode"] = "range"
+    policy["multi_product"].update({
+        "enabled": False,
+        "max_products": 1,
+        "processing_order": "account",
+        "note_unresolved_products": False,
+    })
+
+    if index == 7:
+        policy["codes"]["outcomes"].update({
+            "promise": "commitment_logged",
+            "paid": "settled_elsewhere",
+            "transferred": "specialist_handoff",
+            "no_promise": "no_arrangement",
+            "not_verified": "security_incomplete",
+            "not_reached": "customer_unavailable",
+        })
+        policy["codes"]["reasons"].update({
+            "refused": "payment_declined",
+            "hardship": "affordability_alert",
+            "dispute": "liability_challenged",
+            "restructuring": "plan_review",
+            "human": "person_requested",
+            "support": "care_referral",
+        })
+        policy["codes"]["queues"] = {
+            "restructuring": "support",
+            "general": "restructuring",
+            "support": "general",
+        }
+    elif index == 8:
+        policy["identity"].update({
+            "questions": ["phone_last4", "full_name", "date_of_birth"],
+            "wrong_answer_limit": 3,
+            "confirm_full_name": True,
+        })
+        policy["calendar"]["business_weekdays"] = [0, 1, 2, 3, 4]
+        policy["calendar"]["holidays"] = sorted(set(policy["calendar"]["holidays"] + ["2026-10-19"]))
+        for band in policy["lateness_bands"]:
+            band["deadline"] = {"count": 5, "unit": "calendar"}
+    elif index == 9:
+        policy["tools"].remove("add_note")
+        policy["tool_fields"].pop("add_note")
+        policy["floor_rule"] = {
+            "type": "percent",
+            "percent": 33.33,
+            "rounding": {"mode": "nearest", "increment": 0.05},
+        }
+    elif index == 10:
+        policy["tools"].remove("transfer_to_agent")
+        policy["tool_fields"].pop("transfer_to_agent")
+        policy["tool_fields"]["create_promise"].update({"amount": "pledged_amount", "date": "due_on"})
+        policy["tool_fields"]["close_call"].update({"outcome": "disposition", "reason": "reason_code"})
+        policy["special_situations"]["restructure"]["outcome"] = "no_promise"
+        policy["special_situations"]["human"]["outcome"] = "no_promise"
+    elif index == 11:
+        policy["floor_rule"] = {
+            "type": "percent",
+            "percent": 37.5,
+            "rounding": {"mode": "nearest", "increment": 0.01},
+        }
+        policy["accepted_amount_range"]["partial_mode"] = "exact_floor"
+        for band in policy["lateness_bands"]:
+            band["persuasion_attempts"] = [
+                {"amount": "full", "date": {"type": "last_business_day_this_or_next_week"}},
+                {"amount": "floor", "date": {"type": "deadline"}},
+            ]
+    else:
+        policy["identity"]["questions"] = ["phone_last4", "date_of_birth"]
+        policy["floor_rule"] = {"type": "fixed", "amount": 47.5}
+        policy["calendar"]["business_weekdays"] = [0, 1, 2, 3, 4]
+        policy["calendar"]["holidays"] = sorted(set(policy["calendar"]["holidays"] + ["2026-10-16"]))
+        for band in policy["lateness_bands"]:
+            band["deadline"] = {"count": 3, "unit": "business"}
+    return policy
+
+
 def _floor_text(rule: dict) -> str:
     if rule["type"] == "account_field":
         return "the account's minimum_payment for cards and instalment_amount for loans"
@@ -297,6 +404,40 @@ def _attempt_text(attempt: dict) -> str:
     return f"offer the {attempt['amount']} amount on {when}"
 
 
+def _amount_acceptance_text(policy: dict) -> str:
+    if policy["accepted_amount_range"].get("partial_mode") == "exact_floor":
+        return "Accept the full past_due amount or a partial amount exactly equal to the calculated floor; reject every other partial amount."
+    return f"Customer-proposed amounts are accepted from {policy['accepted_amount_range']['minimum']} through past_due, including both ends."
+
+
+def _special_text(policy: dict) -> str:
+    codes = policy["codes"]
+    if "transfer_to_agent" not in policy["tools"]:
+        return (
+            f"Already paid closes {codes['outcomes']['paid']} with no reason. Dispute closes {codes['outcomes']['no_promise']} / {codes['reasons']['dispute']}. "
+            f"The API has no transfer operation: hardship, restructuring, and a human request close {codes['outcomes']['no_promise']} with reasons "
+            f"{codes['reasons']['hardship']}, {codes['reasons']['restructuring']}, and {codes['reasons']['human']} respectively; never invent a transfer. "
+            f"Deceased closes {codes['outcomes']['not_reached']} / {codes['reasons']['deceased']}; wrong number closes {codes['outcomes']['not_reached']} / {codes['reasons']['wrong_number']}."
+        )
+    return (
+        f"Already paid: explain posting can take one business day and close {codes['outcomes']['paid']} with no reason. "
+        f"Dispute: take no promise and close {codes['outcomes']['no_promise']} / {codes['reasons']['dispute']}. "
+        f"Hardship: do not persuade; offer queue {codes['queues']['support']}, closing {codes['outcomes']['transferred']} / {codes['reasons']['support']} if accepted or {codes['outcomes']['no_promise']} / {codes['reasons']['hardship']} if declined. "
+        f"Restructuring transfers to {codes['queues']['restructuring']} and closes {codes['outcomes']['transferred']} / {codes['reasons']['restructuring']}. "
+        f"Ask an insistent human requester once whether you can help, then transfer to {codes['queues']['general']} and close {codes['outcomes']['transferred']} / {codes['reasons']['human']}. "
+        f"Deceased closes {codes['outcomes']['not_reached']} / {codes['reasons']['deceased']}; wrong number closes {codes['outcomes']['not_reached']} / {codes['reasons']['wrong_number']}."
+    )
+
+
+def _tool_field_text(policy: dict) -> str:
+    renamed = []
+    for tool, fields in policy.get("tool_fields", {}).items():
+        changed = [f"{semantic}→{actual}" for semantic, actual in fields.items() if semantic != actual]
+        if changed:
+            renamed.append(f"{tool}: {', '.join(changed)}")
+    return " Tool field names are " + "; ".join(renamed) + "." if renamed else ""
+
+
 def render_clean(policy: dict, rng: random.Random) -> str:
     weekdays = ", ".join(["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"][i] for i in policy["calendar"]["business_weekdays"])
     bands = "\n".join(
@@ -305,13 +446,19 @@ def render_clean(policy: dict, rng: random.Random) -> str:
         for band in policy["lateness_bands"]
     )
     codes = policy["codes"]
+    identity_step = " Confirm the full name as its own verification step." if policy["identity"].get("confirm_full_name") else ""
+    note_rule = (
+        "For paid, dispute, hardship, service error or exhausted refusals on one product, add the matching note and continue; if any promise is recorded it wins, while all-paid closes paid and otherwise the first non-paid product reason wins."
+        if policy["multi_product"]["enabled"] and "add_note" in policy["tools"]
+        else "No product notes are recorded."
+    )
     sections = [
-        ("Identity", f"Ask these questions one at a time in this order: {', '.join(policy['identity']['questions'])}. Verify each answer and retry a wrong answer. Stop after {policy['identity']['wrong_answer_limit']} wrong answers in total and close {codes['outcomes']['not_verified']} / {codes['reasons']['failed']}. A second refusal closes {codes['outcomes']['not_verified']} / {codes['reasons']['declined']}.") ,
+        ("Identity", f"Ask these questions one at a time in this order: {', '.join(policy['identity']['questions'])}.{identity_step} Verify each answer and retry a wrong answer. Stop after {policy['identity']['wrong_answer_limit']} wrong answers in total and close {codes['outcomes']['not_verified']} / {codes['reasons']['failed']}. A second refusal closes {codes['outcomes']['not_verified']} / {codes['reasons']['declined']}.") ,
         ("Calendar and lateness", f"Business weekdays are {weekdays}. Holidays are {', '.join(policy['calendar']['holidays'])}. Count a business-day deadline after today; count a calendar-day deadline by ordinary dates, then use the preceding business day if it lands on a closed day. A promise must be today or later, on a business day, and no later than its product deadline. Move a closed date to the next business day when that stays inside the deadline; otherwise offer the deadline. After a flat refusal, make the listed offers in order and stop when the list is exhausted.\n{bands}"),
-        ("Amounts", f"Ask for past_due first. The floor is {_floor_text(policy['floor_rule'])}. Customer-proposed amounts are accepted from {policy['accepted_amount_range']['minimum']} through past_due, including both ends. If full is too much, offer the floor and say the rest remains overdue; that explicit floor offer is allowed even when unsolicited partial amounts are not."),
+        ("Amounts", f"Ask for past_due first. The floor is {_floor_text(policy['floor_rule'])}. {_amount_acceptance_text(policy)} If full is too much, offer the floor and say the rest remains overdue; that explicit floor offer is allowed even when unsolicited partial amounts are not."),
         ("Callbacks", f"For a third party, disclose no account information. A callback may be today or the next business day, later than now, from {policy['callback_window']['start']} through {policy['callback_window']['end']} inclusive. Ask once for a valid alternative; otherwise close {codes['outcomes']['not_reached']} / {codes['reasons']['no_callback']}. A valid booking closes {codes['outcomes']['not_reached']} / {codes['reasons']['callback']}."),
-        ("Special situations", f"Already paid: explain posting can take one business day and close {codes['outcomes']['paid']} with no reason. Dispute: take no promise and close {codes['outcomes']['no_promise']} / {codes['reasons']['dispute']}. Hardship: do not persuade; offer queue {codes['queues']['support']}, closing {codes['outcomes']['transferred']} / {codes['reasons']['support']} if accepted or {codes['outcomes']['no_promise']} / {codes['reasons']['hardship']} if declined. Restructuring transfers to {codes['queues']['restructuring']} and closes {codes['outcomes']['transferred']} / {codes['reasons']['restructuring']}. Ask an insistent human requester once whether you can help, then transfer to {codes['queues']['general']} and close {codes['outcomes']['transferred']} / {codes['reasons']['human']}. Deceased closes {codes['outcomes']['not_reached']} / {codes['reasons']['deceased']}; wrong number closes {codes['outcomes']['not_reached']} / {codes['reasons']['wrong_number']}."),
-        ("Multiple products", f"Multiple products are {'enabled, up to ' + str(policy['multi_product']['max_products']) if policy['multi_product']['enabled'] else 'not enabled'}. Process in {policy['multi_product']['processing_order']} order and count attempts per product. A shared date is clamped separately to each deadline. {'For paid, dispute, hardship, service error or exhausted refusals on one product, add the matching note and continue; if any promise is recorded it wins, while all-paid closes paid and otherwise the first non-paid product reason wins.' if policy['multi_product']['enabled'] else 'Do not use add_note.'} Any transfer suppresses all notes."),
+        ("Special situations", _special_text(policy)),
+        ("Multiple products", f"Multiple products are {'enabled, up to ' + str(policy['multi_product']['max_products']) if policy['multi_product']['enabled'] else 'not enabled'}. Process in {policy['multi_product']['processing_order']} order and count attempts per product. A shared date is clamped separately to each deadline. {note_rule} Any transfer suppresses all notes."),
         ("Required wording", " ".join(f"At [{item['event']}], say exactly: \"{item['text']}\"" for item in policy["required_sentences"])),
     ]
     rng.shuffle(sections)
@@ -319,7 +466,7 @@ def render_clean(policy: dict, rng: random.Random) -> str:
     lines = [f"# {intro}: {policy['bank']['name']}", "", "All names and accounts are synthetic. Internal campaign scheduling text is not a customer rule.", "", f"1. Open exactly with: \"{policy['bank']['opening']}\" Do not reveal the purpose before identity passes.", "2. After verification call get_account, state every late product, and ask for the full past_due amount today."]
     for number, (heading, body) in enumerate(sections, 3):
         lines.extend(["", f"## {number}. {heading}", "", body])
-    lines.extend(["", "## Tool and closing rules", "", f"Use only these seven tools: {', '.join(policy['tools'])}. Confirm amount, product and date before create_promise. close_call is exactly once and last. Outcomes: {', '.join(codes['outcomes'].values())}. Reasons: {', '.join(codes['reasons'].values())}."])
+    lines.extend(["", "## Tool and closing rules", "", f"Use only these {len(policy['tools'])} tools: {', '.join(policy['tools'])}.{_tool_field_text(policy)} Confirm amount, product and date before create_promise. close_call is exactly once and last. Outcomes: {', '.join(codes['outcomes'].values())}. Reasons: {', '.join(codes['reasons'].values())}."])
     return "\n".join(lines) + "\n"
 
 
@@ -375,6 +522,105 @@ def render_raw(policy: dict, rng: random.Random) -> tuple[dict[str, str], list[d
     return files, overrides
 
 
+def _codes_csv(policy: dict) -> str:
+    lines = ["group,semantic,literal"]
+    for group in ("outcomes", "reasons", "note_reasons", "queues"):
+        for semantic, literal in policy["codes"][group].items():
+            lines.append(f"{group},{semantic},{literal}")
+    return "\n".join(lines) + "\n"
+
+
+def _openapi(policy: dict) -> str:
+    spec = json.loads((ROOT / "tools" / "openapi.json").read_text())
+    spec["info"]["title"] = f"{policy['bank']['name']} synthetic collection tools"
+    spec["info"]["version"] = policy["policy_id"].lower()
+    spec["info"]["description"] = f"Synthetic offline schema for {policy['policy_id']}; it exposes {len(policy['tools'])} operations and omitted operations are unavailable."
+    spec["paths"] = {
+        path: operation
+        for path, operation in spec["paths"].items()
+        if path.removeprefix("/") in policy["tools"]
+    }
+    for tool, fields in policy.get("tool_fields", {}).items():
+        if tool not in policy["tools"]:
+            continue
+        schema = spec["paths"][f"/{tool}"]["post"]["requestBody"]["content"]["application/json"]["schema"]
+        for semantic, actual in fields.items():
+            if semantic == actual or semantic not in schema["properties"]:
+                continue
+            schema["properties"][actual] = schema["properties"].pop(semantic)
+            schema["required"] = [actual if item == semantic else item for item in schema.get("required", [])]
+    if "verify_identity" in policy["tools"]:
+        fields = policy["tool_fields"]["verify_identity"]
+        field_name = fields["field"]
+        schema = spec["paths"]["/verify_identity"]["post"]["requestBody"]["content"]["application/json"]["schema"]
+        schema["properties"][field_name]["enum"] = policy["identity"]["questions"]
+        schema["properties"][fields["answer"]]["description"] += " For full_name: the first and last name from the call variables."
+        spec["paths"]["/verify_identity"]["post"]["summary"] = f"Check one security answer. {policy['identity']['wrong_answer_limit']} wrong answers in total end the check."
+        spec["paths"]["/get_account"]["post"]["summary"] = "The late products. Refused until all configured identity questions are passed."
+    if "close_call" in policy["tools"]:
+        fields = policy["tool_fields"]["close_call"]
+        schema = spec["paths"]["/close_call"]["post"]["requestBody"]["content"]["application/json"]["schema"]
+        schema["properties"][fields["outcome"]]["enum"] = list(policy["codes"]["outcomes"].values())
+        schema["properties"][fields["reason"]]["enum"] = sorted(set(policy["codes"]["reasons"].values()))
+    if "add_note" in policy["tools"]:
+        field_name = policy["tool_fields"]["add_note"]["reason"]
+        schema = spec["paths"]["/add_note"]["post"]["requestBody"]["content"]["application/json"]["schema"]
+        schema["properties"][field_name]["enum"] = list(policy["codes"]["note_reasons"].values())
+    if "transfer_to_agent" in policy["tools"]:
+        field_name = policy["tool_fields"]["transfer_to_agent"]["queue"]
+        schema = spec["paths"]["/transfer_to_agent"]["post"]["requestBody"]["content"]["application/json"]["schema"]
+        schema["properties"][field_name]["enum"] = sorted(set(policy["codes"]["queues"].values()))
+    return json.dumps(spec, indent=2) + "\n"
+
+
+def render_hard_raw(policy: dict, rng: random.Random) -> tuple[dict[str, str], list[dict]]:
+    base, overrides = _raw_base(policy, rng)
+    codes_csv = _codes_csv(policy)
+    first_deadline = base["lateness_bands"][0]["deadline"]
+    table = "\n".join([
+        "| Item | Earlier policy extract |",
+        "|---|---|",
+        f"| Identity order | {', '.join(base['identity']['questions'])} |",
+        f"| Wrong-answer limit | {base['identity']['wrong_answer_limit']} |",
+        f"| First-band deadline | {first_deadline['count']} {first_deadline['unit']} days after today |",
+        f"| Floor | {_floor_text(base['floor_rule'])} |",
+        f"| Available tools | {', '.join(base['tools'])} |",
+    ])
+    memo = ["## LATER OVERRIDE MESSAGE — effective immediately", "", "This message wins over every earlier email, table, and policy sentence where they conflict."]
+    for item in overrides:
+        before = json.dumps(item["before"], ensure_ascii=False)
+        after = json.dumps(item["after"], ensure_ascii=False)
+        memo.append(f"- `{item['path']}`: replace {before} with {after}.")
+    memo.append("- Everything not listed above remains in force.")
+    brief = "\n".join([
+        f"# Forwarded campaign email: {policy['bank']['name']}",
+        "",
+        "Operations says the quarterly planning dates below are background only; customer promises follow the policy extract and the later override.",
+        "",
+        "## Attachment summary table",
+        "",
+        table,
+        "",
+        "## Policy extract",
+        "",
+        render_clean(base, rng).rstrip(),
+        "",
+        "## codes.csv (authoritative literal values)",
+        "",
+        "```csv",
+        codes_csv.rstrip(),
+        "```",
+        "",
+        "\n".join(memo),
+        "",
+    ])
+    return {
+        "brief.md": brief,
+        "codes.csv": codes_csv,
+        "openapi.json": _openapi(policy),
+    }, overrides
+
+
 def _identity_text(customer: dict, questions: list[str]) -> str:
     identity = customer["identity"]
     values = {
@@ -382,6 +628,7 @@ def _identity_text(customer: dict, questions: list[str]) -> str:
         "phone_last4": identity.get("phone_last4", "the four digits in the profile"),
         "birth_year": identity.get("date_of_birth", "0000")[:4],
         "postcode": "AB12 3CD",
+        "full_name": f"{customer['variables']['first_name']} {customer['variables']['last_name']}",
     }
     return ", then ".join(f"{question} {values[question]}" for question in questions)
 
@@ -482,20 +729,38 @@ def generate_cases(policy: dict, public_cases: list[dict]) -> list[dict]:
     return cases
 
 
-def write_set(output: Path, count: int, seed: int, style: str = "mixed") -> None:
+def write_set(
+    output: Path,
+    count: int,
+    seed: int,
+    style: str = "mixed",
+    start_index: int = 1,
+    profile: str = "random",
+) -> None:
     rng = random.Random(seed)
     public_cases = json.loads((ROOT / "public-test-set.json").read_text())
     output.mkdir(parents=True, exist_ok=True)
-    manifest = {"seed": seed, "briefs": []}
-    for index in range(1, count + 1):
-        selected_style = ("clean" if index <= (count + 1) // 2 else "raw") if style == "mixed" else style
+    manifest = {"seed": seed, "profile": profile, "briefs": []}
+    for offset in range(count):
+        index = start_index + offset
+        selected_style = "raw" if profile == "hard" else (("clean" if offset < (count + 1) // 2 else "raw") if style == "mixed" else style)
         policy_id = f"GEN-{index:03d}"
-        # The supplied live tool can verify only these two fields; the full space remains available through generate_policy().
-        policy = generate_policy(rng, policy_id, LIVE_IDENTITY_FIELDS)
-        policy["generation"] = {"seed": seed, "index": index, "style": selected_style, "memo_overrides": []}
+        policy = hard_policy(index, seed) if profile == "hard" else generate_policy(rng, policy_id, LIVE_IDENTITY_FIELDS)
+        axes = HARD_AXES[index] if profile == "hard" else []
+        policy["generation"] = {
+            "seed": seed,
+            "index": index,
+            "style": selected_style,
+            "profile": profile,
+            "axes": axes,
+            "memo_overrides": [],
+        }
         directory = output / policy_id.lower()
         directory.mkdir(parents=True, exist_ok=True)
-        if selected_style == "raw":
+        if profile == "hard":
+            files, overrides = render_hard_raw(policy, rng)
+            policy["generation"]["memo_overrides"] = overrides
+        elif selected_style == "raw":
             files, overrides = render_raw(policy, rng)
             policy["generation"]["memo_overrides"] = overrides
         else:
@@ -505,7 +770,13 @@ def write_set(output: Path, count: int, seed: int, style: str = "mixed") -> None
         (directory / "expected_policy.json").write_text(json.dumps(policy, indent=2) + "\n")
         cases = generate_cases(policy, public_cases)
         (directory / "cases.json").write_text(json.dumps(cases, indent=2) + "\n")
-        manifest["briefs"].append({"id": policy_id, "style": selected_style, "directory": directory.name, "cases": len(cases)})
+        manifest["briefs"].append({
+            "id": policy_id,
+            "style": selected_style,
+            "directory": directory.name,
+            "cases": len(cases),
+            "axes": axes,
+        })
     (output / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
 
 
@@ -514,6 +785,8 @@ def main() -> None:
     parser.add_argument("-n", "--count", type=int, default=6)
     parser.add_argument("--seed", type=int, default=20261010)
     parser.add_argument("--style", choices=["clean", "raw", "mixed"], default="mixed")
+    parser.add_argument("--profile", choices=["random", "hard"], default="random")
+    parser.add_argument("--start-index", type=int)
     parser.add_argument("--out", type=Path, default=Path(__file__).with_name("generated"))
     args = parser.parse_args()
     if args.count < 1:
@@ -522,7 +795,12 @@ def main() -> None:
         parser.error(f"{args.out} is not a directory")
     if args.out.exists() and any(args.out.iterdir()):
         parser.error(f"{args.out} is not empty; choose an empty output directory")
-    write_set(args.out, args.count, args.seed, args.style)
+    start_index = args.start_index if args.start_index is not None else (7 if args.profile == "hard" else 1)
+    if start_index < 1:
+        parser.error("--start-index must be positive")
+    if args.profile == "hard" and (start_index < 7 or start_index + args.count - 1 > 12):
+        parser.error("the hard profile covers GEN-007 through GEN-012")
+    write_set(args.out, args.count, args.seed, args.style, start_index, args.profile)
     print(f"wrote {args.count} briefs to {args.out}")
 
 

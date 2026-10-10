@@ -15,6 +15,7 @@ The generator is deterministic for a seed:
 
 ```bash
 python tests/gen/brief_gen.py -n 6 --seed 20261010 --style mixed --out /tmp/generated
+python tests/gen/brief_gen.py -n 6 --seed 20261011 --profile hard --start-index 7 --out /tmp/hard
 ```
 
 The output directory must be empty. The generator and oracle use only the Python standard library and make no network calls.
@@ -23,10 +24,10 @@ The output directory must be empty. The generator and oracle use only the Python
 
 | Field | Meaning |
 |---|---|
-| `schema_version` | Integer schema version, currently `1`. |
+| `schema_version` | Integer schema version (`1` for the original sample, `2` for hard OAS variants). |
 | `policy_id` | Stable id used in each case's `brief` field. |
 | `bank` | `name` and the exact recorded-line `opening`. |
-| `identity` | Ordered `questions` and total `wrong_answer_limit`. Supported question semantics are `date_of_birth`, `phone_last4`, `postcode`, and `birth_year`. |
+| `identity` | Ordered `questions`, total `wrong_answer_limit`, and optional `confirm_full_name`. Supported question semantics also include `full_name`. |
 | `calendar` | `business_weekdays` as Python weekday numbers (`0` Monday through `6` Sunday), plus ISO-date `holidays`. |
 | `lateness_bands` | Ordered, non-overlapping inclusive days-late ranges. |
 | `floor_rule` | How to compute the minimum acceptable amount. |
@@ -36,8 +37,9 @@ The output directory must be empty. The generator and oracle use only the Python
 | `required_sentences` | Exact text keyed by the event when it must be spoken. |
 | `special_situations` | Actions for dispute, paid, hardship, restructure, human request, deceased, and wrong number. |
 | `multi_product` | Product ordering, per-product date/notes, transfer, and final-outcome rules. |
-| `tools` | The unchanged seven tool names. |
-| `generation` | Seed/style metadata. For raw briefs, `memo_overrides` contains `path`, superseded `before`, and effective `after`. |
+| `tools` | Tool names actually present in that brief's OAS; optional tools may be absent. |
+| `tool_fields` | Schema-v2 semantic-to-literal request-field names, grouped by tool. |
+| `generation` | Seed/style/profile metadata and named variation `axes`. For raw briefs, `memo_overrides` contains `path`, superseded `before`, and effective `after`. |
 
 ## Lateness bands and persuasion
 
@@ -69,6 +71,8 @@ Counts start after `variables.now`. A calendar deadline on a closed day means th
 
 `accepted_amount_range.minimum` is `floor` or `full`; `maximum` is `past_due`. The two boolean inclusive flags specify the endpoints. A floor explicitly offered after “too much” or by a persuasion rule remains valid even when unsolicited partial amounts are disallowed.
 
+Schema v2 may set `accepted_amount_range.partial_mode` to `exact_floor`: full payment remains valid, but the only valid partial amount is exactly the calculated floor.
+
 ## Codes and special situations
 
 Code keys are semantic; values are the literal arguments expected in the ledger. This lets the oracle reason about `hardship` while a generated brief may require the close reason `financial_difficulty`. Note reasons stay within the supplied OpenAPI's enum. Queue values stay within its three queue names, but their semantic assignment can vary.
@@ -96,3 +100,7 @@ The returned object is exactly the ledger subset scored by `tools/score.py`: `ou
 ## Live public-case compatibility
 
 The requested neutral space includes four identity fields. The supplied OpenAPI and public mock expose only `date_of_birth` and `phone_last4`, and public cases contain no postcode. Therefore `write_set()` freezes runnable cases with those two questions (in randomized order). `generate_policy()` itself accepts the full identity pool for offline policy/oracle tests. Supporting live postcode verification requires an extended mock/OpenAPI and customer fixtures; the generator does not pretend the current service can do it.
+
+The hard profile writes a synthetic `openapi.json` beside each brief. It may add a `full_name` verifier field, omit `add_note` or `transfer_to_agent`, or rename request fields. `full_name` is derived from the copied public `variables`; the public `identity` and `products` objects remain byte-for-byte equivalent as JSON values.
+
+Each hard raw directory contains exactly one Markdown source, `brief.md`; it combines prose, a policy table, an embedded CSV block, and a final override message. `codes.csv`, `openapi.json`, `expected_policy.json`, and `cases.json` are machine-readable companions, not additional brief fragments.
