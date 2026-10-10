@@ -241,6 +241,10 @@ def vocab(policy):
     out['promise'] = (prom, None)
     others = [w for w in policy.get('who_rules') or [] if w.get('who') == 'other' and w.get('party', 'relative') in ('relative', '', None)]
     cb_ok = next((w for w in others if pair(w) != out['callback_failed'] and pair(w)[0]), others[0] if others else None)
+    if not cb_ok or not pair(cb_ok)[0]:
+        cb_ok = next((w for w in policy.get('who_rules') or [] if w.get('who') == 'busy' and pair(w)[0]), cb_ok)
+    if (not cb_ok or not pair(cb_ok)[0]) and next((r for r in table if _none(r.get('reason')) == 'callback'), None):
+        cb_ok = next(r for r in table if _none(r.get('reason')) == 'callback')
     out['callback'] = pick('who_rules other (callback)', pair(cb_ok))
     if out['callback'][0] and not out['callback'][1]:    # a reason-less callback row: the closing row named callback
         row = next((r for r in table if _none(r.get('outcome')) == out['callback'][0] and _none(r.get('reason')) == 'callback'), None)
@@ -282,7 +286,7 @@ def init_state(policy, call_vars=None):
               _wrapup_said=False, _what_change=0, _id_hint=0, _id_retry=0)
     st['counters']['confirm_name'] = 1          # the greet speaks the name question (§12 choice 2)
     for h in policy.get('hooks') or []:
-        if isinstance(h, dict) and h.get('expects_answer'):
+        if isinstance(h, dict) and h.get('expects_answer') and h.get('point') != 'on_no_promise':
             st.setdefault('_hook_skip', []).append(str(h.get('id')) + ':expects_answer')
         elif isinstance(h, dict) and h.get('point') == 'opening':
             st.setdefault('_hooks_said', []).append(h.get('id'))
@@ -294,7 +298,14 @@ def init_state(policy, call_vars=None):
 def _round(v, how, to):
     q = 1.0 if str(to or '').lower() in ('unit', 'units', 'whole', 'integer', '1') else 0.01
     x = v / q
-    x = -int(-x // 1) if how == 'up' and abs(x - round(x)) > 1e-9 else (int(x // 1) if how == 'down' and abs(x - round(x)) > 1e-9 else round(x))
+    if abs(x - round(x)) <= 1e-6:
+        x = round(x)                   # already whole (float noise)
+    elif how == 'up':
+        x = -int(-x // 1)
+    elif how == 'down':
+        x = int(x // 1)
+    else:
+        x = int((x + 0.5 + 1e-7) // 1)   # nearest = half up ('rounded half up to the penny': 531.275 -> 531.28)
     return round(x * q, 2)
 
 
@@ -343,6 +354,8 @@ def too_much_on_deadline(policy):
 
 def amount_fits(policy, pd, amt):
     kind, x = accept_rule(policy)
+    if kind == 'full_or_floor':      # only the full balance or exactly the floor
+        return abs(amt - pd['past_due']) < 0.005 or abs(amt - pd['floor']) < 0.005
     low = x if kind == 'min_x' and x is not None else pd['floor']
     return min(low, pd['past_due']) - 0.005 <= amt and (amt <= pd['past_due'] + 0.005 or kind == 'above_full_allowed')
 
@@ -353,7 +366,7 @@ def accept_rule(policy):
     a = (policy.get('amounts') or dict()).get('acceptance')
     if isinstance(a, dict):
         return str(a.get('kind') or 'floor_to_full'), _num(a.get('min') if a.get('min') is not None else a.get('x'))
-    return (str(a), None) if a in ('floor_to_full', 'full_only', 'min_x', 'above_full_allowed') else ('floor_to_full', None)
+    return (str(a), None) if a in ('floor_to_full', 'full_only', 'min_x', 'above_full_allowed', 'full_or_floor') else ('floor_to_full', None)
 
 
 def _name(policy, row):
@@ -762,6 +775,8 @@ def step(policy, st, event, tool_event, now, call_vars=None):
     if act.get('type') == '_loop':
         st['_said_n'], st['_said_last'], st['_resay_n'] = 0, None, 0
         act = loop_break(policy, st, today, cv)
+    if act.get('type') == 'close':
+        act = np_question(policy, st, act)
     if policy.get('hooks'):
         act = attach_hooks(policy, st, act)
     else:
@@ -1261,6 +1276,8 @@ def amount_event(policy, st, ev, today, cv):
     kind, x = accept_rule(policy)
     full = pd['past_due']
     low = x if kind == 'min_x' and x is not None else pd['floor']
+    if kind == 'full_or_floor' and not amount_fits(policy, pd, amt) and amt < full - 0.005:
+        low = full                       # between the floor and the full balance: not accepted, the floor once
     if amt < min(low, full) - 0.005:
         if p['floor_offered']:
             return start_attempt(policy, st, i, today)
@@ -1496,6 +1513,46 @@ def compose(spec, vals):
     return ' '.join(str(v) for v in vals)
 
 
+def np_question(policy, st, act):
+    """hooks[point=on_no_promise, expects_answer]: before a refused-family close after verification (not a write failure),
+    ask the brief's question once; the close waits for the answer (nightmare-1 rule 14)."""
+    v = V(policy)
+    if st.get('verified') != 'yes' or st.get('_np_asked') or act.get('outcome') != v['refused'][0] or \
+            (act.get('outcome'), act.get('reason')) == tuple(v['write_failed']):
+        return act
+    h = next((h for h in policy.get('hooks') or [] if isinstance(h, dict) and h.get('point') == 'on_no_promise'
+              and h.get('expects_answer') and str(h.get('text') or '').strip()), None)
+    if not h:
+        return act
+    st['_np_asked'], st['_np_close'] = True, [act.get('outcome'), act.get('reason')]
+    st['phase'], st['outcome'], st['reason'] = 'wrapup', None, None
+    st['_hooks_said'] = (st.get('_hooks_said') or []) + [h.get('id')]
+    return ask(st, str(h['text']).strip(), 'confirm_np')
+
+
+def np_answer(policy, st, ev, today, cv):
+    """The answer to the no-promise question: a date or an amount reopens the product and is handled as a proposal;
+    anything else closes as decided."""
+    k = ev.get('kind')
+    if k in ('date', 'date_amount', 'amount') or (k == 'no' and ev.get('also') in ('date', 'date_amount', 'amount')):
+        if k == 'no':
+            ev = dict(ev, kind=ev.get('also'), also='none')
+        for i, p in enumerate(st['products']):
+            if p['status'] in ('refused', 'noted'):
+                p['status'], p['offer'] = 'open', None
+                st['cur'] = i if st['cur'] is None or st['products'][st['cur']]['status'] != 'open' else st['cur']
+        st['phase'], st['q'] = 'negotiation', 'offer'
+        return date_event(policy, st, ev, today, cv) if ev['kind'] != 'amount' else amount_event(policy, st, ev, today, cv)
+    o, r = st.get('_np_close') or V(policy)['refused']
+    return do_close(policy, st, o, r, D_FAREWELL)
+
+
+def extra_topic(policy, t):
+    """policy.extra_topics [{id, trigger, effect: close, outcome, reason}]: a situation the brief names outside the
+    contract topics (e.g. a complaint)."""
+    return next((x for x in policy.get('extra_topics') or [] if isinstance(x, dict) and x.get('id') == t), None)
+
+
 def loop_break(policy, st, today, cv):
     """The on-cap action of every open question (contract default; never free talk, never a tts loop).
     Before verification: a permitted transfer for a help-first loop, else a safe close on the stage's slot.
@@ -1636,6 +1693,11 @@ def topic_event(policy, st, ev, today, cv):
 # ---------------------------------------------------------------- per-phase user handling
 def on_user(policy, st, ev, today, cv):
     if ev.get('st') == 'partial':
+        if st['phase'] == 'identity' and ev.get('kind') == 'identity' and str(st.get('q') or '').startswith('id_'):
+            idt, qs = st['identity'], (policy.get('identity') or dict()).get('questions') or []
+            fmt = str(qs[idt['idx']].get('format') or '') if idt['idx'] < len(qs) else ''
+            if answer_format(fmt)[0] in ('date', 'digits'):
+                assemble_answer(st, idt['order'][idt['idx']], fmt, dict(ev, st='complete'))
         return dict(type='say_exact', text=sentence(policy, 'continue_line', D_CONTINUE))
     k = ev.get('kind')
     ph = st['phase']
@@ -1649,6 +1711,11 @@ def on_user(policy, st, ev, today, cv):
             return transfer(policy, st, 'human', cv)
     if k == 'topic' and ev.get('t') == 'injection':
         return resay(st)
+    if st['q'] == 'confirm_np':
+        return np_answer(policy, st, ev, today, cv)
+    x = extra_topic(policy, ev.get('t') or ev.get('also_t')) if k == 'topic' or ev.get('also_t') else None
+    if x and str(x.get('effect') or 'close') == 'close' and _none(x.get('outcome')):
+        return do_close(policy, st, _none(x.get('outcome')), _none(x.get('reason')), D_FAREWELL)   # no facts, no promise
     if ph == 'opening':
         return opening(policy, st, ev, today, cv)
     if ph == 'third_party':
@@ -1685,6 +1752,8 @@ def on_user(policy, st, ev, today, cv):
 
 def opening(policy, st, ev, today, cv):
     k, who = ev.get('kind'), ev.get('who')
+    if k == 'callback' and who in (None, '', 'self'):
+        return self_callback(policy, st, ev, today, cv)
     if k == 'yes':
         who = 'self'
     if k == 'no':
@@ -1754,6 +1823,13 @@ def _callback_ok(policy, st, d, tm, today, now_time):
     return True
 
 
+def self_callback(policy, st, ev, today, cv):
+    """The customer asks to be called back before the security questions are done (nightmare-1 rule 15): no
+    verification, no account facts; the same window rules as a third party's callback."""
+    st['who'], st['phase'] = 'self', 'third_party'
+    return third_party(policy, st, ev, today, cv)
+
+
 def third_party(policy, st, ev, today, cv):
     k = ev.get('kind')
     if k == 'who':
@@ -1764,6 +1840,9 @@ def third_party(policy, st, ev, today, cv):
         if ev.get('party') in (MISDIAL, 'deceased'):
             return opening(policy, st, ev, today, cv)
         return resay(st)
+    if k in ('no', 'reject') and st.get('q') == 'callback_time':   # no (other) time: do not schedule
+        o, r = V(policy)['callback_failed']
+        return do_close(policy, st, o, r, D_FAREWELL)
     if k != 'callback':
         return resay(st)     # a relative is told nothing; identity/amount/accept/topics are not acted on
     spec = dict((x, ev.get(x, '')) for x in ('rel', 'd', 'm', 'wd', 'wk', 'vague'))
@@ -1840,23 +1919,66 @@ def norm_answer(fmt, ans):
     return a
 
 
+D_ASK_YEAR = 'And the year, please?'
+D_ASK_DAY = 'And the day and the month, please?'
+
+
+def assemble_answer(st, field, fmt, ev):
+    """An identity answer over several turns (clean-1 surface PUB-06: 'May seventeenth.' then 'nineteen eighty six.').
+    Pieces are kept per field until the answer is complete; a new piece replaces the old one (a correction); they are
+    dropped once an answer is sent, so a later answer never inherits a piece of an earlier one (PUB-03).
+    -> (answer, '') when complete, ('', question) when a piece is missing, ('', '') when nothing usable came."""
+    kind, n = answer_format(fmt)
+    pcs = dict((st.get('_idp') or dict()).get(field) or dict())
+    raw = str(ev.get('ans') or '').strip()
+    if kind == 'date':
+        m = re.match(r'^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})$', raw)
+        if m:
+            pcs['d'], pcs['m'] = int(m.group(3)), int(m.group(2))
+            if 'y' not in ev:            # older prompt: the year in ans is taken as said
+                pcs['y'] = int(m.group(1))
+        for key in ('d', 'm'):
+            v = re.sub(r'\D', '', str(ev.get(key) or ''))
+            if v:
+                pcs[key] = int(v)
+        y = re.sub(r'\D', '', str(ev.get('y') or ''))
+        if len(y) == 4:                  # only a year said in these words (PUB-03)
+            pcs['y'] = int(y)
+        if not pcs:
+            return '', ''
+        if all(k in pcs for k in ('d', 'm', 'y')):
+            st.setdefault('_idp', dict()).pop(field, None)
+            return norm_answer('date', '%04d-%02d-%02d' % (pcs['y'], pcs['m'], pcs['d'])), ''
+        st.setdefault('_idp', dict())[field] = pcs
+        return '', (D_ASK_YEAR if 'y' not in pcs else D_ASK_DAY)
+    if kind == 'digits' and n:
+        got = re.sub(r'\D', '', raw)
+        if not got:
+            return '', ''
+        digits = got if len(got) >= n else (pcs.get('digits', '') + got)
+        if len(digits) >= n:
+            st.setdefault('_idp', dict()).pop(field, None)
+            return norm_answer(fmt, digits[-n:] if len(got) < n else got), ''
+        st.setdefault('_idp', dict())[field] = dict(digits=digits)
+        return '', D_CONTINUE
+    st.setdefault('_idp', dict()).pop(field, None)
+    return norm_answer(fmt, raw), ''
+
+
 def identity(policy, st, ev, today, cv):
     k = ev.get('kind')
     idt = st['identity']
     qs = (policy.get('identity') or dict()).get('questions') or []
+    if k == 'callback':
+        return self_callback(policy, st, ev, today, cv)
     if k == 'identity':
         field = idt['order'][idt['idx']]
         fmt = str(qs[idt['idx']].get('format') or '') if idt['idx'] < len(qs) else ''
-        ans = norm_answer(fmt, ev.get('ans'))
+        ans, missing = assemble_answer(st, field, fmt, ev)
+        if missing:          # a piece of the answer is still to come: ask for it, not a wrong answer or a refusal
+            return ask(st, missing, st['q'])
         if not ans:          # not in the field's format: ask again, not a wrong answer
             return resay(st)
-        if answer_format(fmt)[0] == 'date' and 'y' in ev:
-            y = re.sub(r'\D', '', str(ev.get('y') or ''))
-            if len(y) != 4 or not ans.startswith(y):
-                # PUB-03 live (48a9827a): 'It is the twenty-first of July' came as ans=1992-07-21, the year taken from
-                # the previous wrong answer. A year the customer did not say in these words is never sent: the
-                # customer goes on (not a wrong answer)
-                return dict(type='say_exact', text=sentence(policy, 'continue_line', D_CONTINUE))
         st['_last_args'] = dict(customer_id=cid(cv), field=field, answer=ans)
         return call(st, 'verify', 'verify_identity', dict(st['_last_args']))
     if k == 'topic':
@@ -2001,7 +2123,8 @@ def hub_main(vars, policy):
     st['tok'] = str(vars.get('ev_tok') or st.get('tok') or 'kstart')
     try:
         te = read_tool(vars, st)
-        ev = None if te else parse_event(vars.get('ev'), st, CONTRACT_TOPICS)
+        extra = [x.get('id') for x in policy.get('extra_topics') or [] if isinstance(x, dict) and x.get('id')]
+        ev = None if te else parse_event(vars.get('ev'), st, CONTRACT_TOPICS + extra)
         st2, act = step(policy, st, ev, te, now, cv)
         if ev:
             st2['last_tok'] = ev.get('n')
