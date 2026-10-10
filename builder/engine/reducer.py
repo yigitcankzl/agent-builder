@@ -530,18 +530,20 @@ def normalise(ev, st):
         e['kind'] = 'callback'
     if e.get('kind') == 'other' and st['q'] == 'confirm_name':
         e['kind'], e['who'] = 'who', 'unclear'
-    a = e.get('also')
-    if a in TOPIC_RANK and a != 'other' and (st.get('verified') == 'yes' or a == 'injection'):
-        if e.get('kind') == 'topic' and TOPIC_RANK.index(a) < TOPIC_RANK.index(e.get('t') if e.get('t') in TOPIC_RANK else 'other'):
-            e['t'], e['also'] = a, 'none'     # §1.5: the higher topic is primary (hardship before terms)
-        elif e.get('kind') != 'topic' and a in TOPIC_FIRST:
+    a = e.get('also_t') or e.get('also')
+    # only hardship (A32: before persuasion and restructuring) and injection outrank the primary event through also=;
+    # any other also-topic never outranks a date / amount / accept / yes (a proposal is never a refusal, A29)
+    if a in TOPIC_OVERRIDE and (st.get('verified') == 'yes' or a == 'injection') and e.get('t') != 'injection':
+        if e.get('kind') == 'topic':
+            e['t'], e['also'] = a, 'none'
+        else:
             e['kind'], e['t'], e['also'] = 'topic', a, e.get('kind')
     return e
 
 
 TOPIC_RANK = ['injection', 'hardship', 'dispute', 'paid', 'restructure', 'human', 'stop', 'decline', 'purpose',
               'change_promise', 'terms', 'scam', 'robot', 'unknown_info', 'other']   # contract §1.5 precedence
-TOPIC_FIRST = TOPIC_RANK[:7]       # these outrank any non-topic kind
+TOPIC_OVERRIDE = ('injection', 'hardship')   # the only topics that win from also=
 TOPIC_INFO = ('scam', 'robot', 'unknown_info', 'terms')   # an answer line; a substantive also= is still handled
 SUBSTANTIVE = ('date_amount', 'date', 'amount', 'accept', 'yes', 'reject', 'no', 'callback')
 
@@ -1390,6 +1392,20 @@ def identity(policy, st, ev, today, cv):
 
 
 # ---------------------------------------------------------------- event parsing (the hub reads `ev`)
+def one_edit(a, b):
+    """True when a and b differ by at most one inserted, deleted or changed letter. ponytail: tokens are 6 random
+    letters (26^6), so a one-edit collision with a stale token is about 1 in 10^6 per turn; the last token itself is
+    always rejected exactly."""
+    if a == b:
+        return True
+    if abs(len(a) - len(b)) > 1 or not a or not b:
+        return False
+    if len(a) == len(b):
+        return sum(x != y for x, y in zip(a, b)) == 1
+    s, l = (a, b) if len(a) < len(b) else (b, a)
+    return any(l[:i] + l[i + 1:] == s for i in range(len(l)))
+
+
 def parse_event(raw, st, topics=()):
     """The ev grammar -> dict, or None when stale / unparseable (stale events change nothing)."""
     if not raw:
@@ -1397,9 +1413,22 @@ def parse_event(raw, st, topics=()):
     out = dict()
     for part in str(raw).split(';'):
         k, _, v = part.partition('=')
-        out[k.strip()] = v.strip()
-    if out.get('n') != st.get('tok') or out.get('n') == st.get('last_tok') and st.get('tok') != 'kstart':
+        k, v = k.strip(), v.strip()
+        if k in out:     # a repeated key: the first wins; a topic name in a second also= is kept as also_t
+            if k == 'also' and v in TOPIC_RANK and not out.get('also_t'):
+                out['also_t'] = v
+            continue
+        out[k] = v
+    n, tok = out.get('n') or '', st.get('tok') or ''
+    if n == st.get('last_tok') and tok != 'kstart':
         return None
+    if n != tok and not (tok != 'kstart' and n != st.get('last_tok') and one_edit(n, tok)):
+        return None
+    out['n'] = tok
+    if out.get('also') in TOPIC_RANK and out.get('also') != 'other':
+        out['also_t'], out['also'] = out.get('also_t') or out['also'], 'topic'
+    if out.get('also') == 'topic' and not out.get('also_t'):
+        out['also'] = 'none'
     if out.get('kind') in topics and out.get('kind') not in ('identity', 'who', 'date', 'amount', 'date_amount', 'accept',
                                                              'reject', 'yes', 'no', 'callback', 'topic', 'other'):
         out['t'], out['kind'] = out['kind'], 'topic'
