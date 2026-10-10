@@ -95,15 +95,23 @@ class Bank:
         if not paths:
             return flat
         out = {}
+        vv = paths.get("verified_value")
         for fact, key in dict(self.FACT_KEY.get(tool) or {}, ok="ok").items():
             if fact in paths and key in flat:
                 val = flat[key]
                 if fact == "products":
                     val = [self._item(row, paths) for row in val]
+                if vv and fact in ("verified_this", "verified_all"):
+                    if fact == "verified_this" and paths.get("verified_all") == paths.get("verified_this"):
+                        continue        # one status field: it carries 'all verified'
+                    val = vv if val else "not_" + str(vv)
                 _set(out, paths[fact], val)
         return out
 
     def _item(self, row, paths):
+        sc = paths.get("amount_scale")
+        if sc:     # minor units: every amount of the row as an integer of the minor unit
+            row = {k: (int(round(v / sc)) if isinstance(v, float) else v) for k, v in row.items()}
         it = {k: v for k, v in row.items() if k not in self.ITEM_KEY.values()}   # naming / floor fields stay by name
         for fact, key in self.ITEM_KEY.items():
             if fact in paths and key in row:

@@ -51,7 +51,42 @@ def _pick(cands, pred, prefer=None):
     return None
 
 
-def tool_results(oas_path, policy):
+# verified_value: the one enum member that clearly means "verified" (the OAS description or the brief must name it)
+_VERIFIED_WORDS = re.compile(r"^(verified|passed|pass|success|succeeded|matched|match|confirmed|valid|correct|ok)$", re.I)
+# amount_scale: an integer amount the OAS explicitly gives in minor units
+_MINOR = re.compile(r"\b(cents?|pence|penny|minor units?|minor currency units?|kuru[sş]|kopecks?|paise|centimes?|"
+                    r"in hundredths)\b", re.I)
+_THOUSANDTHS = re.compile(r"\b(thousandths|mills?|fils)\b", re.I)
+
+
+def _scale(sch):
+    """0.01 / 0.001 when an integer amount's description says minor units, else None (= 1, omitted)."""
+    if _kind(sch) != "integer":
+        return None
+    d = str((sch or {}).get("description") or "")
+    return 0.001 if _THOUSANDTHS.search(d) else (0.01 if _MINOR.search(d) else None)
+
+
+def _verified_enum(lv, brief_text):
+    """A string-enum verification field -> (path, member, quote) when exactly one member clearly means verified and the
+    OAS description or the brief names it; else None."""
+    cands = [(p, v) for p, v in lv if v.get("enum") and _kind(v) in ("string", "") and re.search(r"verif|status|result|check", p, re.I)]
+    hits = []
+    for p, v in cands:
+        members = [m for m in v["enum"] if _VERIFIED_WORDS.match(str(m))]
+        if len(members) != 1:
+            continue
+        m = str(members[0])
+        desc = str(v.get("description") or "")
+        named = re.search(r"\b" + re.escape(m) + r"\b", desc, re.I) or re.search(r"[`\"']" + re.escape(m) + r"[`\"']", brief_text or "")
+        if named:
+            quote = desc if re.search(re.escape(m), desc, re.I) else next(
+                (ln.strip() for ln in (brief_text or "").splitlines() if re.search(re.escape(m), ln)), "")
+            hits.append((p, m, quote))
+    return hits[0] if len(hits) == 1 else None
+
+
+def tool_results(oas_path, policy, brief_text=None):
     oas = load_oas(oas_path)
     fields = ((policy.get("products") or {}).get("fields") or {})
     out, missing = {}, []
@@ -70,8 +105,13 @@ def tool_results(oas_path, policy):
         need(tool, "ok", _pick(lv, ok_pred))
         if tool == "verify_identity":
             bools = [(p, v) for p, v in lv if _kind(v) == "boolean" and "verif" in p.lower()]
-            need(tool, "verified_all", _pick(bools, lambda p, k, v: k.startswith("all") or ".all" in p) or _pick(bools, lambda p, k, v: True))
-            need(tool, "verified_this", _pick(bools, lambda p, k, v: not (k.startswith("all") or ".all" in p)))
+            ve = None if bools else _verified_enum(lv, brief_text)
+            if ve:      # a string status: the reducer compares it with verified_value (contract decision, quote kept)
+                out.setdefault(tool, {}).update(verified_all="data." + ve[0], verified_this="data." + ve[0],
+                                                verified_value=ve[1], verified_quote=ve[2][:200])
+            else:
+                need(tool, "verified_all", _pick(bools, lambda p, k, v: k.startswith("all") or ".all" in p) or _pick(bools, lambda p, k, v: True))
+                need(tool, "verified_this", _pick(bools, lambda p, k, v: not (k.startswith("all") or ".all" in p)))
             need(tool, "wrong_left", _pick(lv, lambda p, k, v: _kind(v) == "integer" and re.search(r"left|remain", k)))
             hint = _pick(lv, lambda p, k, v: "hint" in k)
             if hint:
@@ -87,11 +127,24 @@ def tool_results(oas_path, policy):
                                         and not re.search(r"days|monthly|minimum|instal", p), fields.get("past_due")), "item.")
             need(tool, "days_late", _pick(item, lambda p, k, v: _kind(v) in ("integer", "number") and re.search(r"days|late|overdue", p),
                                           fields.get("days_late")), "item.")
+            pd_path = (out.get(tool) or {}).get("past_due")
+            sc = _scale(dict(item).get(pd_path[5:])) if pd_path else None
+            if sc:
+                out[tool]["amount_scale"] = sc
             for t, rule in ((policy.get("products") or {}).get("floor_by_type") or {}).items():
                 f = (rule or {}).get("field")
                 if (rule or {}).get("kind") in ("field", "account_field") and f:
                     hit = [p for p, _ in item if p == f or p.split(".")[-1] == f]
                     need(tool, f"floor.{t}", hit[0] if len(hit) == 1 else None, "item.")
+    # the promise amount the agent SENDS: scaled the same way when the request field is in minor units
+    for path, ops in (oas.get("paths") or {}).items():
+        if path.strip("/").split("/")[-1] == "create_promise":
+            for op in ops.values():
+                body = ((((op or {}).get("requestBody") or {}).get("content") or {}).get("application/json") or {}).get("schema") or {}
+                amt = [v for k, v in (body.get("properties") or {}).items() if _kind(v) in ("number", "integer")]
+                sc = _scale(amt[0]) if len(amt) == 1 else None
+                if sc:
+                    out.setdefault("create_promise", {})["amount_scale"] = sc
     return out, missing
 
 

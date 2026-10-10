@@ -112,6 +112,49 @@ if __name__ == "__main__":
     b = Bank([{"product_id": "p1", "type": "credit_card", "past_due": 100.0, "days_late": 3}], {"date_of_birth": "x"}, results=tr)
     data = b.call("get_account", {})["data"]
     check("products" not in data and data["account"]["items"][0]["balance"]["past_due"] == 100.0, f"fake bank shape: {data}")
+    # 2b string verified status -> verified_value only with evidence; minor units -> amount_scale only when said
+    def status_variant(d, desc):
+        d = copy.deepcopy(d)
+        for tool, op in _ops(d):
+            if tool == "verify_identity":
+                rs = op["responses"]
+                s = rs[next(c for c in rs if str(c).startswith("2"))]["content"]["application/json"]["schema"]
+                for k in [k for k, v in s["properties"].items() if v.get("type") == "boolean" and "verif" in k]:
+                    s["properties"].pop(k)
+                s["properties"]["status"] = {"type": "string", "enum": ["verified", "failed", "locked"], "description": desc}
+        return d
+    sv = dump(os.path.join(tmp, "status.json"), status_variant(plain, "verified when every answer so far is correct"))
+    rp3, _ = to_reducer(copy.deepcopy(POLICY), sv, [])
+    t3 = rp3["tool_results"]["verify_identity"]
+    check(t3.get("verified_value") == "verified" and t3.get("verified_all") == "data.status" and t3.get("verified_quote"),
+          f"string status with a describing OAS -> verified_value + quote: {t3}")
+    check(not [e for e in validate(generate(rp3, sv), rp3, sv) if e.startswith("13")], "validator 13 accepts verified_value")
+    sv2 = dump(os.path.join(tmp, "status2.json"), status_variant(plain, "the outcome of the check"))
+    rp4, rep4 = to_reducer(copy.deepcopy(POLICY), sv2, [])
+    check("verified_value" not in rp4["tool_results"].get("verify_identity", {}) and
+          any("verified" in m["policy_path"] for m in rep4["api_mismatch"]), "no evidence that 'verified' means verified -> api_mismatch, no guess")
+
+    def minor_variant(d, word):
+        d = copy.deepcopy(d)
+        for tool, op in _ops(d):
+            if tool == "get_account":
+                rs = op["responses"]
+                s = rs[next(c for c in rs if str(c).startswith("2"))]["content"]["application/json"]["schema"]
+                arr = next(v for v in s["properties"].values() if v.get("type") == "array")
+                arr["items"]["properties"]["past_due"] = {"type": "integer", "description": f"past-due amount in {word}"}
+            if tool == "create_promise":
+                p_ = op["requestBody"]["content"]["application/json"]["schema"]["properties"]
+                p_["amount"] = {"type": "integer", "description": f"promised amount in {word}"}
+        return d
+    mv = dump(os.path.join(tmp, "minor.json"), minor_variant(plain, "cents"))
+    rp5, _ = to_reducer(copy.deepcopy(POLICY), mv, [])
+    check(rp5["tool_results"]["get_account"].get("amount_scale") == 0.01 and rp5["tool_results"].get("create_promise", {}).get("amount_scale") == 0.01,
+          f"integer amounts 'in cents' -> amount_scale 0.01 on read and send: {rp5['tool_results'].get('create_promise')}")
+    check(not [e for e in validate(generate(rp5, mv), rp5, mv) if e.startswith("13")], "validator 13 accepts amount_scale")
+    mv2 = dump(os.path.join(tmp, "minor2.json"), minor_variant(plain, "the account currency"))
+    rp6, _ = to_reducer(copy.deepcopy(POLICY), mv2, [])
+    check("amount_scale" not in rp6["tool_results"]["get_account"], "an integer amount not said to be minor units -> no scale")
+    check("amount_scale" not in rp0["tool_results"]["get_account"], "the kit OAS -> no scale")
     # 3 refs that cannot be resolved, and cycles
     r = resolve({"a": {"$ref": "#/nope"}, "b": {"$ref": "http://x/y.json#/z"}, "components": {"c": {"properties": {"self": {"$ref": "#/components/c"}}}},
                  "use": {"$ref": "#/components/c"}})

@@ -881,7 +881,7 @@ def to_reducer(policy, oas_path, stable_unmapped=None, brief_text=None):
     p["tool_args"] = ta
     # tool_results: where the reducer reads each fact in the tool responses (exact OAS response fields)
     from builder.oas_bindings import tool_results
-    tr_, missing = tool_results(oas_path, p)
+    tr_, missing = tool_results(oas_path, p, brief_text)
     p["tool_results"] = tr_
     for tool, fact in missing:
         mism.append({"policy_path": f"tool_results.{tool}.{fact}", "value": fact, "field": f"{tool}.response", "oas_enum": None,
