@@ -18,7 +18,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 D = os.path.join(ROOT, "tests", "ev_bank")
 SRC = os.path.join(D, "utterances.jsonl")            # copy of codex-gen 0b52456:tests/gen/utterances.jsonl
-RP = os.path.join(ROOT, "tests", "fallback", "runs", "none", "brief-a.policy.json")   # a brief-A reducer policy
+RP = os.path.join(ROOT, "tests", "smoke", "build", "brief-a.policy.json")   # brief-A reducer policy, built at c677f2c
 OAS = os.path.join(ROOT, "tools", "openapi.json")
 TRAPS = ["flat_vs_too_much", "refusal_counteroffer", "correction", "distractor_date", "spoken_number", "hedged_yes",
          "question_back", "year_carry", "priority_combo", "who_voicemail"]

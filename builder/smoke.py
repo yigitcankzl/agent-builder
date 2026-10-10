@@ -2,7 +2,7 @@
 
 Two chat turns to the saved workflow, then one read of the call:
   turn 0 "Hello?" (chat does not route the first turn), turn 1 a name confirmation (extraction -> routing -> engine).
-Fails (signal S7) on: an HTTP error, no reply, a reply containing "{{", both turns slower than SLOW_S, and, when the
+Fails (signal S7) on: a greet placeholder that is not a test variable (static: chat never speaks the greet), an HTTP error, no reply, a reply containing "{{", both turns slower than SLOW_S, and, when the
 workflow has the engine hub: no successful code_exec in the hub node, a hub_error, or route/say_next still at their
 initial values after turn 1. An L3 workflow (no hub) gets the reply checks only.
 Skipped (not a failure) while a simulation runs in the workspace: chat then times out and slows the simulation.
@@ -73,13 +73,28 @@ def check_call(call, wf):
     return bad
 
 
-def run(api, get_call, workflow_id, wf, sims_running=None, end=True):
+def greet_placeholders(wf, call_vars):
+    """{{x}} in the initial node's spoken text that is neither a call variable of the brief nor a test variable. Chat
+    never speaks the greet (turn 0 is not routed), so this is checked on the workflow itself, before any chat turn."""
+    n = (wf.get("nodes") or {}).get(wf.get("initial_node")) or {}
+    text = (n.get("on_enter") or {}).get("text") or ""
+    known = set((wf.get("test_variables") or {}).keys()) | set(call_vars)
+    return [v for v in re.findall(r"\{\{\s*([\w.]+)\s*\}\}", text) if v not in known]
+
+
+def run(api, get_call, workflow_id, wf, sims_running=None, end=True, call_vars=None, variables=None):
+    """call_vars: the brief's call variable names; None skips the static greet check. variables: call variable values."""
     res = {"ok": False, "skipped": False, "signal": None, "reason": "", "turns": []}
+    bogus = greet_placeholders(wf, call_vars) if call_vars is not None else []
+    if bogus:
+        res.update(signal="S7", reason=f"greet speaks undeclared placeholders {bogus}")
+        return res
     if sims_running:
         res.update(ok=True, skipped=True, reason=f"simulation running ({','.join(sims_running)}): smoke skipped")
         return res
     call, slow, problems = None, 0, []
     cv = {k: v for k, v in (wf.get("test_variables") or {}).items() if isinstance(v, str)}
+    cv.update(variables or {})                         # call variable values (e.g. a practice session's), if given
     for msg in TURNS:
         body = {"workflowId": workflow_id, "message": msg, "customerVariables": cv}
         if call:
