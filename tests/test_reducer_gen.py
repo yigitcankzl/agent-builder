@@ -210,7 +210,59 @@ def floor_acceptance():
     return True
 
 
+# ---------------------------------------------------------------- gap 4: date refusal
+def date_refusal():
+    def at(pol, d, m, rel=""):
+        st, a = to_statement(pol, EARLY)
+        st, a = say(pol, st, "kind=no;also=none;st=complete;prod=")
+        return say(pol, st, f"kind=date;also=none;st=complete;prod=;rel={rel};d={d};m={m};wd=;wk=none;vague=no")
+    base = POL["A"]
+    st, a = at(base, 17, 10)          # legacy default: weekend -> the next business day
+    check("Monday 19 October" in a["text"] and st["offer"]["date"] == "2026-10-19", f"legacy shift: {a}")
+    pol = copy.deepcopy(base)
+    pol["date_rules"] = dict(weekend=dict(action="refuse", say="We do not accept weekend dates."))
+    st, a = at(pol, 17, 10)
+    check(a["text"] == "We do not accept weekend dates. Which other date would work?" and st["offer"] is None
+          and st["q"] == "exact_day", f"weekend refuse, brief sentence: {a}")
+    st, a = say(pol, st, "kind=date;also=none;st=complete;prod=;rel=;d=16;m=10;wd=;wk=none;vague=no")
+    check(st["q"] == "readback" and "16 October" in a["text"], f"another date after a refusal: {a}")
+    pol["date_rules"] = dict(weekend=dict(action="refuse"))
+    st, a = at(pol, 17, 10)
+    check(a["text"] == "Saturday 17 October is not a business day, so I cannot record it. Which other date would work?", f"weekend default: {a}")
+    pol["date_rules"] = dict(holiday=dict(action="refuse"), weekend=dict(action="shift_next_business_day"))
+    st, a = at(pol, 26, 10)            # Monday 26 October is a holiday in brief A
+    check("cannot record" in a["text"] and st["offer"] is None, f"holiday refuse: {a}")
+    st, a = at(pol, 24, 10)            # Saturday -> Monday 26 (holiday) -> Tuesday 27
+    check("Tuesday 27 October" in a["text"], f"weekend shift over a holiday: {a}")
+    pol["date_rules"] = dict(after_deadline=dict(action="refuse"))
+    st, a = at(pol, 1, 12)
+    check(a["text"].startswith("I cannot record a date after ") and "passed" not in a["text"] and st["offer"] is None, f"after deadline refuse: {a}")
+    legacy = copy.deepcopy(base)
+    legacy["on_after_deadline"] = dict(action="reject", say="The latest date I can record is <DEADLINE>. Could you pay on <DEADLINE>?")
+    st, a = at(legacy, 1, 12)
+    check("passed" not in a["text"] and "cannot record a date after" in a["text"], f"legacy reject after deadline: {a}")
+    legacy = copy.deepcopy(base)
+    legacy["on_non_business_day"] = dict(action="reject")
+    st, a = at(legacy, 17, 10)
+    check("is not a business day, so I cannot record it" in a["text"], f"legacy reject weekend: {a}")
+    legacy = copy.deepcopy(base)
+    legacy["earliest"] = dict(allow_today=False)
+    st, a = at(legacy, "", "", rel="today")
+    check(a["text"] == "I cannot record a payment for today. Which other date would work?", f"today not allowed: {a}")
+    st, a = at(base, 10, 10)
+    check(a["text"].startswith("That date has passed."), f"a past date: {a}")
+    # never 'That date has passed' for a future date, under any action
+    for rules in (dict(), dict(weekend=dict(action="refuse"), holiday=dict(action="refuse"), after_deadline=dict(action="refuse")),
+                  dict(weekend=dict(action="offer_deadline"), after_deadline=dict(action="offer_deadline"))):
+        pol = copy.deepcopy(base); pol["date_rules"] = rules
+        for d, m in [(x, 10) for x in range(15, 32)] + [(x, 11) for x in range(1, 31)]:
+            st, a = at(pol, d, m)
+            check("passed" not in a.get("text", ""), f"future {d}/{m} said passed under {rules}: {a}")
+    return True
+
+
 if __name__ == "__main__":
+    print("gap 4 date refusal:", date_refusal())
     print("gap 3 floor and acceptance:", floor_acceptance())
     print("gap 2 identity formats:", identity_formats())
     print("gap 1 hooks:", hooks())

@@ -17,7 +17,7 @@ import re
 
 try:  # local runs; in the code node the date core is concatenated above this file
     from builder.engine.dates import date_from_spec, parse_spec, decide, deadline_for, add_business_days, \
-        is_business_day, say_date
+        is_business_day, say_date, shift_to_business_day
 except Exception:
     pass
 
@@ -938,7 +938,7 @@ def date_event(policy, st, ev, today, cv):
         return after_resolved(policy, st, today, cv)
     i = targets[0]
     p, pd = _p(st, i)
-    r = decide(today, pd['days_late'], 'exact', named, 0, policy)
+    r = date_verdict(policy, today, pd, named)
     reason = r['reason']
     if amt and _num(amt) is not None and not amount_fits(policy, pd, float(amt)):
         if reason == 'ok':     # the date stands; the amount goes through the acceptance rule
@@ -958,13 +958,92 @@ def date_event(policy, st, ev, today, cv):
         st['cur'] = i
         st['offer'] = dict(product_ids=[p['id']], amount=amount, date=d,
                            kind='customer' if reason == 'non_business_day' else 'deadline')
-        sec = policy.get('on_non_business_day' if reason == 'non_business_day' else 'on_after_deadline') or dict()
-        tpl = str(sec.get('say') or '')
-        for token, val in (('<NAMED>', r['named']), ('<DATE>', r['accepted']), ('<DEADLINE>', r['deadline'])):
-            tpl = tpl.replace(token, say_date(val) if val else '')
+        tpl = fill_date(r['say'], r)
         text = (tpl + ' ' + 'That is ' + money(amount) + ' for your ' + pd['name'] + '.').strip()
         return ask(st, text, 'offer')
-    return ask(st, 'That date has passed. ' + (st.get('_last_ask') or D_SAFE), st['q'])
+    # refuse: the brief's sentence (else a true contract default), then ask for another day; nothing is proposed
+    if p['status'] == 'proposed' and st['cur'] == i:
+        p['status'], p['offer'] = 'open', None
+    st['offer'] = None
+    st['cur'] = i
+    text = fill_date(r['say'], r)
+    return ask(st, text if text.endswith('?') else (text + ' ' + D_OTHER_DAY).strip(), 'exact_day')
+
+
+D_OTHER_DAY = 'Which other date would work?'
+D_DATE_SAY = dict(past='That date has passed.', today_not_allowed='I cannot record a payment for today.',
+                  weekend='<NAMED> is not a business day, so I cannot record it.',
+                  holiday='<NAMED> is not a business day, so I cannot record it.',
+                  after_deadline='I cannot record a date after <DEADLINE>.',
+                  shift='<NAMED> is not a business day. The next business day is <DATE>. Could you pay on <DATE>?',
+                  offer_deadline='The latest date I can record is <DEADLINE>. Could you pay on <DEADLINE>?')
+
+
+def fill_date(tpl, r):
+    for token, val in (('<NAMED>', r.get('named')), ('<DATE>', r.get('accepted')), ('<DEADLINE>', r.get('deadline'))):
+        tpl = tpl.replace(token, say_date(val) if val else '')
+    return tpl.strip()
+
+
+def date_action(policy, sit):
+    """policy.date_rules[situation] = dict(action=shift_next_business_day|shift_previous_business_day|offer_deadline|
+    refuse, say=...); without it the older sections decide (on_non_business_day, on_after_deadline, earliest)."""
+    rule = (policy.get('date_rules') or dict()).get(sit)
+    if isinstance(rule, dict) and rule.get('action'):
+        return str(rule['action']), str(rule.get('say') or '')
+    if sit in ('weekend', 'holiday'):
+        sec = policy.get('on_non_business_day') or dict()
+        a = str(sec.get('action') or 'next_business_day')
+        a = dict(next_business_day='shift_next_business_day', previous_business_day='shift_previous_business_day',
+                 reject='refuse').get(a, a)
+        say = str(sec.get('say') or '')
+        return a, (say if a.startswith('shift') or '<DATE>' not in say else '')
+    if sit == 'after_deadline':
+        sec = policy.get('on_after_deadline') or dict()
+        a = 'offer_deadline' if sec.get('action', 'offer_deadline') == 'offer_deadline' else 'refuse'
+        say = str(sec.get('say') or '')
+        return a, (say if a == 'offer_deadline' or '<DEADLINE>?' not in say else '')
+    return 'refuse', ''
+
+
+def date_verdict(policy, today, pd, named):
+    """The named day for one product -> dict(reason ok|non_business_day|after_deadline|refuse, named, accepted,
+    deadline, sit, say). Situations in order: past, today_not_allowed, after_deadline, holiday, weekend."""
+    dl = _d(pd['deadline'])
+    out = dict(reason='ok', named=named, accepted=named, deadline=dl, sit='', say='')
+    allow_today = (policy.get('earliest') or dict()).get('allow_today', True) and \
+        not ((policy.get('date_rules') or dict()).get('today_not_allowed') or dict()).get('action')
+    bd = policy.get('business_days') or dict()
+
+    def sit_of(d):
+        if d < today:
+            return 'past'
+        if d == today and not allow_today:
+            return 'today_not_allowed'
+        if d > dl:
+            return 'after_deadline'
+        if d.isoformat() in (bd.get('holidays') or []):
+            return 'holiday'
+        if d.weekday() not in (bd.get('weekdays') or [0, 1, 2, 3, 4]):
+            return 'weekend'
+        return ''
+    sit = sit_of(named)
+    if not sit:
+        return out
+    act, say = date_action(policy, sit)
+    out['sit'] = sit
+    if act.startswith('shift') and sit in ('weekend', 'holiday'):
+        alt = shift_to_business_day(named, policy, 1 if act == 'shift_next_business_day' else -1)
+        alt_sit = sit_of(alt) if alt else 'after_deadline'
+        if not alt_sit:
+            return dict(out, reason='non_business_day', accepted=alt, say=say or D_DATE_SAY['shift'])
+        sit = alt_sit
+        act, say = date_action(policy, sit)
+        out['sit'] = sit
+    if act == 'offer_deadline' and sit in ('after_deadline', 'weekend', 'holiday') and not sit_of(dl):
+        pre = '<NAMED> is not a business day. ' if sit in ('weekend', 'holiday') and not say else ''
+        return dict(out, reason='after_deadline', accepted=dl, say=say or pre + D_DATE_SAY['offer_deadline'])
+    return dict(out, reason='refuse', accepted=None, say=say or D_DATE_SAY.get(sit, D_DATE_SAY['past']))
 
 
 def vague_event(policy, st, today):
