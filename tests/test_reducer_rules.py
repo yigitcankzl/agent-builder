@@ -457,5 +457,7 @@ if __name__ == "__main__":
         st = to_readback(pol)
         st["q"], st["phase"] = "pay_today", "negotiation"
         st, a = say(pol, st, "kind=topic;also=none;st=complete;prod=;t=dispute")
+        while a["type"] == "call_tool" and a["tool"] == "add_note":        # notes enabled (A+B): the note, then the close
+            st, a = tool(pol, st, dict(ok=True))
         check(a["type"] == "close" and (a["outcome"], a["reason"]) == v["dispute"], f"{name}: dispute closes outside read-back: {a}")
         print(name, "rules ok; vocab log:", v["log"])

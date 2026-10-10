@@ -199,6 +199,11 @@ def vocab(policy):
         if row:   # the closing-table row named by the contract key
             log.append(label + ' missing: closing row ' + key + ' used')
             return pair(row)
+        rx = WHEN_RX.get(key)
+        row = next((r for r in table if rx and _none(r.get('reason')) and re.search(rx, str(r.get('when') or ''), re.I)), None)
+        if row:   # a renamed code (refused -> no_commitment): the closing row whose 'when' describes the situation
+            log.append(label + ' missing: closing row by its when (' + str(row.get('reason')) + ') used')
+            return pair(row)
         log.append(label + ' missing: unclear slot used')
         return unclear
     hard = [r for r in rows('hardship') if _none(r.get('outcome'))]
@@ -223,7 +228,8 @@ def vocab(policy):
     out['xfer'] = dict(restructuring=pick('events restructure', pair((rows('restructure') or [None])[0])),
                        human=pick('events human', pair((rows('human') or [None])[0])),
                        hardship=pick('events hardship (accepted)', pair(hard_accept)))
-    out['note'] = dict(refused=_none((stop_after or dict()).get('note_reason')) or out['refused'][1],
+    nr = (((policy.get('writes') or dict()).get('notes') or dict()).get('reasons') or dict())
+    out['note'] = dict(refused=_none(nr.get('refused')) or _none((stop_after or dict()).get('note_reason')) or NOTE_REFUSED,
                        hardship=_none((hard_decline or dict()).get('note_reason')) or out['hardship'][1],
                        dispute=_none((dispute_row or dict()).get('note_reason')) or out['dispute'][1],
                        paid=_none((paid_row or dict()).get('note_reason')),
@@ -287,6 +293,7 @@ def init_state(policy, call_vars=None):
               _pd=[], _tc=dict(), _last_ask='', _queue=[], _cb_out=0, _ask_time=0, _xfer_pre='no',
               _wrapup_said=False, _what_change=0, _id_hint=0, _id_retry=0)
     st['counters']['confirm_name'] = 1          # the greet speaks the name question (§12 choice 2)
+    st['_cid'] = cid(call_vars or dict())
     for h in policy.get('hooks') or []:
         if isinstance(h, dict) and h.get('expects_answer') and h.get('point') != 'on_no_promise':
             st.setdefault('_hook_skip', []).append(str(h.get('id')) + ':expects_answer')
@@ -321,10 +328,8 @@ def _num(x):
 def _floor(policy, row):
     """floor_by_type[type] (or '*'): kind field|account_field (field), percent|percent_of_past_due (percent),
     fixed (amount), max_fixed_percent (amount, percent); round up|down|nearest to cents (default) or units. Never above
-    the full amount; no rule -> the full amount. acceptance full_only -> the full amount."""
+    the full amount; no rule -> the full amount. acceptance full_only keeps the floor (offered on 'too much')."""
     full = float(row.get('past_due') or 0)
-    if accept_rule(policy)[0] == 'full_only':
-        return full
     fbt = (policy.get('products') or dict()).get('floor_by_type') or dict()
     fb = fbt.get(str(row.get('type'))) or fbt.get('*') or fbt.get('default')
     if not isinstance(fb, dict):
@@ -358,6 +363,8 @@ def amount_fits(policy, pd, amt):
     kind, x = accept_rule(policy)
     if kind == 'full_or_floor':      # only the full balance or exactly the floor
         return abs(amt - pd['past_due']) < 0.005 or abs(amt - pd['floor']) < 0.005
+    if kind == 'full_only':          # a volunteered amount must be the full balance (the floor is still offered)
+        return abs(amt - pd['past_due']) < 0.005
     low = x if kind == 'min_x' and x is not None else pd['floor']
     return min(low, pd['past_due']) - 0.005 <= amt and (amt <= pd['past_due'] + 0.005 or kind == 'above_full_allowed')
 
@@ -630,10 +637,12 @@ def precedence(policy, st):
     paid_note = v['note']['paid']
     if st['products'] and all(p['status'] == 'paid' or (paid_note and p['note'] == paid_note) for p in st['products']):
         return v['paid']
+    close_for = dict((v['note'][k], v[k]) for k in ('dispute', 'hardship', 'refused') if v['note'].get(k))
     for p, pd in zip(st['products'], st['_pd']):
         r = p['note'] or pd.get('note_reason') or (v['note']['refused'] if p['status'] == 'refused' else None)
         if r and r != paid_note:
-            return v['refused'][0], r
+            o, cr = close_for.get(r) or (v['refused'][0], r)    # the note reason's own close code (dispute -> account_dispute)
+            return o or v['refused'][0], cr
     return None, None
 
 
@@ -724,6 +733,10 @@ def normalise(ev, st):
 
 TOPIC_RANK = ['injection', 'hardship', 'dispute', 'paid', 'restructure', 'human', 'stop', 'decline', 'purpose',
               'change_promise', 'terms', 'scam', 'robot', 'unknown_info', 'other']   # contract §1.5 precedence
+WHEN_RX = dict(refused=r'refus|attempts?\b.*\b(used|exhaust)|exhausted|no commitment|will not pay|declines? to pay',
+               hardship=r'hardship|illness|job loss|bereave|financial difficult',
+               dispute=r'disput|contest')
+NOTE_REFUSED = 'refused'     # DEFAULT: the contract product status as the note reason when the brief names none
 SELF_TOPICS = ('dispute', 'paid', 'hardship', 'restructure', 'change_promise', 'terms')   # imply the speaker is the customer
 TOPIC_OVERRIDE = ('injection', 'hardship')   # the only topics that win from also=
 TOPIC_INFO = ('scam', 'robot', 'unknown_info', 'terms')   # an answer line; a substantive also= is still handled
@@ -947,6 +960,13 @@ def next_write(policy, st, cv):
             return call(st, 'promise', 'create_promise', dict(st['_last_args']), product_id=pid)
     st['phase'] = 'wrapup'
     notes = (policy.get('writes') or dict()).get('notes') or dict()
+    q = np_hook(policy)
+    if q and not st.get('_np_asked') and not st['transfers'] and st.get('verified') == 'yes' \
+            and not any(p['status'] == 'persisted' for p in st['products']) and \
+            (precedence(policy, st)[0] or V(policy)['refused'][0]) == V(policy)['refused'][0]:
+        st['_np_asked'], st['_np_resume'] = True, True        # the question before the notes (a date reopens)
+        st['_hooks_said'] = (st.get('_hooks_said') or []) + [q.get('id')]
+        return ask(st, str(q['text']).strip(), 'confirm_np')
     if notes.get('enabled') and not st['transfers']:
         for i, (p, pd) in enumerate(zip(st['products'], st['_pd'])):
             if p['status'] in ('refused', 'failed', 'open', 'proposed') and pd.get('note_reason') is None:
@@ -1010,14 +1030,39 @@ def _last_bd_of_week(today, policy, weeks=0):
 
 
 def plan_date(rule, today, pd, policy):
-    if rule == 'deadline':
-        return _d(pd['deadline'])
-    if rule == 'last_business_day_next_week':
-        return _last_bd_of_week(today, policy, 1)
-    d = _last_bd_of_week(today, policy, 0)       # last_business_day_this_week; if today is that day: next week's
-    if d <= today:
+    """An attempt's day: deadline | today | next_business_day | last_business_day_this_week (next week's when today is
+    that day or past) | last_business_day_next_week | <n>_business_days_after_today | <n>_calendar_days_after_today |
+    {type: offset, count, unit}; clamped to the deadline, a closed day moved to the next business day inside it."""
+    dl = _d(pd['deadline'])
+    r = rule if isinstance(rule, dict) else str(rule or '')
+    if isinstance(r, dict):
+        r = '%s_%s_days_after_today' % (r.get('count'), 'business' if 'business' in str(r.get('unit')) else 'calendar') \
+            if r.get('type') == 'offset' else str(r.get('type') or '')
+    for w, n in NUM_WORDS:
+        r = re.sub(r'^' + w + r'_', n + '_', r)
+    m = re.match(r'^(\d+)_(business|calendar)_days?_after_today$', r)
+    if r == 'deadline':
+        return dl
+    if r == 'today':
+        d = today
+    elif r == 'next_business_day':
+        d = add_business_days(today, 1, policy)
+    elif m and m.group(2) == 'business':
+        d = add_business_days(today, int(m.group(1)), policy)
+    elif m:
+        d = today + datetime.timedelta(days=int(m.group(1)))
+    elif r == 'last_business_day_next_week':
         d = _last_bd_of_week(today, policy, 1)
-    return min(d, _d(pd['deadline']))
+    else:
+        d = _last_bd_of_week(today, policy, 0)       # last_business_day_this_week; if today is that day: next week's
+        if d <= today:
+            d = _last_bd_of_week(today, policy, 1)
+    if d > dl:
+        return dl
+    if not is_business_day(d, policy):
+        n_ = shift_to_business_day(d, policy, 1)
+        d = n_ if n_ and n_ <= dl else dl
+    return d
 
 
 def plan_amount(rule, pd):
@@ -1062,10 +1107,11 @@ def refuse_product(policy, st, i, today, cv=None):
     hook_point(st, 'on_refusal')
     pd['note_reason'] = pd.get('note_reason') or V(policy)['note']['refused']
     st['offer'] = None
-    if len(st['products']) == 1:
+    notes_on = bool(((policy.get('writes') or dict()).get('notes') or dict()).get('enabled'))
+    if len(st['products']) == 1 and not notes_on:
         o, r = V(policy)['refused']
         return do_close(policy, st, o, r, D_FAREWELL)
-    return after_resolved(policy, st, today, cv)
+    return after_resolved(policy, st, today, cv or dict(customer_id=st.get('_cid')))   # notes on: the note, then the close
 
 
 def agree(policy, st, i, amount, date, today, cv):
@@ -1279,7 +1325,7 @@ def amount_event(policy, st, ev, today, cv):
     kind, x = accept_rule(policy)
     full = pd['past_due']
     low = x if kind == 'min_x' and x is not None else pd['floor']
-    if kind == 'full_or_floor' and not amount_fits(policy, pd, amt) and amt < full - 0.005:
+    if kind in ('full_or_floor', 'full_only') and not amount_fits(policy, pd, amt) and amt < full - 0.005:
         low = full                       # between the floor and the full balance: not accepted, the floor once
     if amt < min(low, full) - 0.005:
         if p['floor_offered']:
@@ -1523,14 +1569,18 @@ def np_question(policy, st, act):
     if st.get('verified') != 'yes' or st.get('_np_asked') or act.get('outcome') != v['refused'][0] or \
             (act.get('outcome'), act.get('reason')) == tuple(v['write_failed']):
         return act
-    h = next((h for h in policy.get('hooks') or [] if isinstance(h, dict) and h.get('point') == 'on_no_promise'
-              and h.get('expects_answer') and str(h.get('text') or '').strip()), None)
+    h = np_hook(policy)
     if not h:
         return act
     st['_np_asked'], st['_np_close'] = True, [act.get('outcome'), act.get('reason')]
     st['phase'], st['outcome'], st['reason'] = 'wrapup', None, None
     st['_hooks_said'] = (st.get('_hooks_said') or []) + [h.get('id')]
     return ask(st, str(h['text']).strip(), 'confirm_np')
+
+
+def np_hook(policy):
+    return next((h for h in policy.get('hooks') or [] if isinstance(h, dict) and h.get('point') == 'on_no_promise'
+                 and h.get('expects_answer') and str(h.get('text') or '').strip()), None)
 
 
 def np_answer(policy, st, ev, today, cv):
@@ -1546,6 +1596,8 @@ def np_answer(policy, st, ev, today, cv):
                 st['cur'] = i if st['cur'] is None or st['products'][st['cur']]['status'] != 'open' else st['cur']
         st['phase'], st['q'] = 'negotiation', 'offer'
         return date_event(policy, st, ev, today, cv) if ev['kind'] != 'amount' else amount_event(policy, st, ev, today, cv)
+    if st.pop('_np_resume', False):
+        return next_write(policy, st, cv)          # asked before the notes: the notes, then the close
     o, r = st.get('_np_close') or V(policy)['refused']
     return do_close(policy, st, o, r, D_FAREWELL)
 
@@ -1681,7 +1733,8 @@ def topic_event(policy, st, ev, today, cv):
         say = (row or dict()).get('say') or ''
         p, pd = _p(st, i)
         st['offer'] = None
-        if not multi:
+        notes_on = bool(((policy.get('writes') or dict()).get('notes') or dict()).get('enabled'))
+        if not multi and not notes_on:
             p['status'] = 'paid' if t == 'paid' else 'open'
             if t == 'paid':
                 p['offer'] = None
