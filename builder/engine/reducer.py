@@ -51,6 +51,7 @@ def desk_name(row):
 D_PROTECT = 'These questions protect your account.'
 D_REACH = 'Could you tell me when I can reach {title} {last_name}?'   # the kit (PUB-02) checks 'when'
 D_OVERDUE = 'The rest stays overdue.'
+D_LOWEST = 'That was the lowest amount I can offer.'
 D_WHICH_DAY = 'Which day would suit you?'
 COUNTERS = ['confirm_name', 'clarify', 'vague', 'stop_talking', 'human_asks', 'decline_explain', 'support_offered']
 TOOL_NODE = dict(verify_identity='t_verify_identity', get_account='t_get_account', create_promise='t_create_promise',
@@ -1011,11 +1012,16 @@ def start_attempt(policy, st, i, today, from_today_ask=True):
     rule = pd['plan'][p['attempts']]
     date = plan_date(rule.get('date_rule'), today, pd, policy)
     amount, is_floor = plan_amount(rule.get('amount_rule'), pd)
+    again = is_floor and p['floor_offered']        # the floor was already offered: only the new day (PUB-06 live)
     p['attempts'] += 1
     if is_floor:
         p['floor_offered'] = True
     p['status'], p['offer'] = 'proposed', dict(amount=amount, date=iso(date))
     st['offer'] = dict(product_ids=[p['id']], amount=amount, date=iso(date), kind='attempt_n')
+    if again:
+        pre = D_LOWEST + ' ' if st.pop('_lowest', False) else ''
+        return ask(st, pre + 'Could you pay on ' + say_date(date) + ' instead?', 'offer')
+    st.pop('_lowest', None)
     text = offer_line(pd, amount, iso(date), floor_clause=is_floor)
     return ask(st, text, 'offer')
 
@@ -1222,6 +1228,8 @@ def reject_event(policy, st, ev, today, cv):
         return ask(st, offer_line(pd, pd['floor'], date, floor_clause=True), 'offer')
     if ev.get('why') == 'too_much':
         pd['too_much'] = True
+        if p['floor_offered']:      # 'too much' (or 'what is the minimum?') after the floor: it was the lowest
+            st['_lowest'] = True
     return start_attempt(policy, st, i, today)
 
 
