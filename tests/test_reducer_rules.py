@@ -200,7 +200,7 @@ def answer_and_event():
             st0, _ = to_statement(pol)
             st0, _ = say(pol, st0, "kind=no;also=none;st=complete;prod=")     # an open attempt
             ref_st, ref = say(pol, R.json.loads(R.json.dumps(st0)), date_body % "also=none")
-            for body in (date_body % "also=robot",
+            for body in (date_body % "also=robot", date_body % "also=topic" + ";t=robot",   # the live shape (f65d8706)
                          "kind=topic;also=date;st=complete;prod=;t=robot;" + (date_body % "x").split(";st=complete;prod=;")[1]):
                 st, a = say(pol, R.json.loads(R.json.dumps(st0)), body)
                 check(a["type"] == ref["type"] == "say_exact" and a["text"] == (robot + " " + ref["text"]),

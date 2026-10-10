@@ -1755,6 +1755,8 @@ def parse_event(raw, st, topics=()):
     out['n'] = tok
     if out.get('also') in TOPIC_RANK and out.get('also') != 'other':
         out['also_t'], out['also'] = out.get('also_t') or out['also'], 'topic'
+    if out.get('also') == 'topic' and not out.get('also_t') and out.get('kind') != 'topic' and out.get('t') in TOPIC_RANK:
+        out['also_t'] = out['t']    # PUB-04 live: kind=date;also=topic;t=robot (the secondary topic in t=)
     if out.get('also') == 'topic' and not out.get('also_t'):
         out['also'] = 'none'
     if out.get('kind') in topics and out.get('kind') not in ('identity', 'who', 'date', 'amount', 'date_amount', 'accept',
