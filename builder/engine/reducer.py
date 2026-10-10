@@ -858,7 +858,9 @@ def verify_result(policy, st, data, cv):
     qs = (policy.get('identity') or dict()).get('questions') or []
     data = dict(data, hint=tr_get(policy, 'verify_identity', 'hint', data, 'hint'),
                 verified=tr_get(policy, 'verify_identity', 'verified_this', data, 'verified'),
-                all_verified=tr_get(policy, 'verify_identity', 'verified_all', data, 'all_verified'),
+                all_verified=(None if isinstance((policy.get('tool_results') or dict()).get('verify_identity'), dict)
+                              and not tr_path(policy, 'verify_identity', 'verified_all')
+                              else tr_get(policy, 'verify_identity', 'verified_all', data, 'all_verified')),
                 wrong_answers_left=tr_get(policy, 'verify_identity', 'wrong_left', data, 'wrong_answers_left'))
     if str(data.get('hint') or '') == 'day_month_swapped' and st['_id_hint'] < 1:
         st['_id_hint'] += 1
@@ -869,6 +871,9 @@ def verify_result(policy, st, data, cv):
         data = dict(data, verified=yes(data.get('verified')), all_verified=yes(data.get('all_verified')))
     verified = str(data.get('verified')).lower() == 'true'
     if verified:
+        # all verified: the bank's all-field when the policy binds one (bound paths without it: the field is ignored),
+        # else this answer passed on the LAST question; the reducer moves on only after the previous one passed, so a
+        # per-answer flag is never all-verified on question 1
         if str(data.get('all_verified')).lower() == 'true' or idt['idx'] + 1 >= len(idt['order']):
             st['verified'], st['phase'] = 'yes', 'account'
             return call(st, 'account', 'get_account', dict(customer_id=cid(cv)))
