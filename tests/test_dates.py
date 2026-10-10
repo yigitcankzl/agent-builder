@@ -171,6 +171,32 @@ def test_code_string_rules():
         pass
 
 
+def test_wire_into_workflow():
+    """Graph wiring only (nothing is saved to Freya here)."""
+    from builder.engine import date_graph as G
+    wf = {"initial_node": "talk", "nodes": {
+        "talk": {"name": "talk", "node_type": "conversation", "task_message": "T",
+                 "transitions": [{"target_node": "end", "description": "x", "condition": {"operator": "always"}}]},
+        "end": {"name": "end", "node_type": "end_call"}}}
+    G.wire(wf, "talk", FIX)
+    n = wf["nodes"]
+    check({"talk_date_say", "talk_cont", "date_resolve"} <= set(n), "nodes added")
+    for k in ("talk", "talk_date_say", "talk_cont"):
+        check(n[k]["transitions"][0]["target_node"] == "date_resolve", f"{k}: date transition first")
+        check(n[k]["extraction_schema"][-1]["name"] == "date_said", f"{k}: extraction field present")
+    check(n["talk_date_say"]["on_enter"] == {"type": "tts", "text": "{{say_next}}"}, "say node speaks say_next verbatim")
+    targets = [t["target_node"] for t in n["date_resolve"]["transitions"]]
+    check(targets == ["talk_date_say", "talk_cont"], f"one transition per target: {targets}")
+    check(n["date_resolve"]["transitions"][0]["condition"]["conditions"][0] == {"variable": "route_date", "operator": "equals", "operand": "say"}, "string flag route")
+    f = n["talk"]["extraction_schema"][-1]
+    check("{{now}}" in f["extraction_prompt"] and "{{extractor.speech}}" in f["extraction_prompt"], "extraction anchored to now, keeps inputs")
+    check(re.match(G.DATE_PATTERN, "2026-10-26") and re.match(G.DATE_PATTERN, "vague: next week") and not re.match(G.DATE_PATTERN, "next week"), "pattern")
+    code = n["date_resolve"]["pre_actions"][0]["function"]["parameters"]["properties"]["code"]["default"]
+    check(code == code_source(FIX), "the workflow carries exactly the tested code string")
+    G.wire(wf, "talk", FIX)  # idempotent on the host
+    check([t["target_node"] for t in n["talk"]["transitions"]].count("date_resolve") == 1, "wiring twice adds no duplicate")
+
+
 def test_no_public_values_in_builder():
     banned = set(FIX["business_days"]["holidays"]) | {"2026-10-14", "2026-11-02", "2026-10-23", "Freya Bank", "Reyes"}
     for d, _, fs in os.walk(os.path.join(ROOT, "builder")):
