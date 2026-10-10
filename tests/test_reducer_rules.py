@@ -360,7 +360,39 @@ def split_answers():
     return True
 
 
+def identity_chatter():
+    """clean-1 surface PUB-07 live (d34d93ed): four kind=other turns after the phone question re-said one line to the
+    loop cap and closed not_verified/declined. Chatter is never a refusal: the question is worded two ways in turn,
+    the answer still goes through, a hard cap closes on the unclear slot; two explicit refusals still decline."""
+    for name, pol in POL.items():
+        v = R.V(pol)
+        st = R.init_state(pol, CV)
+        st, a = say(pol, st, "kind=who;also=none;st=complete;prod=;who=self;party=")
+        st, a = say(pol, st, "kind=identity;also=none;st=complete;prod=;field=date_of_birth;ans=1990-01-01;y=1990")
+        st, a = tool(pol, st, dict(verified=True, all_verified=False, wrong_answers_left=3))
+        texts = []
+        for _ in range(4):
+            st, a = say(pol, st, "kind=other;also=none;st=none;prod=")
+            texts.append(a["text"])
+        check(st["phase"] == "identity" and st["identity"]["refusals"] == 0 and all("last four" in t for t in texts)
+              and texts[0] != texts[1], f"{name}: chatter re-asks, two wordings: {texts}")
+        st, a = say(pol, st, "kind=identity;also=none;st=complete;prod=;field=phone_last4;ans=1234")
+        check(a["type"] == "call_tool" and a["args"]["answer"] == "1234", f"{name}: the answer after chatter: {a}")
+        st = R.init_state(pol, CV)
+        st, a = say(pol, st, "kind=who;also=none;st=complete;prod=;who=self;party=")
+        for _ in range(R.ID_OTHER_CAP + 1):
+            st, a = say(pol, st, "kind=other;also=none;st=none;prod=")
+        check(a["type"] == "close" and (a["outcome"], a["reason"]) == tuple(v["unclear"]), f"{name}: hard cap -> unclear: {a}")
+        st = R.init_state(pol, CV)
+        st, a = say(pol, st, "kind=who;also=none;st=complete;prod=;who=self;party=")
+        for _ in range(2):
+            st, a = say(pol, st, "kind=topic;also=none;st=complete;prod=;t=decline")
+        check(a["type"] == "close" and (a["outcome"], a["reason"]) == tuple(v["declined"]), f"{name}: two refusals -> declined: {a}")
+    return True
+
+
 if __name__ == "__main__":
+    print("identity chatter is not a refusal (clean-1 surface PUB-07):", identity_chatter())
     print("split identity answers (clean-1 surface PUB-06):", split_answers())
     print("rehearsal clean-1 PUB-07:", clean1_pub07())
     print("PUB-06 rep 3: no second floor offer:", pub06_rep3())

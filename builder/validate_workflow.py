@@ -29,6 +29,7 @@ validate(wf, rp, oas_path, unstable_quotes=()) -> list of problems (empty = pass
 20 honesty: no recorded/scheduled/transferred/saved/booked in the greet or any line spoken before a write succeeds
 21 the bank name appears once per sentence in composed self-descriptions (greet, system prompt, task messages)
 22 every {{x}} in a spoken tts text is a workflow variable or a declared call variable
+23 the saved line (recorded + text_message) has no greeting or recording disclosure and one saved claim
 """
 import argparse, json, os, re, sys
 
@@ -389,6 +390,14 @@ def validate(wf, rp, oas_path, unstable_quotes=()):
             for name in re.findall(r"\{\{\s*([A-Za-z0-9_.\-]+)\s*\}\}", str(oe.get("text", ""))):
                 if name not in tv:
                     errs.append(f"22: {k} speaks {{{{{name}}}}}, which is neither a workflow variable nor a declared call variable")
+    # 23 the saved line (recorded + text_message): no greeting or recording disclosure, one saved claim, no repeat
+    from builder.policy_bridge import _GREETING
+    sv = [str(((rp.get("sentences") or {}).get(k) or {}).get("text") or "") for k in ("recorded", "text_message")]
+    sents = [x.strip() for t in sv for x in re.split(r"(?<=[.!?])\s+", t) if x.strip()]
+    if any(_GREETING.search(x) for x in sents):
+        errs.append(f"23: the saved line has a greeting or a recording disclosure: {' '.join(sv)[:90]!r}")
+    if len([x for x in sents if HONESTY.search(x)]) > 1 or len(set(x.lower() for x in sents)) < len(sents):
+        errs.append(f"23: the saved line claims the save twice or repeats a sentence: {' '.join(sv)[:90]!r}")
     # 9 unstable unmapped
     # only where unmapped rules are compiled: the policy's unmapped_rules (reducer input) and the free-talk prompts.
     # (A short generic phrase like "Ask once more." can legitimately appear elsewhere, e.g. a fixed sentence.)

@@ -64,6 +64,7 @@ DOB_SPLIT = lambda c: ["kind=identity;also=none;st=complete;prod=;field=date_of_
 SCRIPTS["clean-1"] = {}      # the main clean-1 cases run on the platform; the surface live failures are replayed here
 SURFACE = {   # the surface siblings: the same events, with the turn the style changes
     ("clean-1", "PUB-06"): lambda c: [W] + DOB_SPLIT(c) + [PH(c), TOO, YES, YES],      # live e6d1cc28: DOB over two turns
+    ("clean-1", "PUB-07"): lambda c: [W, DOB(c)] + [OTHER] * 4 + [PH(c), NO, YES, YES],  # live d34d93ed: chatter at the phone question
     ("raw-2", "PUB-11"): lambda c: V(c) + [WD("mon", "all", "reject"), YES, YES],
     ("raw-2", "PUB-06"): lambda c: V(c) + [TOO, AMT("", "partial"), AMT("637.53"), YES, YES],
 }

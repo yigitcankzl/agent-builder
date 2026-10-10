@@ -39,7 +39,7 @@ TOPIC_CUES = {"change_promise": ("(change|cancel|modify)( or (change|cancel|modi
               "stop": ("not want to talk", "dont want to talk", "don t want to talk", "stop talking", "stop"),
               "decline": ("declines? to answer", "refuses? to answer", "won t answer", "declines? identity",
                           "refuses? (the )?security questions?", "declines? (the )?security questions?",
-                          "not want to answer", "refuses? identity", "decline"),
+                          "not want to answer", "refuses? identity", "identity refusal", "refusal to answer", "decline"),
               "purpose": ("purpose", "what (is )?(this|the call|call) is about", "what (this|the call) is about",
                           "why (are you )?calling", "asks why"),
               "injection": ("injection", "ignore instructions")}
@@ -180,7 +180,9 @@ CONTRACT_SENTENCES = {"change_in_app": "You can change it in the mobile app.",  
                       "farewell": "Thank you, goodbye.", "recorded": "Your promise is recorded."}
 # Generic instruction forms of a brief ("Say that you are ...", "Tell the customer to ...") -> the sentence they ask
 # for, by a fixed grammatical rewrite of the brief's own words (no new wording).
-DERIVE = {"debt_intro": (r"\bsay (?:that )?you are (calling (?:from|about) [^,;]+)", lambda m: "I am " + m.group(1)),
+DERIVE = {"debt_intro": (r"\bsay (?:that )?you are (calling (?:from|about) (?:(?!\band that\b)[^,;])+?(?:\b(?:late|overdue|payment|debt|"
+                          r"arrears|balance|collections?)\b[^,;]*)?)(?=[,;.]|\s+and that\b|$)",
+                          lambda m: "I am " + m.group(1) if re.search(r"\b(late|overdue|payment|debt|arrears|balance|collections?)\b", m.group(1), re.I) else ""),
           "id_fail": (r"\btell (?:the customer|the person|the policyholder|the caller|them) to (.+)$", lambda m: "Please " + m.group(1)),
           "change_in_app": (r"say (?:that )?they can (change .+)$", lambda m: "You can " + m.group(1)),
           # verbatim quoted questions in the brief (the words inside the quotes are kept exactly)
@@ -412,6 +414,34 @@ def honest_line(text):
     return (None, f"honesty word {m.group(1)!r} before any tool result") if m else (t, None)
 
 
+_GREETING = re.compile(r"\b(hello|hi|good (morning|afternoon|evening)|this is|my name is|i am (a|the|your) )\b|"
+                       r"\b(call|conversation)s? (is|are|will be|may be|is being) (being )?recorded\b|keep a recording", re.I)
+
+
+def saved_line(p):
+    """The line after a recorded promise is sentences.recorded + sentences.text_message. The brief's own saved
+    sentence REPLACES the contract default: a text_message sentence with an honesty word ('This arrangement is saved.')
+    moves into recorded; a recorded line that is a greeting or a recording disclosure is dropped. -> notes"""
+    sent = p.setdefault("sentences", {})
+    rec, tm = sent.get("recorded") or {}, sent.get("text_message") or {}
+    notes = []
+    if isinstance(rec, dict) and rec.get("text") and _GREETING.search(rec["text"]):
+        notes.append(f"sentence recorded {rec['text'][:60]!r} is a greeting/recording disclosure: contract default used")
+        sent["recorded"] = rec = {"text": CONTRACT_SENTENCES["recorded"], "verbatim": True, "max_times": 99, "source": DEFAULT}
+    if isinstance(tm, dict) and tm.get("text"):
+        parts = re.split(r"(?<=[.!?])\s+", tm["text"].strip())
+        own = [x for x in parts if HONESTY.search(x)]
+        rest = [x for x in parts if not HONESTY.search(x)]
+        if own:
+            default = not rec.get("text") or rec.get("source") == DEFAULT or rec.get("text") == CONTRACT_SENTENCES["recorded"]
+            if default:
+                sent["recorded"] = {"text": " ".join(own), "verbatim": True, "max_times": 99, "source": tm.get("source") or DEFAULT,
+                                    "split_from": "text_message"}
+                sent["text_message"] = dict(tm, text=" ".join(rest))
+                notes.append(f"saved line: the brief's own {' '.join(own)!r} replaces the contract default; text_message {' '.join(rest)!r}")
+    return notes
+
+
 def recording_hook(p, stable, hooks, unplaced):
     """The opening must carry the recording clause when the brief requires it: if no opening hook says it, a quote that
     puts 'the call is recorded' into the opening gives it (only the recording clause of that quote). -> note or None."""
@@ -488,7 +518,7 @@ def _oas_answer_text(oas_path):
 
 # ---- gap 3: floor and acceptance ------------------------------------------------------------------------------------
 FLOOR_KINDS = ("field", "percent", "fixed", "max_fixed_percent")
-ACCEPTANCE = ("floor_to_full", "full_only", "above_full_allowed")
+ACCEPTANCE = ("floor_to_full", "full_only", "full_or_floor", "above_full_allowed")
 
 
 def _num(x):
@@ -535,6 +565,19 @@ def floor_spec(v, acct_fields):
     else:
         return None, f"floor kind {kind!r} is not one of {FLOOR_KINDS}"
     return out, None
+
+
+def full_or_floor(am):
+    """'Accept only the full balance or exactly the floor / exactly N percent; any other amount is refused' -> the quote
+    or text that says it (else ''). Read from the brief's own amounts words, not guessed."""
+    texts = [str(am.get(k) or "") for k in ("accept_range", "below_floor", "too_much")]
+    texts += [str(q.get("quote") or "") for q in ((am.get("acceptance_evidence") or {}).get("source") or []) + (am.get("source") or [])
+              if isinstance(q, dict)]
+    for t in texts:
+        if re.search(r"\bexactly\b", t, re.I) and (re.search(r"\b(full|whole)\b", t, re.I) or re.search(r"\bany other amount\b", t, re.I)) \
+                and re.search(r"\b(only|any other amount|refused|not accepted)\b", t, re.I):
+            return t
+    return ""
 
 
 def too_much_date(am):
@@ -710,6 +753,109 @@ def placeholder_lint(p):
     return notes
 
 
+def _slug(t):
+    return re.sub(r"[^a-z0-9]+", "_", str(t).lower()).strip("_")[:30]
+
+
+def extra_topics(p, live):
+    """A situation the material names that is none of the contract topics, with a close the closing table carries
+    (e.g. 'a complaint closes <outcome> / <reason>') -> policy.extra_topics [{id, trigger, effect: close, outcome,
+    reason, quote}] for the ev prompt and the reducer. Without a binding close row it stays in unmapped_topics."""
+    out, notes = [], []
+    pairs = {(r.get("outcome"), r.get("reason") or None) for r in live}
+    for u in list(p.get("unmapped_topics") or []):
+        ev = next((e for e in p.get("_events_raw") or [] if e.get("topic") == u.get("topic")), {})
+        o, r = ev.get("outcome") or u.get("outcome"), ev.get("reason") or u.get("reason")
+        eff = str(ev.get("effect") or u.get("effect") or "")
+        immediate = re.search(r"\b(close|stop|end)\w*", eff, re.I) and not re.search(r"\b(second|twice|again|repeat\w*|after \w+ times)\b", eff, re.I)
+        if o and (o, r or None) in pairs and u.get("quote") and immediate:
+            m = re.search(r"\bif (?:the (?:customer|person|caller)|they)\s+(?:says?\s+(?:that\s+)?)?(?:they\s+)?(.+?)(?:[,.;]|$)", u["quote"], re.I)
+            trig = (m.group(1).strip() if m else str(u["topic"]))[:80]
+            out.append({"id": _slug(u["topic"]), "trigger": trig, "effect": "close", "outcome": o, "reason": r or None,
+                        "quote": u["quote"]})
+            u["action"] = f"extra topic: close {o}/{r}"
+            notes.append(f"extra topic {_slug(u['topic'])}: close {o}/{r} ({u['quote'][:60]!r})")
+    return out, notes
+
+
+def opening_checks(p):
+    """Yes/no questions after the name is confirmed (extraction opening_checks), kept only when the ask is the brief's
+    own words (verbatim in its quote) and on_no is third_party or close."""
+    out, notes = [], []
+    for c in p.get("opening_checks") or []:
+        ask = str((c or {}).get("ask") or "").strip()
+        qs = [str(x.get("quote") or "") for x in (c or {}).get("source") or [] if isinstance(x, dict)]
+        if ask and _norm(ask.strip('"')) in _norm(" ".join(qs)) and c.get("on_no") in ("third_party", "close"):
+            out.append({"ask": ask.strip('"'), "on_no": c["on_no"], "quote": qs[0] if qs else ""})
+        elif ask:
+            notes.append(f"opening check {ask[:60]!r} dropped (not the brief's words, or on_no {c.get('on_no')!r})")
+    return out, notes
+
+
+def third_party_ask(p, brief_text):
+    """The question to someone else on the line: the brief's 'Ask when <X> can be reached' -> 'When can <X> be
+    reached?' on the relative who-row when it has no say (else the reducer's default names a title)."""
+    rows = [w for w in p.get("who_rules") or [] if w.get("who") == "other" and w.get("party") in ("relative", "", None)]
+    if not rows or any(w.get("say") for w in rows):
+        return []
+    quotes = [str(x.get("quote") if isinstance(x, dict) else x) for w in rows for x in w.get("source") or []]
+    for line in quotes + str(brief_text or "").splitlines():
+        m = re.search(r"\bask when (an? |the )?([a-z][a-z ]{2,40}?) can be (reached|contacted|called)\b", line, re.I)
+        if m:
+            q = f"When can {(m.group(1) or '').lower()}{m.group(2)} be {m.group(3).lower()}?"
+            q = q[0].upper() + q[1:]
+            for w in rows:
+                w["say"], w["say_rewritten_from"] = q, line.strip()[:200]
+            return [f"third-party ask: {q!r} (from {line.strip()[:60]!r})"]
+    return []
+
+
+def identity_gate(p, brief_text):
+    """Fork 3's identity.gate {ask, on_no: 'callback' | {close: {outcome, reason}}, callback_ask?} from the first verified
+    opening check: on_no third_party -> 'callback' (callback_ask = the brief's 'ask when <X> can be reached' line when it
+    has one); on_no close -> the declined slot's close. None when the brief has no such question."""
+    checks = p.get("opening_checks") or []
+    if not checks:
+        return None
+    c = checks[0]
+    g = {"ask": c["ask"], "quote": c.get("quote", "")}
+    if c["on_no"] == "third_party":
+        g["on_no"] = "callback"
+        for line in str(brief_text or "").splitlines() + [str(c.get("quote") or "")]:
+            m = re.search(r"\bask when (an? |the )?([a-z][a-z ]{2,40}?) can be (reached|contacted|called)\b", line, re.I)
+            if m:
+                g["callback_ask"] = f"When can {(m.group(1) or '').lower()}{m.group(2)} be {m.group(3).lower()}?"
+                g["callback_ask"] = g["callback_ask"][0].upper() + g["callback_ask"][1:]
+                break
+    else:
+        sl = ((p.get("closing") or {}).get("slots") or {}).get("declined") or {}
+        if not sl.get("outcome"):
+            return None
+        g["on_no"] = {"close": {"outcome": sl["outcome"], "reason": sl.get("reason")}}
+    return g
+
+
+def bind_session_placeholders(p, brief_text):
+    """A placeholder in a spoken line that is not a declared call variable is bound to the session variable named by the
+    usual convention <x>_name (biz-1: {company} -> {company_name}) when the brief itself uses the word x; the variable
+    is added to meta.call_vars and noted as an assumption. Anything else is left for the placeholder lint (dropped)."""
+    cv = p.setdefault("meta", {}).setdefault("call_vars", {})
+    allowed = set(cv) | set(cv.values()) | set(CALL_ROLES)
+    texts = [v for v in (p.get("sentences") or {}).values() if isinstance(v, dict) and v.get("text")]
+    names = {m.group(1) for v in texts for m in _PH.finditer(v["text"]) if m.group(1) not in allowed}
+    notes = []
+    for x in sorted(names):
+        target = x if x.endswith("_name") else x + "_name"
+        if target in allowed or not re.search(r"\b" + re.escape(x.replace("_", " ")) + r"\b", str(brief_text or ""), re.I):
+            continue
+        cv[target] = target
+        allowed.add(target)
+        for v in texts:
+            v["text"] = re.sub(r"\{\{?\s*" + re.escape(x) + r"\s*\}?\}", "{" + target + "}", v["text"])
+        notes.append(f"ASSUMPTION: placeholder {{{x}}} bound to the session variable {target} (convention <x>_name; not declared by the brief)")
+    return notes
+
+
 def tool_status(p, oas_path):
     """{tool: {status: enabled|blocked|absent, why}}: a tool is blocked when the brief cannot call it with OAS values: identity
     blocked (verify_identity), a canonical write role with no OAS property, no queue that binds (transfer), no outcome
@@ -745,7 +891,8 @@ def _map_sentence_keys(p):
     sent, notes = p.setdefault("sentences", {}), []
     forms = [("confirm_who", lambda t: re.search(r"\{\w+\}", t) and t.rstrip().endswith("?")),
              ("pay_today", lambda t: t.rstrip().endswith("?") and re.search(r"\bpay\b", t, re.I) and re.search(r"\btoday\b", t, re.I)),
-             ("recorded", lambda t: not t.rstrip().endswith("?") and re.search(r"\b(recorded|saved|registered|logged)\b", t, re.I)),
+             ("recorded", lambda t: not t.rstrip().endswith("?") and re.search(r"\b(recorded|saved|registered|logged)\b", t, re.I)
+              and not re.search(r"\b(call|conversation)s? (is|are|will be|may be|is being) (being )?recorded\b", t, re.I)),
              ("text_message", lambda t: not t.rstrip().endswith("?") and re.search(r"confirm", t, re.I)
               and re.search(r"\b(text|sms|email|message|sent|send|receive)\b", t, re.I)),
              ("farewell", lambda t: re.search(r"\b(goodbye|bye)\b", t, re.I))]
@@ -779,6 +926,8 @@ def _derived_sentences(p, stable, brief_text=None):
                 m = re.search(pat, part.strip().strip('"'), re.I)
                 if m:
                     txt = fn(m).strip()
+                    if not txt:
+                        continue        # the pattern matched a rule that is not this sentence (e.g. the opening)
                     txt = txt if txt.endswith((".", "!", "?")) else txt + "."
                     sent[sid] = {"text": txt, "verbatim": False, "max_times": 99,
                                  "source": [{"file": "derived", "quote": q}]}
@@ -860,6 +1009,10 @@ def to_reducer(policy, oas_path, stable_unmapped=None, brief_text=None):
                          "action": f"block ({problem}; the floor is the full amount)"})
     prod["floor_by_type"] = floors
     am = p.setdefault("amounts", {})
+    fo = full_or_floor(am)
+    if fo and am.get("acceptance") != "full_or_floor":
+        notes.append(f"amounts.acceptance {am.get('acceptance')!r} -> full_or_floor (the brief's words: {fo[:80]!r})")
+        am["acceptance"] = "full_or_floor"
     tmd, tnote = too_much_date(am)
     am["too_much_date"] = tmd
     notes.append(tnote)
@@ -1018,6 +1171,7 @@ def to_reducer(policy, oas_path, stable_unmapped=None, brief_text=None):
     for tool, fact in missing:
         mism.append({"policy_path": f"tool_results.{tool}.{fact}", "value": fact, "field": f"{tool}.response", "oas_enum": None,
                      "action": "block (no unique OAS response field for this fact)"})
+    p["_events_raw"] = copy.deepcopy(p.get("events") or [])
     # ---- events onto the contract topics, brief order = precedence
     evs, who, unknown = [], [], []
     for ev in p.get("events") or []:
@@ -1167,6 +1321,7 @@ def to_reducer(policy, oas_path, stable_unmapped=None, brief_text=None):
             v["rewritten_from"], v["text"] = v["text"], txt
             hnotes.append(f"sentence {sid}: honesty rewrite -> {txt!r}")
     p["hooks"], p["unplaced_hooks"] = hooks, unplaced
+    hnotes += saved_line(p)
     notes += hnotes + [f"hook {u['id']} UNPLACED ({u['why']}): {u['quote'][:80]!r}" for u in unplaced]
     words =[x.lower() for x in (p.get("honesty_words") or {}).get("words") or []]
     if words and not any(x in DEFAULT_HONESTY for x in words):
@@ -1180,7 +1335,22 @@ def to_reducer(policy, oas_path, stable_unmapped=None, brief_text=None):
     p["unmapped_rules"] = [{k: u.get(k) for k in ("rule_id", "quote", "file", "phase_guess", "kind_guess")} for u in (stable_unmapped or [])]
     p.pop("unmapped", None)
     p["api_mismatch"] = mism
+    p["extra_topics"], xnotes = extra_topics(p, live)
+    notes += xnotes
+    p.pop("_events_raw", None)
+    p["opening_checks"], onotes = opening_checks(p)
+    notes += onotes
+    notes += third_party_ask(p, brief_text)
+    gate = identity_gate(p, brief_text)
+    if gate:
+        p.setdefault("identity", {})["gate"] = gate
+        notes.append(f"identity.gate: {gate['ask']!r}, on no {gate['on_no']!r}")
     p["tool_status"] = tool_status(p, oas_path)
+    notes += bind_session_placeholders(p, brief_text)
+    if re.search(r"\b(do not|don't|never)\s+(say|mention|disclose|reveal|tell)\w*\s+(that\s+)?(you are|it is|you're)\s+(an?\s+)?"
+                 r"(ai|assistant|digital assistant|bot|robot|automated|virtual)", str(brief_text or ""), re.I):
+        p.setdefault("meta", {})["assistant_disclosure_forbidden"] = True
+        notes.append("the brief forbids saying the agent is an assistant: the greet adds no disclosure")
     notes += placeholder_lint(p)
     notes += [f"tool {t} BLOCKED: {v['why']}" for t, v in p["tool_status"].items() if v["status"] == "blocked"]
     report = {"api_mismatch": mism, "notes": notes, "errors": validate(p),

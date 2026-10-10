@@ -142,7 +142,9 @@ def _assumptions(rp, brep, result):
 def _save(freya_client, slot, wf, out_dir, trace, result, candidate):
     """The ONE save of a build (main or L3 candidate): save_workflow + export, traced."""
     if freya_client is None:
-        trace.log("save", skipped=True, candidate=candidate, note="no Freya client (--no-save)")
+        os.makedirs(out_dir, exist_ok=True)       # the validated workflow is still written locally
+        json.dump(wf, open(os.path.join(out_dir, f"{slot}.workflow.json"), "w"), indent=1)
+        trace.log("save", skipped=True, candidate=candidate, note="no Freya client (--no-save); workflow written locally")
         return
     ids = freya_client.save_workflow(slot, wf)
     path = freya_client.export_workflow(ids["workflow_id"], os.path.join(out_dir, f"{slot}.workflow.json"))

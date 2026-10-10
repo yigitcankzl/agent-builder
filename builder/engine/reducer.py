@@ -1566,8 +1566,8 @@ def loop_break(policy, st, today, cv):
             return transfer(policy, st, 'human', cv)
         if st['who'] == 'other' or q == 'callback_time':
             o, r = v['callback_failed']
-        elif st['who'] == 'self' and q.startswith('id_'):
-            o, r = v['declined']
+        elif st['who'] == 'self' and q.startswith('id_') and st['identity'].get('refusals', 0) >= 1:
+            o, r = v['declined']        # declined only after an explicit refusal; no answer at all is unclear
         else:
             o, r = v['unclear']
         return do_close(policy, st, o, r, D_FAREWELL)
@@ -2020,7 +2020,27 @@ def identity(policy, st, ev, today, cv):
         return topic_event(policy, st, ev, today, cv)
     if k == 'no':
         return topic_event(policy, st, dict(ev, kind='topic', t='decline'), today, cv) if st['q'].startswith('id_') else resay(st)
+    if str(st.get('q') or '').startswith('id_'):     # chatter or a garbled turn: never a refusal (clean-1 surface PUB-07)
+        return id_reask(policy, st)
     return resay(st)
+
+
+ID_OTHER_CAP = 6     # DEFAULT hard cap: this many turns with no answer to a security question, then the unclear slot
+
+
+def id_reask(policy, st):
+    """The open security question again, worded two ways in turn (no tts loop), counted on its own cap; at the cap the
+    unclear slot (no refusal was said)."""
+    st['_id_other'] = st.get('_id_other', 0) + 1
+    if st['_id_other'] > ID_OTHER_CAP:
+        o, r = V(policy)['unclear']
+        return do_close(policy, st, o, r, D_FAREWELL)
+    idt, qs = st['identity'], (policy.get('identity') or dict()).get('questions') or []
+    q = (qs[idt['idx']].get('ask') if idt['idx'] < len(qs) else '') or D_SAFE
+    return ask(st, (D_NOT_CAUGHT + ' ' + q) if st['_id_other'] % 2 else q, st['q'])
+
+
+D_NOT_CAUGHT = "Sorry, I didn't catch that."
 
 
 # ---------------------------------------------------------------- event parsing (the hub reads `ev`)

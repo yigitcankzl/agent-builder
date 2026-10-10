@@ -1,0 +1,25 @@
+"""Print the rule-relevant fields of the rehearsal policies (tests/generated/rehearsal/<brief>/<brief>.policy.json)."""
+import json, os, sys
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+for name in sys.argv[1:] or ["nightmare-1", "raw-2", "biz-1"]:
+    d = os.path.join(ROOT, "tests", "generated", "rehearsal", name)
+    rp = json.load(open(os.path.join(d, name + ".policy.json")))
+    q = lambda node: [s.get("quote")[:110] for s in (node or {}).get("source") or [] if isinstance(s, dict) and s.get("quote")][:3]
+    print("=" * 30, name)
+    print("deadline:", rp["deadline"].get("rule"), [(b["name"], b.get("min_days_late"), b.get("max_days_late"), b["days"], b.get("attempts")) for b in rp["deadline"]["bands"]], q(rp["deadline"]))
+    print("business_days:", rp["business_days"].get("weekdays"), rp["business_days"].get("holidays"))
+    print("floor:", {t: {k: v for k, v in f.items() if k != "source"} for t, f in rp["products"]["floor_by_type"].items()})
+    print("amounts:", {k: rp["amounts"].get(k) for k in ("acceptance", "too_much_date", "too_much", "accept_range")})
+    print("callback:", {k: v for k, v in ((rp.get("writes") or {}).get("callback") or {}).items() if k != "source"})
+    print("identity:", [(x["field"], x.get("format"), x.get("ask")) for x in rp["identity"]["questions"]], "max_wrong", rp["identity"].get("max_wrong"), "blocked", rp["identity"].get("blocked"))
+    print("closing:", sorted(((r["outcome"], r.get("reason")) for r in rp["closing"]["table"]), key=str))
+    print("aliases:", [(a.get("field"), a.get("brief_value"), a.get("api_value")) for a in rp.get("aliases") or []])
+    print("superseded:", [(s_.get("rule"), s_.get("new_value")) for s_ in rp.get("superseded") or []][:8])
+    print("events:", [(e["topic"], e.get("outcome"), e.get("reason")) for e in rp["events"]])
+    print("who:", [(w.get("who"), w.get("party"), w.get("outcome"), w.get("reason")) for w in rp.get("who_rules") or []])
+    print("unmapped_topics:", rp.get("unmapped_topics"))
+    print("hooks:", [(h["point"], h["text"][:80]) for h in rp.get("hooks") or []])
+    print("unplaced:", [u["quote"][:90] for u in rp.get("unplaced_hooks") or []][:6])
+    print("unmapped_rules:", [u.get("quote", "")[:100] for u in rp.get("unmapped_rules") or []][:12])
+    print("sentences:", {k: v.get("text") for k, v in rp["sentences"].items() if v.get("text")})
+    print("date_rules:", {k: v["action"] for k, v in rp["date_rules"].items()})

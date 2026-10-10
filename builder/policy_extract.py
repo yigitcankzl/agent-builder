@@ -52,7 +52,7 @@ Use {"file": "default", "quote": ""} ONLY when the material says nothing at all 
               "no_repeat_refused_offer": {"value": bool, "source": Q},
               "stop_when_exhausted": {"value": bool, "source": Q}},
  "amounts": {"first_ask": str, "too_much": str, "accept_range": str, "below_floor": str,
-             "acceptance": "floor_to_full" | "full_only" | "above_full_allowed" | {"kind": "min_x", "min": number},
+             "acceptance": "floor_to_full" | "full_only" | "full_or_floor" | "above_full_allowed" | {"kind": "min_x", "min": number},
              "acceptance_evidence": {"source": Q},
              "too_much_date": "deadline" | "today" | "offer",
              "too_much_date_evidence": {"source": Q}, "source": Q},
@@ -96,6 +96,11 @@ Use {"file": "default", "quote": ""} ONLY when the material says nothing at all 
             "expects_answer": bool, "source": Q}],
      <- every rule that makes the agent SAY, TELL, INFORM, WARN, REMIND or DISCLOSE something (one entry per rule,
         source = that rule's exact quote). See rule 15.
+ "opening_checks": [{"ask": "<the exact yes/no question asked after the person confirms their name>",
+                     "on_no": "third_party" | "close", "source": Q}],
+     <- questions the material makes the agent ask right after the name is confirmed and before the security
+        questions (e.g. whether they are authorised to discuss the account); on_no third_party = treat them as someone
+        else (callback path), close = close the call. [] when there is none.
  "aliases": [{"field": "<tool>.<field>", "brief_value": "<the material's own code or word>", "api_value": "<tool API value>",
               "source": Q}],   <- every explicit mapping the material states (e.g. one row of a code list)
  "superseded": [{"rule": "<policy path>", "old_value": any, "new_value": any, "winner_file": str, "loser_file": str,
@@ -162,6 +167,7 @@ Rules:
     past-due amount; fixed = a fixed amount; max_fixed_percent = the larger of a fixed amount and a percent. rounding
     (round, to) only when the material says how the floor is rounded. amounts.acceptance: floor_to_full = any
     amount from the floor up to the full amount; full_only = only the full past-due amount (no partial payment);
+    full_or_floor = ONLY the full amount or exactly the floor (any other amount refused);
     min_x = any amount from `min` up to the full amount; above_full_allowed = amounts above the past-due amount may be
     recorded. date_rules: for each situation, what the material does with a date the customer names: move it to the
     next business day, offer the deadline, or refuse it. today_not_allowed applies only when today cannot be

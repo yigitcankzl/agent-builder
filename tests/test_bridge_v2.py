@@ -329,13 +329,69 @@ def too_much():
     check(rp["amounts"]["too_much_date"] == "offer", "brief A bridged -> offer (PUB-06 stays on the offer's day)")
 
 
+def rehearsal():
+    print("== rehearsal misreads (nightmare-1, raw-2, biz-1)")
+    p = copy.deepcopy(BASE)
+    p["sentences"] = dict(p.get("sentences") or {}, opening={"text": "This is the bank. This call is recorded.", "source": src("x")})
+    p["sentences"].pop("recorded", None)
+    rp, _ = B.to_reducer(p, OAS, [])
+    check("call" not in rp["sentences"]["recorded"]["text"], f"the call-recording opening is not the 'recorded' line: {rp['sentences']['recorded']['text']!r}")
+    import re as _re
+    pat, fn = B.DERIVE["debt_intro"]
+    m = _re.search(pat, "First sentence: say you are calling from Sable Mutual, and that the call is recorded.", _re.I)
+    check(not m or not fn(m), f"the opening rule is not a debt intro: {fn(m) if m else None!r}")
+    m = _re.search(pat, "Say that you are calling from the collections team about a late payment.", _re.I)
+    check(m and fn(m).rstrip(".") == "I am calling from the collections team about a late payment", "a real debt intro still derives")
+    check(B.full_or_floor({"accept_range": "only the full balance or exactly the floor"}) and
+          B.full_or_floor({"accept_range": "the full past-due amount, or exactly 50 percent of past_due; any other amount below the full balance is refused"}),
+          "'only full or exactly the floor / N percent' -> full_or_floor")
+    check(not B.full_or_floor({"accept_range": "from the floor up to the full past-due amount, both included"}), "a range stays floor_to_full")
+    p = copy.deepcopy(BASE)
+    p["events"] = list(p.get("events") or []) + [{"topic": "complaint", "outcome": "no_promise", "reason": "dispute", "effect": "stop and close",
+                                                  "source": src("If the customer wants to make a complaint, stop.")}]
+    rp, _ = B.to_reducer(p, OAS, [])
+    check([x["id"] for x in rp["extra_topics"]] == ["complaint"] and rp["extra_topics"][0]["outcome"] == "no_promise",
+          f"an extra situation with a bound immediate close -> extra_topics: {rp['extra_topics']}")
+    p["events"][-1]["effect"] = "explain once; a second time closes"
+    rp, _ = B.to_reducer(p, OAS, [])
+    check(not rp["extra_topics"], "a close only on a second time is not an immediate extra-topic close")
+    p = copy.deepcopy(BASE)
+    p["opening_checks"] = [{"ask": "Are you authorised to discuss this account?", "on_no": "third_party",
+                            "source": src('When they say they are that person, ask "Are you authorised to discuss this account?"')},
+                           {"ask": "Is now a good time?", "on_no": "close", "source": src("Something else entirely.")}]
+    rp, _ = B.to_reducer(p, OAS, [])
+    check([c["ask"] for c in rp["opening_checks"]] == ["Are you authorised to discuss this account?"], "opening checks: only the brief's own words")
+    p = copy.deepcopy(BASE)
+    p["opening_situations"] = dict(p.get("opening_situations") or {}, wrong_person={"present": True, "effect": "callback", "outcome": "not_reached",
+                                   "reason": "callback", "say": "", "source": src("A colleague answers.")})
+    rp, _ = B.to_reducer(p, OAS, [], "4. A colleague: do not take security answers. Ask when an authorised person can be reached.")
+    rel = [w for w in rp["who_rules"] if w.get("party") == "relative"]
+    check(rel and rel[0]["say"] == "When can an authorised person be reached?", f"third-party ask from the brief: {rel and rel[0].get('say')}")
+
+
+def assistant_disclosure():
+    print("== the greet says the agent is an assistant unless the brief forbids it")
+    p = copy.deepcopy(BASE)
+    p["sentences"] = dict(p.get("sentences") or {}, opening={"text": "This is Oak Bank. This call is recorded.", "source": src("x")})
+    p["meta"] = dict(p.get("meta") or {}, bank_name="Oak Bank", agent_self_description="Oak Bank")
+    rp, _ = B.to_reducer(p, OAS, [])
+    g = generate(rp, OAS)["nodes"]["greet"]["on_enter"]["text"]
+    check(g.startswith("This is Oak Bank.") and "I am a digital assistant." in g, f"disclosure added after the brief's opening: {g!r}")
+    rp, _ = B.to_reducer(p, OAS, [], '1. First sentence: "This is Oak Bank." Do not say that you are an AI or an assistant.')
+    g = generate(rp, OAS)["nodes"]["greet"]["on_enter"]["text"]
+    check("assistant" not in g, f"a brief that forbids it gets no disclosure: {g!r}")
+    rp, _ = bridged()
+    g = generate(rp, OAS)["nodes"]["greet"]["on_enter"]["text"]
+    check(g.count("assistant") == 1, f"an opening that already says it is not changed: {g!r}")
+
+
 def gap2_exact():
     q = {"field": "postcode", "format": "postcode", "format_evidence": {"source": src("Send the postcode exactly as said, letters and digits.")}}
     check(B.answer_format(q)[0] == "free", "'exactly as said' wins over the postcode format -> free")
 
 
 if __name__ == "__main__":
-    for g in (gap1, gap2, gap2_exact, gap3, gap4, regressions, derive_fixes, integration_fixes, honesty, bank_names, placeholders, too_much):
+    for g in (gap1, gap2, gap2_exact, gap3, gap4, regressions, derive_fixes, integration_fixes, honesty, bank_names, placeholders, too_much, rehearsal, assistant_disclosure):
         g()
     print("RESULT:", "PASS" if not fails else f"FAIL ({len(fails)})")
     sys.exit(1 if fails else 0)
