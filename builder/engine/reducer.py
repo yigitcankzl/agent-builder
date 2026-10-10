@@ -99,8 +99,10 @@ def brief_sentence(policy, key, default=''):
 def fill_names(text, vars_):
     out = str(text or '')
     for k, v in (vars_ or dict()).items():
-        out = out.replace('{' + k + '}', str(v))
-    return out
+        if v not in (None, ''):
+            out = out.replace('{' + k + '}', str(v))
+    out = re.sub(r'\{[a-z_]+\}', '', out)      # a call variable the session did not send (biz-1: no title) is left out
+    return re.sub(r'\s+([?.,!])', r'\1', re.sub(r'\s{2,}', ' ', out)).strip()
 
 
 def name_question(policy, cv):
@@ -1750,8 +1752,38 @@ def on_user(policy, st, ev, today, cv):
     return dict(type='speak_free', node=_talk_node(st), hint=reask_line(st) if st.get('_last_ask') else '')
 
 
+def gate_spec(policy):
+    g = (policy.get('identity') or dict()).get('gate')
+    return g if isinstance(g, dict) and str(g.get('ask') or '').strip() else None
+
+
+def gate_answer(policy, st, ev, today, cv):
+    """identity.gate (biz-1 rules 3-4: 'Are you authorised to discuss this account?'): a yes opens the security
+    questions; a no takes on_no ('callback': ask when an authorised person can be reached, nothing disclosed;
+    {close: {outcome, reason}}: close); anything else asks again (counted, loop cap)."""
+    k = ev.get('kind')
+    if k in ('yes', 'accept') or (k == 'who' and ev.get('who') == 'self'):
+        st['_gate_ok'], st['q'] = True, 'none'
+        return opening(policy, st, dict(kind='who', who='self', party=''), today, cv)
+    if k in ('no', 'reject') or (k == 'topic' and ev.get('t') == 'decline') or (k == 'who' and ev.get('who') == 'other'):
+        on_no = gate_spec(policy).get('on_no') or 'callback'
+        if isinstance(on_no, dict) and isinstance(on_no.get('close'), dict) and _none(on_no['close'].get('outcome')):
+            return do_close(policy, st, _none(on_no['close'].get('outcome')), _none(on_no['close'].get('reason')), D_FAREWELL)
+        st['who'], st['phase'] = 'other', 'third_party'
+        return ask(st, fill_names(str(gate_spec(policy).get('callback_ask') or D_REACH_AUTH), cv), 'callback_time')
+    if k == 'callback':
+        st['who'], st['phase'] = 'other', 'third_party'
+        return third_party(policy, st, ev, today, cv)
+    return resay(st)
+
+
+D_REACH_AUTH = 'Could you tell me when an authorised person can be reached?'
+
+
 def opening(policy, st, ev, today, cv):
     k, who = ev.get('kind'), ev.get('who')
+    if st.get('q') == 'gate':
+        return gate_answer(policy, st, ev, today, cv)
     if k == 'callback' and who in (None, '', 'self'):
         return self_callback(policy, st, ev, today, cv)
     if k == 'yes':
@@ -1763,6 +1795,9 @@ def opening(policy, st, ev, today, cv):
     if k != 'who' and who is None:
         return reask_name(policy, st, cv)    # an identity answer or anything else never confirms the name (rule 3)
     party = ev.get('party') or ''
+    if who == 'self' and gate_spec(policy) and not st.get('_gate_ok'):
+        st['who'] = 'self'
+        return ask(st, fill_names(str(gate_spec(policy)['ask']).strip(), cv), 'gate')   # before any security question
     if who == 'self':
         st['who'], st['phase'] = 'self', 'identity'
         idp = policy.get('identity') or dict()

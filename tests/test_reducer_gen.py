@@ -515,7 +515,34 @@ def rehearsal_rules():
     return True
 
 
+# ---------------------------------------------------------------- identity gate (biz-1 rules 3-4)
+def identity_gate():
+    pol = copy.deepcopy(POL["A"])
+    pol["identity"]["gate"] = dict(ask="Are you authorised to discuss this account?", on_no="callback")
+    st = R.init_state(pol, CV)
+    st, a = say(pol, st, "kind=who;also=none;st=complete;prod=;who=self;party=")
+    check(a["text"] == "Are you authorised to discuss this account?" and st["q"] == "gate", f"gate first: {a}")
+    st2, a2 = say(pol, R.json.loads(R.json.dumps(st)), "kind=other;also=none;st=none;prod=")
+    check(a2["type"] == "say_exact" and "authorised" in a2["text"] and st2["q"] == "gate", f"gate re-asked: {a2}")
+    y, a = say(pol, R.json.loads(R.json.dumps(st)), "kind=yes;also=none;st=complete;prod=")
+    check(y["q"].startswith("id_") and "birth" in a["text"], f"yes -> the first security question: {a}")
+    n_, a = say(pol, R.json.loads(R.json.dumps(st)), "kind=no;also=none;st=complete;prod=")
+    check(n_["phase"] == "third_party" and "authorised person" in a["text"] and "540" not in a["text"], f"no -> when can an authorised person be reached: {a}")
+    n_, a = say(pol, n_, "kind=callback;also=none;st=complete;prod=;rel=tomorrow;d=;m=;wd=;wk=none;vague=no;tm=12:00")
+    check(a["type"] == "call_tool" and a["tool"] == "schedule_callback" and a["args"]["time"] == "12:00", f"callback booked: {a}")
+    pol["identity"]["gate"]["on_no"] = dict(close=dict(outcome="not_verified", reason="declined"))
+    st = R.init_state(pol, CV)
+    st, a = say(pol, st, "kind=who;also=none;st=complete;prod=;who=self;party=")
+    st, a = say(pol, st, "kind=no;also=none;st=complete;prod=")
+    check(a["type"] == "close" and (a["outcome"], a["reason"]) == ("not_verified", "declined"), f"on_no close: {a}")
+    st = R.init_state(POL["A"], CV)        # absent: unchanged
+    st, a = say(POL["A"], st, "kind=who;also=none;st=complete;prod=;who=self;party=")
+    check(st["q"].startswith("id_"), f"no gate: unchanged: {a}")
+    return True
+
+
 if __name__ == "__main__":
+    print("identity gate:", identity_gate())
     print("rehearsal rule types:", rehearsal_rules())
     print("flat renamed item paths:", flat_item_paths())
     print("per-answer flag only:", per_answer_only())
