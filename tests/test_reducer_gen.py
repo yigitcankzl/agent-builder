@@ -441,7 +441,29 @@ def per_answer_only():
     return True
 
 
+# ---------------------------------------------------------------- flat renamed item paths (binding assist, cc4542b)
+def flat_item_paths():
+    """get_account rows whose fields carry other names, bound by flat item paths (item.age, item.outstanding): days_late,
+    past_due, the floor, type and id all come through the paths, so the band, deadline and attempt cap are right."""
+    pol = copy.deepcopy(POL["A"])
+    pol["tool_results"] = dict(pol.get("tool_results") or {})
+    pol["tool_results"]["get_account"] = dict(ok="data.ok", products="data.products", id="item.pid", type="item.kind",
+                                              past_due="item.outstanding", days_late="item.age",
+                                              **{"floor.personal_loan": "item.inst"})
+    row = dict(pid="p1", kind="personal_loan", outstanding=900.0, age=20, inst=300.0)   # only the renamed fields
+    st, a = to_statement(pol, [row])
+    pd = st["_pd"][0]
+    ref = R.init_state(POL["A"], CV)
+    R.load_products(POL["A"], ref, [dict(product_id="p1", type="personal_loan", past_due=900.0, days_late=20, instalment_amount=300.0)], R._d(NOW))
+    want = ref["_pd"][0]
+    for k in ("days_late", "band", "deadline", "past_due", "floor", "plan", "name"):
+        check(pd[k] == want[k], f"flat item path: {k} {pd[k]!r} != {want[k]!r}")
+    check(st["products"][0]["id"] == "p1" and "20 days late" in a["text"] and "900.00" in a["text"], f"statement: {a}")
+    return True
+
+
 if __name__ == "__main__":
+    print("flat renamed item paths:", flat_item_paths())
     print("per-answer flag only:", per_answer_only())
     print("mixed verified + composed fields:", mixed_verified_and_composed())
     print("verified_value + amount_scale:", status_and_scale())
