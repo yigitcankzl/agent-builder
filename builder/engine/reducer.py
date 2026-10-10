@@ -34,6 +34,8 @@ D_HINT_MONTH = 'Could you say the month as a word, please?'
 D_HELP_FIRST = 'Can I help you with this first?'
 D_ASK_TIME = 'At what time could I reach them?'
 D_ALL_TODAY = 'Can you pay all of them today?'
+D_PROTECT = 'These questions protect your account.'
+D_REACH = 'When can I reach {title} {last_name}?'
 D_OVERDUE = 'The rest stays overdue.'
 COUNTERS = ['confirm_name', 'clarify', 'vague', 'stop_talking', 'human_asks', 'decline_explain', 'support_offered']
 TOOL_NODE = dict(verify_identity='t_verify_identity', get_account='t_get_account', create_promise='t_create_promise',
@@ -51,11 +53,7 @@ def _none(x):
 
 
 def money(x):
-    x = float(x)
-    if abs(x - round(x)) < 0.005:
-        return str(int(round(x)))
-    s = ('%.2f' % x).rstrip('0').rstrip('.')
-    return s
+    return '%.2f' % float(x)
 
 
 def iso(d):
@@ -90,7 +88,12 @@ def name_question(policy, cv):
 
 
 def pay_today_question(policy):
-    return sentence(policy, 'pay_today') or sentence(policy, 'ask_today') or 'Can you make this payment today?'
+    return sentence(policy, 'pay_today') or sentence(policy, 'ask_today') or sentence(policy, 'first_ask') or \
+        'Can you make this payment today?'
+
+
+def farewell(policy):
+    return sentence(policy, 'farewell') or sentence(policy, 'goodbye') or D_FAREWELL
 
 
 def unmapped_say(policy, pattern, transform):
@@ -135,6 +138,10 @@ def who_row(policy, who, reason=None):
     return rows[0] if rows else None
 
 
+def party_row(policy, party):
+    return next((w for w in policy.get('who_rules') or [] if w.get('party') == party), None)
+
+
 def slot(policy, name):
     s = ((policy.get('closing') or dict()).get('slots') or dict()).get(name)
     if isinstance(s, dict):
@@ -156,9 +163,15 @@ def vocab(policy):
         log.append('slot unclear missing: hangup_default.before_who')
     declined = slot(policy, 'declined')
 
-    def pick(label, value):
+    table = (policy.get('closing') or dict()).get('table') or []
+
+    def pick(label, value, key=None):
         if value and value[0]:
             return value
+        row = next((r for r in table if key and _none(r.get('reason')) == key and _none(r.get('outcome'))), None)
+        if row:   # the closing-table row named by the contract key
+            log.append(label + ' missing: closing row ' + key + ' used')
+            return pair(row)
         log.append(label + ' missing: unclear slot used')
         return unclear
     hard = rows('hardship')
@@ -172,9 +185,9 @@ def vocab(policy):
                id_failed=pick('slot id_failed', slot(policy, 'id_failed')),
                callback_failed=pick('slot callback_failed', slot(policy, 'callback_failed')),
                write_failed=pick('slot write_failed', slot(policy, 'write_failed')),
-               refused=pick('events stop (after verification)', pair(stop_after)),
-               hardship=pick('events hardship (declined)', pair(hard_decline)),
-               dispute=pick('events dispute', pair(dispute_row)),
+               refused=pick('events stop (after verification)', pair(stop_after), 'refused'),
+               hardship=pick('events hardship (declined)', pair(hard_decline), 'hardship'),
+               dispute=pick('events dispute', pair(dispute_row), 'dispute'),
                paid=pick('events paid', (pair(paid_row)[0], None)))
     out['xfer'] = dict(restructuring=pick('events restructure', pair((rows('restructure') or [None])[0])),
                        human=pick('events human', pair((rows('human') or [None])[0])),
@@ -187,17 +200,18 @@ def vocab(policy):
     # the promise outcome: the closing-table row that no event, who rule or slot uses and whose "when" names a promise
     used = set(x[0] for x in (out['refused'], out['hardship'], out['dispute'], out['paid'], unclear, out['declined'],
                               out['id_failed']) if x[0]) | set(v[0] for v in out['xfer'].values() if v[0])
-    prom = None
-    for r in (policy.get('closing') or dict()).get('table') or []:
-        if _none(r.get('outcome')) not in used and re.search(r'promise', str(r.get('when') or ''), re.I):
-            prom = _none(r.get('outcome'))
-            break
+    prom = slot(policy, 'promise')[0]
+    if not prom:   # the reason-less closing-table row that no event, who rule or slot uses
+        for r in (policy.get('closing') or dict()).get('table') or []:
+            if _none(r.get('outcome')) and _none(r.get('outcome')) not in used and not _none(r.get('reason')):
+                prom = _none(r.get('outcome'))
+                break
     if not prom:
         log.append('promise outcome missing: unclear slot used')
         prom = unclear[0]
     out['promise'] = (prom, None)
-    others = [w for w in policy.get('who_rules') or [] if w.get('who') == 'other']
-    cb_ok = next((w for w in others if pair(w) != out['callback_failed']), others[0] if others else None)
+    others = [w for w in policy.get('who_rules') or [] if w.get('who') == 'other' and w.get('party', 'relative') in ('relative', '', None)]
+    cb_ok = next((w for w in others if pair(w) != out['callback_failed'] and pair(w)[0]), others[0] if others else None)
     out['callback'] = pick('who_rules other (callback)', pair(cb_ok))
     out['callback_say'] = (cb_ok or dict()).get('say') or ''
     cb_no = next((w for w in policy.get('who_rules') or [] if pair(w) == out['callback_failed']), None)
@@ -215,8 +229,8 @@ def V(policy):
     return _VC[k]
 
 
-def close_action(outcome, reason, farewell):
-    return dict(type='close', outcome=outcome, reason=_none(reason), farewell=(farewell or D_FAREWELL).strip())
+def close_action(outcome, reason, text):
+    return dict(type='close', outcome=outcome, reason=_none(reason), farewell=(text or D_FAREWELL).strip())
 
 
 # ---------------------------------------------------------------- state
@@ -280,20 +294,42 @@ def _account_rows(tool_event):
         except Exception:
             data = None
     if isinstance(data, dict):
-        data = data.get('products', data.get('data'))
+        lists = [v for v in data.values() if isinstance(v, list)]
+        data = data.get('products', data.get('data')) or (lists[0] if lists else data)
     if isinstance(data, str):
         try:
             data = json.loads(data)
         except Exception:
             data = None
     if isinstance(data, dict):
-        data = data.get('products')
+        lists = [v for v in data.values() if isinstance(v, list)]
+        data = data.get('products') or (lists[0] if lists else None)
     return [r for r in (data or []) if isinstance(r, dict)]
+
+
+def pfield(policy, role):
+    """Account-row field name for a contract role (id, type, past_due, days_late) from policy.products.fields."""
+    return ((policy.get('products') or dict()).get('fields') or dict()).get(role) or \
+        dict(id='product_id').get(role, role)
 
 
 def load_products(policy, st, rows, today):
     st['products'], st['_pd'] = [], []
-    for r in rows:
+    fid, ftype, fdue, flate = (pfield(policy, k) for k in ('id', 'type', 'past_due', 'days_late'))
+    def get(row, name, role):
+        if name in row:
+            return row[name]
+        default = dict(id='product_id').get(role, role)       # the bridge named a field the row does not have
+        if default in row:
+            return row[default]
+        if role == 'id':
+            ids = [k for k in row if str(k).endswith('_id')]
+            return row[ids[0]] if len(ids) == 1 else None
+        return None
+    for r0 in rows:
+        r = dict(r0)
+        r['product_id'], r['type'] = get(r0, fid, 'id'), get(r0, ftype, 'type')
+        r['past_due'], r['days_late'] = get(r0, fdue, 'past_due'), get(r0, flate, 'days_late')
         dl = int(float(r.get('days_late') or 0))
         band = _band(policy, dl)
         dline = deadline_for(today, dl, policy)
@@ -349,7 +385,8 @@ def readback_line(policy, st, items, clamped):
         if it['product_id'] in clamped:
             s += ', the latest date I can record for it'
         parts.append(s)
-    return 'To confirm, ' + '; '.join(parts) + '. ' + sentence(policy, 'confirm', 'Do you confirm?')
+    conf = sentence(policy, 'confirm') or sentence(policy, 'readback_confirm') or sentence(policy, 'confirm_readback') or 'Do you confirm?'
+    return 'To confirm, ' + '; '.join(parts) + '. ' + conf
 
 
 def ask(st, text, q):
@@ -415,12 +452,14 @@ def fallback_outcome(policy):
     return v['refused'] if v['refused'][0] else v['unclear']
 
 
-def do_close(policy, st, outcome, reason, farewell):
+def do_close(policy, st, outcome, reason, text):
+    fw = farewell(policy)
+    text = (text or D_FAREWELL).replace(D_FAREWELL, fw)      # the brief's goodbye wherever the contract default stood
     if not outcome:
         outcome, reason = fallback_outcome(policy)
     st['phase'], st['q'], st['outcome'], st['reason'] = 'closed', 'none', outcome, _none(reason)
     st['offer'] = None
-    return close_action(outcome, reason, farewell)
+    return close_action(outcome, reason, text)
 
 
 # ---------------------------------------------------------------- tools
@@ -484,6 +523,9 @@ def step(policy, st, event, tool_event, now, call_vars=None):
             act = dict(type='speak_free', node=_talk_node(st), hint='Answer briefly, then ask again: ' + (st.get('_last_ask') or ''))
     else:
         st['_said_n'], st['_said_last'] = 0, None
+    if act.get('type') == 'call_tool':   # canonical argument roles -> the brief's OAS body fields (bridge tool_args)
+        ta = (policy.get('tool_args') or dict()).get(act['tool']) or dict()
+        act = dict(act, args=dict((ta.get(k) or k, v) for k, v in (act.get('args') or dict()).items()))
     update_hangup(policy, st)
     return st, act
 
@@ -631,7 +673,12 @@ def next_write(policy, st, cv):
     if any(p['status'] == 'persisted' for p in st['products']):
         st['_wrapup_said'] = True
         st['q'] = 'none'
-        text = D_RECORDED + ' ' + sentence(policy, 'sms_confirmation')
+        sms = sentence(policy, 'text_message') or sentence(policy, 'sms_confirmation')
+        rec = sentence(policy, 'recorded') or sentence(policy, 'saved')
+        if not rec:
+            words = ((policy.get('honesty_words') or dict()).get('words') or []) + ['saved']
+            rec = '' if any(w in sms.lower() for w in words) else D_RECORDED   # the SMS line may already say it
+        text = (rec + ' ' + sms).strip()
         st['_last_ask'] = text
         return dict(type='say_exact', text=text.strip())
     o, r = precedence(policy, st)
@@ -653,11 +700,14 @@ def start_readback(policy, st):
     return ask(st, readback_line(policy, st, items, clamped), 'readback')
 
 
-def after_resolved(policy, st, today, cv):
+def after_resolved(policy, st, today, cv, ack=''):
     """A product was resolved (agreed, refused, noted, paid): move to the next open product, else read back or wrap up."""
     nxt = _open_products(st)
     if nxt and len(st['products']) > 1:
-        return start_attempt(policy, st, nxt[0], today, from_today_ask=False)
+        out = start_attempt(policy, st, nxt[0], today, from_today_ask=False)
+        if ack and out.get('type') == 'say_exact':
+            out['text'] = ack + ' ' + out['text']
+        return out
     rb = start_readback(policy, st)
     if rb:
         return rb
@@ -724,7 +774,8 @@ def agree(policy, st, i, amount, date, today, cv):
     p, pd = _p(st, i)
     p['status'], p['offer'] = 'agreed', dict(amount=amount, date=date)
     st['offer'] = None
-    return after_resolved(policy, st, today, cv)
+    ack = 'Thank you: ' + money(amount) + ' for your ' + pd['name'] + ' on ' + say_date(_d(date)) + '.'
+    return after_resolved(policy, st, today, cv, ack if len(st['products']) > 1 else '')
 
 
 def date_event(policy, st, ev, today, cv):
@@ -766,7 +817,7 @@ def date_event(policy, st, ev, today, cv):
     if reason == 'ok':
         if multi and st['cur'] is not None and i != st['cur'] or (multi and st['cur'] is None):
             p['status'], p['offer'] = 'agreed', dict(amount=amount, date=iso(r['accepted']))
-            return after_resolved(policy, st, today, cv)
+            return agree(policy, st, i, amount, iso(r['accepted']), today, cv)
         return agree(policy, st, i, amount, iso(r['accepted']), today, cv)
     if reason in ('non_business_day', 'after_deadline') and r['accepted']:
         d = iso(r['accepted'])
@@ -912,10 +963,32 @@ def no_event(policy, st, ev, today, cv):
     return resay(st)
 
 
+QUEUE_STEMS = dict(restructuring=('restructur',), human=('human', 'person', 'agent'), hardship=('hardship', 'support', 'care'))
+
+
+def queue_for(policy, key):
+    """The queue for a contract topic: queue_map keyed by the topic (restructure / human / hardship), else a key that
+    names it; for a person, else the pre-verification queue."""
+    tr = policy.get('transfer') or dict()
+    qmap = tr.get('queue_map') or dict()
+    for k in (key, 'restructure' if key == 'restructuring' else key, 'support' if key == 'hardship' else key):
+        if qmap.get(k):
+            return qmap[k]
+    for k, v in qmap.items():
+        if any(stem in str(k).lower() for stem in QUEUE_STEMS.get(key, ())):
+            return v
+    pre = tr.get('pre_verification_queues') or []
+    if key == 'human' and pre:
+        return pre[0]
+    return None
+
+
 def transfer(policy, st, key, cv):
-    qmap = (policy.get('transfer') or dict()).get('queue_map') or dict()
-    queue = qmap.get(key) or key
+    queue = queue_for(policy, key)
     pre = (policy.get('transfer') or dict()).get('pre_verification_queues') or []
+    if not queue:                      # the brief gives no queue for this transfer: say so once, keep the call going
+        V(policy)['log'].append('no transfer queue for ' + key)
+        return resay(st)
     if st['verified'] != 'yes' and queue not in pre:
         # no transfer before verification for this queue: never loop on the help-first question, close politely
         o, r = V(policy)['declined'] if st['who'] == 'self' else V(policy)['unclear']
@@ -969,7 +1042,7 @@ def topic_event(policy, st, ev, today, cv):
                 return do_close(policy, st, o, r, D_FAREWELL)
             st['counters']['decline_explain'] += 1
             row = event_row(policy, t)
-            return resay(st, (row or dict()).get('say') or '')
+            return resay(st, (row or dict()).get('say') or D_PROTECT)
         return resay(st)
     if t == 'stop':
         st['counters']['stop_talking'] += 1
@@ -1090,16 +1163,16 @@ def opening(policy, st, ev, today, cv):
         return ask(st, qs[0].get('ask') or D_SAFE, 'id_' + qs[0].get('field'))
     if who in ('other', 'misdialled', 'deceased') or party in ('relative', MISDIAL, 'deceased'):
         if party == MISDIAL or who == 'misdialled':
-            row = who_row(policy, 'misdialled')
+            row = party_row(policy, MISDIAL) or who_row(policy, 'misdialled')
             o, r = (_none(row.get('outcome')), _none(row.get('reason'))) if row else V(policy)['unclear']
             return do_close(policy, st, o or V(policy)['unclear'][0], r, D_FAREWELL)
         if party == 'deceased' or who == 'deceased':
-            row = who_row(policy, 'deceased')
+            row = party_row(policy, 'deceased') or who_row(policy, 'deceased')
             say = (row or dict()).get('say') or sentence(policy, 'condolence')
             o, r = (_none(row.get('outcome')), _none(row.get('reason'))) if row else V(policy)['unclear']
             return do_close(policy, st, o or V(policy)['unclear'][0], r, (say + ' Goodbye.').strip())
         st['who'], st['phase'] = 'other', 'third_party'
-        return ask(st, fill_names(V(policy)['callback_say'] or 'When can I reach them?', cv), 'callback_time')
+        return ask(st, fill_names(V(policy)['callback_say'] or D_REACH, cv), 'callback_time')
     return reask_name(policy, st, cv)      # unclear, handoff
 
 
