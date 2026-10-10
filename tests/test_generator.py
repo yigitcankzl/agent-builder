@@ -48,6 +48,8 @@ def public_constants():
     fixed_schema = {"business_days_after_today"}
     # contract vocabulary (REDUCER-CONTRACT §1.2 party values and the v3.2 effect names), not brief values
     fixed_schema |= {"wrong_number", "no_callback"}
+    # identity answer format tokens of the bridge-v2 contract (date|digits(n)|name|alnum|postcode|free)
+    fixed_schema |= {"postcode"}
     fixed = fixed_schema | {"verify_identity", "get_account", "create_promise", "add_note", "schedule_callback", "transfer_to_agent", "close_call"}
     return {c for c in consts if len(c) >= 4} - fixed
 

@@ -22,6 +22,9 @@ validate(wf, rp, oas_path, unstable_quotes=()) -> list of problems (empty = pass
 13 tool_results: every response path exists in the OAS response schema, and the core facts are bound
 14 every enum value the agent may send (slots, product types, identity fields, note reasons, outcomes, queues) is exact
 15 event and who lines are speakable: no instruction prose
+16 the hub code fits the code_exec input limit
+17 hooks: known points, closed-set conditions, speakable text with its quote; the greet says every opening hook
+18 identity answer formats are in the closed set
 """
 import argparse, json, os, re, sys
 
@@ -305,6 +308,28 @@ def validate(wf, rp, oas_path, unstable_quotes=()):
         code = (((a.get("function") or {}).get("parameters") or {}).get("properties") or {}).get("code", {}).get("default", "")
         if len(code) / 1024 > limit_kb:
             errs.append(f"16: hub code is {len(code)/1024:.1f} KB, over the {limit_kb:g} KB limit (code_exec takes code + data <= 128 KB)")
+    # 17 hooks (gap 1): known points, closed-set conditions, speakable text with its quote; the greet says every
+    #    unconditional opening hook (the recording clause included)
+    from builder.policy_bridge import HOOK_POINTS
+    greet = str(((nodes.get("greet") or {}).get("on_enter") or {}).get("text", ""))
+    nrm = lambda s: re.sub(r"\W+", " ", str(s).lower()).strip()
+    for h in rp.get("hooks") or []:
+        if h.get("point") not in HOOK_POINTS:
+            errs.append(f"17: hook {h.get('id')} point {h.get('point')!r} is not one of {HOOK_POINTS}")
+        c = h.get("condition")
+        if c and not all(re.match(r"^(band|product_type|outcome)=[^;=]+$", t) for t in str(c).split(";")):
+            errs.append(f"17: hook {h.get('id')} condition {c!r} is outside the closed set")
+        if not h.get("text") or INSTRUCTION.search(str(h["text"])) or not h.get("quote"):
+            errs.append(f"17: hook {h.get('id')} needs speakable text and its quote: {str(h.get('text'))[:60]!r}")
+        if h.get("point") == "opening" and not c and h.get("text"):
+            plain = re.sub(r"\{\{\w+\}\}", "", greet)
+            if nrm(re.sub(r"\{\w+\}", "", h["text"])) not in nrm(plain):
+                errs.append(f"17: the greet does not say opening hook {h.get('id')}: {h['text'][:60]!r}")
+    # 18 identity answer formats (gap 2) come from the closed set
+    from builder.policy_bridge import FORMATS
+    for q in (rp.get("identity") or {}).get("questions") or []:
+        if not FORMATS.match(str(q.get("format") or "")):
+            errs.append(f"18: identity {q.get('field')} format {q.get('format')!r} is not date|digits(n)|name|alnum|postcode|free")
     # 9 unstable unmapped
     # only where unmapped rules are compiled: the policy's unmapped_rules (reducer input) and the free-talk prompts.
     # (A short generic phrase like "Ask once more." can legitimately appear elsewhere, e.g. a fixed sentence.)

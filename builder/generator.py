@@ -217,7 +217,24 @@ def generate(rp, oas_path):
     who0 = hd.get("before_who") or {}
     safe = _text(rp, "safe_repeat") or "Sorry, could you say that again?"
     farewell = _text(rp, "farewell", "farewell_generic", "goodbye") or "Thank you. Goodbye."
-    opening = _text(rp, "opening", "greeting", "intro") or _compose_opening(meta)
+    opening = _text(rp, "opening", "greeting", "intro")
+    composed = not opening
+    opening = opening or _compose_opening(meta)
+    # opening hooks (gap 1) are said in the greet tts, before the name question; the reducer only tracks them.
+    # A self-introduction hook replaces the composed one, so the agent never introduces itself twice.
+    norm = lambda s: re.sub(r"\W+", " ", s.lower()).strip()
+    intro, extra = opening, []
+    for h in rp.get("hooks") or []:
+        if h.get("point") != "opening" or h.get("condition") or not h.get("text"):
+            continue
+        t = _call_var_placeholders(h["text"], meta.get("call_vars") or {})
+        if norm(t) in norm(" ".join([intro] + extra)):
+            continue
+        if composed and re.match(r"(I am|I'm|this is|my name is)\b", t, re.I):
+            intro, composed = "Hello. " + t, False
+        else:
+            extra.append(t)
+    opening = " ".join([intro.rstrip()] + extra)
     # the reducer counts the name question as already asked by greet (contract §12 choice 2): greet must say it
     who_q = _call_var_placeholders(_text(rp, "confirm_who"), meta.get("call_vars") or {})
     if who_q and who_q not in opening:

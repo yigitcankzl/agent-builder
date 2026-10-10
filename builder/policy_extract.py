@@ -33,7 +33,9 @@ Use {"file": "default", "quote": ""} ONLY when the material says nothing at all 
  "on_after_deadline": {"action": "offer_deadline" | "reject", "say": str, "source": Q},
  "on_vague": {"asks": int, "then": "offer_deadline" | "ask_again", "say_ask": str, "say_final": str, "source": Q},
  "identity": {"questions": [{"field": "<tool enum value if the tool API has one, else the material's term>",
-                             "brief_name": str, "ask": str, "format": str}],
+                             "brief_name": str, "ask": str,
+                             "format": "date" | "digits(<n>)" | "name" | "alnum" | "postcode" | "free",
+                             "format_evidence": {"source": Q}}],
               "max_wrong": int, "on_fail": {"outcome": str, "reason": str}, "on_decline": {"outcome": str, "reason": str},
               "decline_explain_max": int, "hint_rules": [str], "source": Q},
  "products": {"fields": {"id": str, "type": str, "past_due": str, "days_late": str},
@@ -74,6 +76,12 @@ Use {"file": "default", "quote": ""} ONLY when the material says nothing at all 
      <- ids, ALL six always present: wrong_person (a relative or someone else answers), wrong_number, deceased,
         unclear (cannot tell who answered), busy_voicemail (busy, call later, answering machine), handoff (the phone is
         passed to the customer). present=false with source [] when the material says nothing about that situation.
+ "hooks": [{"id": str, "point": "opening" | "after_debt" | "on_refusal" | "on_no_promise" | "before_close" |
+                                "on_promise_recorded" | "unsure",
+            "condition": null | "band=<band name>" | "product_type=<product type>" | "outcome=<API outcome>" (several: joined by ";"),
+            "expects_answer": bool, "source": Q}],
+     <- every rule that makes the agent SAY, TELL, INFORM, WARN, REMIND or DISCLOSE something (one entry per rule,
+        source = that rule's exact quote). See rule 15.
  "aliases": [{"field": "<tool>.<field>", "brief_value": "<the material's own code or word>", "api_value": "<tool API value>",
               "source": Q}],   <- every explicit mapping the material states (e.g. one row of a code list)
  "superseded": [{"rule": "<policy path>", "old_value": any, "new_value": any, "winner_file": str, "loser_file": str,
@@ -124,6 +132,19 @@ Rules:
 14. topic_checklist: answer every topic every time. For each present topic give the outcome and reason the call
     closes with (exact API strings, through a code list where there is one), even when another rule implies them.
 9. Holidays and dates as YYYY-MM-DD. Weekdays as integers with Monday = 0.
+15. hooks: list EVERY rule that makes the agent say, tell, inform, warn, remind or disclose something, including
+    parts of a longer rule (e.g. "and that the call is recorded" in an opening rule). `point` is the moment the
+    material gives: opening (the first sentence of the call), after_debt (right after the debt is stated),
+    on_refusal (when the customer refuses to pay), on_no_promise (before a call ends with no promise),
+    before_close (in the goodbye), on_promise_recorded (after a promise is recorded). If the material does not say
+    when, or the moment is none of these, use "unsure"; never guess a moment. `condition` only when the material
+    limits the rule to one band, one product type or one outcome. expects_answer = true when the agent must wait for
+    the customer's answer (a confirmation question). The build rewrites the quote into the spoken line; you only give
+    the quote.
+16. identity.questions[].format: date (a calendar date), digits(<n>) (exactly n digits, e.g. digits(4) for the last
+    four digits, digits(4) for a year), name (a person's or place's name), alnum (letters and digits, e.g. a
+    reference or the last characters of a policy number), postcode, free (anything else). format_evidence.source quotes the
+    material line that says it, or [] when only the tool API says it.
 """
 
 

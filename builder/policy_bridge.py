@@ -178,7 +178,7 @@ CONTRACT_SENTENCES = {"change_in_app": "You can change it in the mobile app.",  
                       "farewell": "Thank you, goodbye.", "recorded": "Your promise is recorded."}
 # Generic instruction forms of a brief ("Say that you are ...", "Tell the customer to ...") -> the sentence they ask
 # for, by a fixed grammatical rewrite of the brief's own words (no new wording).
-DERIVE = {"debt_intro": (r"\bsay (?:that )?you are (calling from [^,;]+)", lambda m: "I am " + m.group(1)),
+DERIVE = {"debt_intro": (r"\bsay (?:that )?you are (calling (?:from|about) [^,;]+)", lambda m: "I am " + m.group(1)),
           "id_fail": (r"\btell (?:the customer|them) to (.+)$", lambda m: "Please " + m.group(1)),
           "change_in_app": (r"say (?:that )?they can (change .+)$", lambda m: "You can " + m.group(1)),
           # verbatim quoted questions in the brief (the words inside the quotes are kept exactly)
@@ -245,6 +245,191 @@ def speakable(quotes):
                 x = _CUT.split(m.group(1).strip(), maxsplit=1)[0].strip()
                 if 3 <= len(x.split()) <= 20 and "`" not in x:
                     return "Would you like me to " + _person(x)[0].lower() + _person(x)[1:] + "?"
+    return ""
+
+
+# ---- gap 1: required sentences as hooks with timing ------------------------------------------------------------
+HOOK_POINTS = ("opening", "after_debt", "on_refusal", "on_no_promise", "before_close", "on_promise_recorded")
+_HOOK_VERB = re.compile(r"\b(?:say|tell|inform|warn|remind|mention|disclose|explain|state)"
+                        r"(?: (?:the customer|the caller|customers|them|him|her))?(?: (that))? (.+)$", re.I)
+_QUOTED = re.compile(r"[\"“]([^\"”]{6,}?[.?!])[\"”]")
+_NOT_A_LINE = re.compile(r"^(nothing|no |not |why |it\b|this sentence|one (short )?sentence|a sentence|goodbye|"
+                         r"thank|the past.due|how many|the product|the amount|the debt)", re.I)
+
+
+def hook_lines(quote):
+    """The spoken line(s) a say/tell/warn rule asks for, by a fixed rewrite of the rule's own words (no paraphrase):
+    a quoted sentence is kept verbatim; 'say (that) A, and that B' -> 'A. B.' in the first person. '' when no rule
+    applies safely (the hook is then unplaced)."""
+    q = str(quote or "").strip()
+    m = re.search(r"\bthank (?:the customer|them|the caller) for ([^.;]+)", q, re.I)
+    if m and 2 <= len(m.group(1).split()) <= 15:     # 'thank the customer for X' -> 'Thank you for X.'
+        return "Thank you for " + _person(m.group(1))[0].lower() + _person(m.group(1))[1:].rstrip(".") + "."
+    quoted = _QUOTED.findall(q)
+    if quoted and re.search(r"\b(say|ask|tell|read|use|sentence|line|words?)\b", q, re.I):
+        return " ".join(x.strip() for x in quoted)
+    out = []
+    for part in re.split(r"(?<=[.!?])\s+", q):
+        m = _HOOK_VERB.search(part.strip().strip('"'))
+        if not m:
+            continue
+        verb_that, body = m.group(1), m.group(2).strip().strip('"“”')
+        verb = re.match(r"\w+", m.group(0)).group(0).lower()
+        if verb in ("state", "explain", "mention", "disclose") and not verb_that:
+            continue             # "state the past-due amount" is an action, not a line
+        for clause in re.split(r",? and that ", body):
+            x = _CUT.split(clause.strip(), maxsplit=1)[0].strip().strip('"“”')
+            if not (3 <= len(x.split()) <= 30) or "`" in x or _NOT_A_LINE.search(x):
+                continue
+            line = _person(x)
+            line = line if line.endswith((".", "?", "!")) else line + "."
+            if not INSTRUCTION.search(line):
+                out.append(line)
+    return " ".join(out)
+
+
+def _hook_condition(cond, p, types):
+    """-> (condition string 'k=v;k=v' or None, problem or None). Closed set of keys: band, product_type, outcome (the
+    reducer's grammar: terms joined by ';', all must hold). The extractor may give a dict or such a string."""
+    if not cond:
+        return None, None
+    if isinstance(cond, dict):
+        terms = list(cond.items())
+    else:
+        terms = [tuple(x.split("=", 1)) for x in re.split(r"[;,&]", str(cond)) if x.strip()]
+        if any(len(t) != 2 for t in terms):
+            return None, f"condition {cond!r} is not key=value terms"
+    names = [b.get("name") for b in (p.get("deadline") or {}).get("bands") or []]
+    outs = {r.get("outcome") for r in (p.get("closing") or {}).get("table") or []}
+    out = []
+    for k, v in terms:
+        k, v = str(k).strip(), str(v).strip()
+        if k == "band" and v not in names:
+            return None, f"band {v!r} is not a deadline band {names}"
+        if k == "product_type":
+            v = _ptype(v)
+            if types and v not in types:
+                return None, f"product type {v!r} not in the OAS enum"
+        if k == "outcome" and v not in outs:
+            return None, f"outcome {v!r} is not in closing.table"
+        if k not in ("band", "product_type", "outcome"):
+            return None, f"condition key {k!r} is not one of band / product_type / outcome"
+        out.append(f"{k}={v}")
+    return ";".join(out), None
+
+
+def build_hooks(p, types):
+    """policy.hooks (extractor: point, condition, quote) -> (hooks, unplaced, notes). A hook keeps the point the material
+    gives; an unsure or invalid point, an invalid condition, or no speakable rewrite -> unplaced (never moved). A hook
+    whose line is already spoken by a fixed sentence, an event or a date line is dropped as a duplicate."""
+    spoken, src_quotes = set(), set()
+    for k, v in (p.get("sentences") or {}).items():
+        if isinstance(v, dict) and k in FIXED_SENTENCES:     # only the keys the reducer speaks
+            spoken.add(_norm(v.get("text") or ""))
+            src_quotes |= {_norm(s.get("quote") or "") for s in v.get("source") or [] if isinstance(s, dict)}
+    for ev in (p.get("events") or []) + list(((p.get("topic_checklist") or {}).values())):
+        if isinstance(ev, dict) and ev.get("say"):
+            spoken.add(_norm(ev["say"]))
+    spoken.discard("")
+    src_quotes.discard("")
+    hooks, unplaced, notes = [], [], []
+    for i, h in enumerate(p.get("hooks") or []):
+        if not isinstance(h, dict):
+            continue
+        quote = _first_quote(h)
+        hid = str(h.get("id") or f"hook_{i + 1}")
+        text = hook_lines(quote)
+        cond, problem = _hook_condition(h.get("condition"), p, types)
+        point = h.get("point")
+        item = {"id": hid, "point": point, "condition": cond, "text": text,
+                "expects_answer": bool(h.get("expects_answer")) or text.rstrip().endswith("?"), "quote": quote,
+                "source": h.get("source") or []}
+        if _norm(text) in spoken or (_norm(quote) in src_quotes and not point == "opening"):
+            notes.append(f"hook {hid}: already spoken by a sentence or an event line, dropped")
+            continue
+        why = (None if point in HOOK_POINTS else f"point {point!r} is not a known moment") or problem \
+            or (None if text else "no speakable rewrite of the quote")
+        if why:
+            unplaced.append(dict(item, why=why))
+            continue
+        if any(x["point"] == point and x["text"] == text and x["condition"] == cond for x in hooks):
+            continue
+        hooks.append(item)
+    return hooks, unplaced, notes
+
+
+_REC_CLAUSE = re.compile(r"\b((?:the|this|all|our|every) (?:calls?|conversations?) (?:is|are|will be|may be)"
+                         r" (?:being )?recorded(?: for [a-z ]+)?)", re.I)
+_OPENING_CUE = re.compile(r"first (?:sentence|thing|words?|line)|opening|greet\w*|introduc\w*|start of (?:the |each |every )?call|at the start", re.I)
+
+
+def recording_hook(p, stable, hooks, unplaced):
+    """The opening must carry the recording clause when the brief requires it: if no opening hook says it, a quote that
+    puts 'the call is recorded' into the opening gives it (only the recording clause of that quote). -> note or None."""
+    if any(h["point"] == "opening" and re.search(r"\brecord", h["text"], re.I) for h in hooks):
+        return None
+    for q in _all_quotes(p, stable) + [u["quote"] for u in unplaced]:
+        if re.search(r"\brecord(?:ed|ing)\b", q, re.I) and re.search(r"\b(call|conversation)\b", q, re.I) and _OPENING_CUE.search(q):
+            lines = [x for x in re.split(r"(?<=[.!?])\s+", hook_lines(q)) if re.search(r"\brecord", x, re.I)]
+            if not lines:   # verbless form ("First sentence: ..., and the call is recorded"): the clause itself
+                m = _REC_CLAUSE.search(q)
+                lines = [m.group(1)[0].upper() + m.group(1)[1:].rstrip() + "."] if m else []
+            if lines:
+                hooks.append({"id": "recording_notice", "point": "opening", "condition": None, "text": " ".join(lines),
+                              "expects_answer": " ".join(lines).endswith("?"), "quote": q,
+                              "source": [{"file": "derived", "quote": q}]})
+                unplaced[:] = [u for u in unplaced if u["quote"] != q]
+                return f"hook recording_notice: the opening carries the recording clause of {q[:70]!r}"
+    return None
+
+
+# ---- gap 2: identity answer formats ---------------------------------------------------------------------------------
+FORMATS = re.compile(r"^(date|digits\(\d+\)|name|alnum|postcode|free)$")
+_NUM = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10}
+
+
+def answer_format(q, oas_text=""):
+    """identity question -> (format in {date, digits(n), name, alnum, postcode, free}, how). The extractor's value is
+    kept when it is already one of them; otherwise a fixed reading of its own words, the question and the OAS text."""
+    f = str(q.get("format") or "").strip().lower()
+    if FORMATS.match(f):
+        return f, "extractor"
+    own = " ".join(str(q.get(k) or "") for k in ("format", "brief_name", "ask", "field")).lower().replace("_", " ")
+    got = _format_words(own)
+    if got == "free" and oas_text:      # the brief's own words first; the OAS text only when they say nothing
+        got = _format_words(oas_text.lower())
+        return got, ("oas" if got != "free" else "default")
+    return got, ("words" if got != "free" else "default")
+
+
+def _format_words(s):
+    if re.search(r"\bpost ?codes?\b|\bzip\b", s):
+        return "postcode"
+    m = re.search(r"\b(\d+|" + "|".join(_NUM) + r")\s+(?:\w+\s+)?digits?\b", s)
+    if m:
+        n = m.group(1)
+        return f"digits({int(n) if n.isdigit() else _NUM[n]})"
+    if re.search(r"\byyyy\b(?!-mm)|\byear\b(?! *-?mm)", s) and not re.search(r"yyyy-mm-dd|date of birth", s):
+        return "digits(4)"
+    if re.search(r"yyyy-mm-dd|\bdate\b|\bbirthday\b", s):
+        return "date"
+    if re.search(r"alphanumeric|letters and digits|letters and numbers|\bcharacters?\b|reference|\bcode\b", s):
+        return "alnum"
+    if re.search(r"\bname\b|maiden|\bcity\b|\btown\b|place of birth", s):
+        return "name"
+    return "free"
+
+
+def _oas_answer_text(oas_path):
+    try:
+        d = json.load(open(oas_path))
+    except Exception:
+        return ""
+    for path, ops in (d.get("paths") or {}).items():
+        if path.strip("/").endswith("verify_identity"):
+            for op in ops.values():
+                s = (((op.get("requestBody") or {}).get("content") or {}).get("application/json") or {}).get("schema") or {}
+                return " ".join(str((v or {}).get("description") or "") for v in (s.get("properties") or {}).values())
     return ""
 
 
@@ -390,6 +575,13 @@ def to_reducer(policy, oas_path, stable_unmapped=None):
             else:
                 q["blocked"] = True
                 blocked.append(q.get("field"))
+    oas_txt = re.split(r"(?<=[.;])\s+", _oas_answer_text(oas_path))
+    for q in idn.get("questions") or []:
+        words = [w for w in re.findall(r"[a-z]+", str(q.get("field") or "").lower()) if len(w) > 2]
+        own = " ".join(s_ for s_ in oas_txt if words and any(w in s_.lower() for w in words))
+        q["format_brief"], (q["format"], how) = q.get("format"), answer_format(q, own)
+        q["format_how"] = how
+        q.setdefault("format_evidence", {"source": DEFAULT})
     if blocked:
         fail = idn.get("on_fail") or cl["slots"]["id_failed"] or cl["slots"]["unclear"]
         idn["blocked"] = {"fields": blocked, "action": "close", "close": fail,
@@ -483,6 +675,9 @@ def to_reducer(policy, oas_path, stable_unmapped=None):
             who.append(dict(ev, brief_topic=ev.get("topic"), **WHO_NORMAL[val]))
         else:
             unknown.append(ev.get("topic"))
+            # an extra situation of the brief: recorded with its quote for review, never a close by default
+            p.setdefault("unmapped_topics", []).append({"topic": ev.get("topic"), "quote": _first_quote(ev),
+                                                        "effect": ev.get("effect", ""), "action": "none (out of scope)"})
     # a fixed topic checklist from the extractor (every contract topic answered) replaces the free event list
     tc = p.get("topic_checklist")
     if isinstance(tc, dict) and tc:
@@ -567,7 +762,12 @@ def to_reducer(policy, oas_path, stable_unmapped=None):
         elif "callback" in json.dumps(w).lower() and not w.get("effect_kind"):
             w["effect_kind"] = "callback"
     notes += _date_templates(p)
-    words = [x.lower() for x in (p.get("honesty_words") or {}).get("words") or []]
+    hooks, unplaced, hnotes = build_hooks(p, types)
+    rec = recording_hook(p, stable_unmapped or [], hooks, unplaced)
+    hnotes += [rec] if rec else []
+    p["hooks"], p["unplaced_hooks"] = hooks, unplaced
+    notes += hnotes + [f"hook {u['id']} UNPLACED ({u['why']}): {u['quote'][:80]!r}" for u in unplaced]
+    words =[x.lower() for x in (p.get("honesty_words") or {}).get("words") or []]
     if words and not any(x in DEFAULT_HONESTY for x in words):
         p["disclosure_words"] = p["honesty_words"]
         notes.append(f"honesty_words held pre-verification words {words}; moved to disclosure_words")
