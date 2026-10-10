@@ -1164,6 +1164,109 @@ def agree(policy, st, i, amount, date, today, cv):
     return after_resolved(policy, st, today, cv, ack if len(st['products']) > 1 else '')
 
 
+WDAYS = ('mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun')
+
+
+def parse_items(raw, n):
+    """items=<product number>:<amount or empty>:<day or empty>|... -> [(index, amount or None, spec or None)] or None.
+    A day: YYYY-MM-DD or d/m (the year is never trusted: the calendar picks it), mon..sun, today or tomorrow."""
+    out = []
+    for part in str(raw or '').split('|'):
+        m = re.fullmatch(r'\s*([1-9][0-9]?)\s*:\s*([0-9]+(?:\.[0-9]+)?)?\s*:\s*([0-9a-z/-]*)\s*', part.lower())
+        if not m or int(m.group(1)) > n:
+            return None
+        x, spec = m.group(3), None
+        dm = re.fullmatch(r'[0-9]{4}-([0-9]{1,2})-([0-9]{1,2})', x) or re.fullmatch(r'([0-9]{1,2})/([0-9]{1,2})', x)
+        if dm:
+            d_, m_ = (dm.group(2), dm.group(1)) if '-' in x else (dm.group(1), dm.group(2))
+            spec = 'd=%s;m=%s' % (d_, m_)
+        elif x in WDAYS:
+            spec = 'wd=' + x
+        elif x in ('today', 'tomorrow'):
+            spec = 'rel=' + x
+        elif x:
+            return None
+        out.append((int(m.group(1)) - 1, _num(m.group(2)), spec))
+    return sorted(out) if out else None
+
+
+def by_product(policy, st, today, cv):
+    """No usable per-product terms: product by product with our own offers (never a silent full balance)."""
+    for p in st['products']:
+        if p['status'] == 'agreed' and st['q'] in ('readback', 'what_to_change'):
+            p['status'] = 'open'
+    nxt = _open_products(st)
+    return start_attempt(policy, st, nxt[0], today, from_today_ask=False) if nxt else after_resolved(policy, st, today, cv)
+
+
+def items_event(policy, st, ev, today, cv):
+    """PER_ITEM (raw-2 PUB-12 700e9c78): different amounts and/or days per product in one turn. Each item goes through
+    the single-product rules (date_verdict, amount_fits), in get_account order; refused=<numbers> refuses products
+    in the same turn (an attempt each, as codex-audit). The first item a product cannot take is said and that product
+    gets its valid option; else the next open product, then one read-back of every agreed product."""
+    items = parse_items(ev.get('items'), len(st['products']))
+    if not items:
+        return by_product(policy, st, today, cv)
+    rb, said, bad = st['q'] in ('readback', 'what_to_change'), [], None
+    ids = [st['products'][i]['id'] for i, _, _ in items]
+    st['_clamped'] = [c for c in st.get('_clamped') or [] if c not in ids]
+    for i, amt, spec in items:
+        p, pd = _p(st, i)
+        if (p['status'] == 'refused' and not p.get('note')) or (rb and p['status'] == 'agreed'):
+            p['status'] = 'open'      # the customer's own terms revive a product refused on our offers / replace the read-back
+        if p['status'] not in ('open', 'proposed'):
+            continue
+        named, kind = date_from_spec(today, parse_spec(spec), policy) if spec else (None, None)
+        if named is None or kind != 'exact':
+            bad = bad or (i, '', None, amt)
+            continue
+        r = date_verdict(policy, today, pd, named)
+        if r['reason'] == 'refuse':
+            bad = bad or (i, fill_date(r['say'], r), None, None)
+            continue
+        d = iso(r['accepted'] or _d(pd['deadline']))
+        if r['reason'] == 'after_deadline':
+            st['_clamped'].append(p['id'])
+        if r['reason'] in ('after_deadline', 'non_business_day'):
+            said += [x for x in re.split(r'(?<=[.?!])\s+', fill_date(r['say'], r)) if x and not x.endswith('?') and x not in said]
+        if amt is not None and not amount_fits(policy, pd, amt):
+            bad = bad or (i, '', d, amt)
+            continue
+        p['status'], p['offer'] = 'agreed', dict(amount=amt if amt is not None else (pd['floor'] if pd['too_much'] else pd['past_due']), date=d)
+    flag = (policy.get('attempts') or dict()).get('flat_refusal_uses_attempt', True)
+    raw = str(ev.get('refused') or '')
+    if (flag.get('value') if isinstance(flag, dict) else flag) is not False and re.fullmatch(r'[1-9][0-9]?(,[1-9][0-9]?)*', raw):
+        for i in sorted(set(int(x) - 1 for x in raw.split(','))):
+            if i >= len(st['products']) or i in [x[0] for x in items]:
+                continue
+            p, pd = _p(st, i)
+            if p['status'] not in ('open', 'proposed'):
+                continue
+            p['attempts'] = min(p['attempts'] + 1, len(pd['plan']))
+            if p['attempts'] >= len(pd['plan']):
+                p['status'] = 'refused'
+                pd['note_reason'] = pd.get('note_reason') or V(policy)['note']['refused']
+            else:
+                p['status'] = 'open'
+            hook_point(st, 'on_refusal')
+    st['offer'] = None
+    if bad:
+        i, why, d, amt = bad
+        p, pd = _p(st, i)
+        if d and amt is not None:      # the day stands, the amount does not: the amount rule says why and offers
+            st['cur'] = i
+            st['offer'] = dict(product_ids=[p['id']], amount=None, date=d, kind='customer')
+            out = amount_event(policy, st, dict(amt=amt), today, cv)
+        else:
+            out = start_attempt(policy, st, i, today, from_today_ask=False)
+            said += [x for x in re.split(r'(?<=[.?!])\s+', why) if x and not x.endswith('?')]
+    else:
+        out = after_resolved(policy, st, today, cv)
+    if said and out.get('type') == 'say_exact':
+        out = dict(out, text=' '.join(said) + ' ' + out['text'])
+    return out
+
+
 def date_event(policy, st, ev, today, cv):
     spec = dict((k, ev.get(k, '')) for k in ('rel', 'd', 'm', 'wd', 'wk', 'vague'))
     if spec.get('vague') == 'yes' or (not any(spec.get(k) for k in ('rel', 'd', 'm', 'wd')) and spec.get('wk') in ('next', 'after_next')):
@@ -1191,6 +1294,8 @@ def date_event(policy, st, ev, today, cv):
         if ev.get('prod') and str(ev.get('prod')).isdigit():
             idx = _valid_prod(st, ev, idx)
         targets = [idx]
+    if len(targets) > 1 and policy.get('per_item') and not amt and (ev.get('also') == 'amount' or ev.get('kind') == 'date_amount'):
+        return by_product(policy, st, today, cv)     # amounts were said but not labelled: our own offers, product by product
     if len(targets) > 1:   # one date for all: per-product decision, clamp without separate acceptance
         st['_clamped'] = []
         said = ''
@@ -1895,6 +2000,8 @@ def on_user(policy, st, ev, today, cv):
             return do_close(policy, st, o, r, D_FAREWELL)
         return resay(st)
     # negotiation / readback / account
+    if policy.get('per_item') and len(st['products']) > 1 and ev.get('items') and k != 'topic':
+        return items_event(policy, st, ev, today, cv)
     if k == 'topic':
         return topic_event(policy, st, ev, today, cv)
     if k in ('yes', 'accept'):
@@ -2603,6 +2710,8 @@ def hub_source(policy):
             return [strip(v) for v in x]
         return x
     pol = strip(policy)
+    if os.environ.get('PER_ITEM') == '1':
+        pol['per_item'] = True     # generator flag, default off: per-product terms in one turn (items=, refused=)
     for k, v in (policy.get('sentences') or dict()).items():   # brief_sentence needs to know a bridge default
         if isinstance(v, dict) and brief_sentence(policy, k, None) is None and v.get('text'):
             pol['sentences'][k]['default'] = True

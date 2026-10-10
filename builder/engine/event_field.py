@@ -3,11 +3,12 @@
 
 field(vocab) -> the extraction_schema entry;  parse(value) -> dict or None.
 """
+import os
 import re
 
 KINDS = ["identity", "who", "date", "amount", "date_amount", "accept", "reject", "yes", "no", "callback", "topic", "other"]
 STATUS = ["complete", "partial", "ambiguous", "none"]
-PAYLOAD_KEYS = ["field", "ans", "y", "who", "party", "rel", "d", "m", "wd", "wk", "vague", "amt", "why", "tm", "t"]
+PAYLOAD_KEYS = ["field", "ans", "y", "who", "party", "rel", "d", "m", "wd", "wk", "vague", "amt", "why", "tm", "t", "items", "refused"]
 
 
 def platform_pattern():
@@ -22,6 +23,16 @@ def pattern(topics=()):
     kinds = "|".join(KINDS + [t for t in topics if t not in KINDS])
     return (rf"^n=[a-z0-9]{{1,8}};src=user;kind=({kinds});also=({kinds}|none);st=({'|'.join(STATUS)});"
             rf"prod=([0-9]{{1,2}}|all)?(;({'|'.join(PAYLOAD_KEYS)})=[^;=]*)*$")
+
+
+PER_ITEM_RULE = (
+    "When one message gives different amounts or different days for different products, also write items=<product "
+    "number>:<amount or empty>:<day/month as numbers, or mon..sun, or today|tomorrow, or empty>, one per product, joined "
+    "by |, product numbers in the order the agent listed them. A product the customer flatly says they will not pay, in "
+    "that same message, goes in refused=<comma-separated product numbers>. Each amount stays with its own product: never "
+    "add them up. Example: code kvdlsw, three products, 'Put 80 on the first one next Monday and 150 on the second on the "
+    "9th of November, the third I am not paying' -> n=kvdlsw;src=user;kind=date;also=reject;st=complete;prod=all;rel=;d=;"
+    "m=;wd=;wk=none;vague=no;items=1:80:mon|2:150:9/11;refused=3\n")
 
 
 def field(vocab):
@@ -42,6 +53,7 @@ def field(vocab):
         "only for a day they offer.\n"
         "Never add up amounts across products: when the customer gives one amount per product (or several amounts), "
         "write prod=all and no amt; write amt only for a single amount meant for one product.\n"
+        + (PER_ITEM_RULE if os.environ.get("PER_ITEM") == "1" else "") +
         "A past event (a salary or wage date, when they were paid) is never a payment date and never t=paid: kind=other. "
         "A time for a call ('call me at 4', 'today at four thirty would be better') is kind=callback with tm. An amount the "
         "customer only repeats from the agent (asking about it) is not amt: write amt only for an amount they offer to pay.\n"

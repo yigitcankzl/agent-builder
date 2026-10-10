@@ -728,7 +728,92 @@ def named_day_on_moved_date():
     return True
 
 
+def per_item_terms():
+    """raw-2 Phase 2 PUB-12 (700e9c78): 'five hundred and ten for the card on Thursday 15 October, three hundred and
+    ninety-six for the loan on Friday 16 October, not the car loan' came as prod=all with no amount and no per-product
+    day, and one all-products date was read back again and again. PER_ITEM (generator flag, default off): items= and
+    refused= go product by product through the single-product rules, then one read-back. Off: unchanged."""
+    import json, copy
+    from builder.engine.event_field import field, CONTRACT_TOPICS
+    base = json.load(open(os.path.join(ROOT, "tests/generated/rehearsal/raw-2.reducer_policy.json")))
+    pol = dict(copy.deepcopy(base), per_item=True)
+    cv = dict(customer_id="c_r12", first_name="Marcus", last_name="Bell", title="Mr", now=NOW)
+    accs = dict(acc=[dict(product_id="p1", type="credit_card", card_last4="9015", past_due=510.0, days_late=16, minimum_payment=153.0),
+                     dict(product_id="p2", type="personal_loan", past_due=1320.0, days_late=16, instalment_amount=440.0),
+                     dict(product_id="p3", type="car_loan", past_due=140.0, days_late=7, instalment_amount=46.0)])
+
+    def verified(p):
+        st = R.init_state(p, cv)
+        st, a = say(p, st, "kind=who;also=none;st=complete;prod=;who=self;party=")
+        st, a = say(p, st, "kind=identity;also=none;st=complete;prod=;field=date_of_birth;ans=1983-10-19;y=1983")
+        st, a = tool(p, st, dict(verified=True, all_verified=False, wrong_answers_left=3))
+        st, a = say(p, st, "kind=identity;also=none;st=complete;prod=;field=phone_last4;ans=4410")
+        st, a = tool(p, st, dict(verified=True, all_verified=True, wrong_answers_left=3))
+        st, a = tool(p, st, dict(products=accs["acc"]))
+        return st
+    live = "kind=date;also=reject;st=complete;prod=all;rel=;d=15;m=10;wd=thu;wk=none;vague=no"
+    items = ";items=1:510:2026-10-15|2:396:2026-10-16;refused=3"
+    st, a = say(pol, verified(pol), live + items)
+    check(st["q"] == "readback" and "510.00 on Thursday 15 October" in a["text"] and "396.00 on Friday 16 October" in a["text"]
+          and "140" not in a["text"] and a["text"].count("Do you confirm") == 1, f"one read-back, own amounts and days: {a}")
+    st, a = say(pol, st, "kind=yes;also=none;st=complete;prod=")
+    calls = []
+    while a["type"] == "call_tool":
+        calls.append((a["tool"], a.get("args")))
+        st, a = tool(pol, st, dict(ok=True, promise_id="x", note_id="y"))
+    prom = sorted((c[1]["product_id"], float(c[1]["amount"]), c[1]["date"]) for c in calls if c[0] == "create_promise")
+    check(prom == [("p1", 510.0, "2026-10-15"), ("p2", 396.0, "2026-10-16")], f"two promises: {calls}")
+    notes = [c[1] for c in calls if c[0] == "add_note"]
+    check(len(notes) == 1 and notes[0]["product_id"] == "p3" and notes[0]["reason"] == "refused", f"the car loan note: {calls}")
+    # an item the product cannot take: said for that product, its valid option offered, the rest agreed
+    st, a = say(pol, verified(pol), live + ";items=1:510:2026-10-15|2:100:2026-10-16;refused=3")
+    check(st["q"] == "offer" and "100.00" in a["text"] and "396.00" in a["text"] and st["products"][0]["status"] == "agreed", f"below the floor: {a}")
+    st, a = say(pol, st, "kind=yes;also=none;st=complete;prod=")
+    check(st["q"] == "readback" and "510.00" in a["text"] and "396.00" in a["text"], f"then one read-back: {a}")
+    # a day past one product's deadline: that product moves to its deadline, said (the read-back marks it)
+    st, a = say(pol, verified(pol), live + ";items=1:510:2026-10-15|2:396:17/10")
+    check(a["text"].startswith("Saturday 17 October is after the latest date") and st["products"][1]["offer"]["date"] == "2026-10-16",
+          f"the deadline said: {a}")
+    # unparsable items / an amount cue with no amount: our own offers product by product, never a silent full balance
+    st, a = say(pol, verified(pol), live + ";items=card:510")
+    check(st["q"] == "offer" and st["cur"] == 0, f"unparsable -> our offer on the first product: {a}")
+    st, a = say(pol, verified(pol), "kind=date;also=amount;st=complete;prod=all;rel=;d=15;m=10;wd=thu;wk=none;vague=no;amt=")
+    check(st["q"] == "offer" and st["cur"] == 0, f"amounts said, none labelled -> our offer: {a}")
+    # at the read-back, items replace the agreed terms
+    st, a = say(pol, verified(pol), "kind=date;also=none;st=complete;prod=all;rel=;d=15;m=10;wd=thu;wk=none;vague=no")
+    check(st["q"] == "readback" and "1320.00" in a["text"], f"one day for all: {a}")
+    st, a = say(pol, st, "kind=no;also=amount;st=complete;prod=all" + items)
+    check(st["q"] == "readback" and "396.00 on Friday 16 October" in a["text"] and "1320" not in a["text"], f"items at the read-back: {a}")
+    # the 220/640/75 summed-amount case still keeps each product's own amount with the flag on
+    acc0 = accs["acc"]
+    accs["acc"] = [dict(product_id="p1", type="credit_card", past_due=220.0, days_late=9, minimum_payment=66.0),
+                   dict(product_id="p2", type="personal_loan", past_due=640.0, days_late=9, instalment_amount=213.0),
+                   dict(product_id="p3", type="car_loan", past_due=75.0, days_late=3, instalment_amount=25.0)]
+    st, a = say(pol, verified(pol), "kind=date;also=amount;st=complete;prod=all;rel=;d=20;m=10;wd=tue;wk=none;vague=no;amt=935")
+    check(st["q"] == "readback" and all(x in a["text"] for x in ("220.00", "640.00", "75.00")) and "935" not in a["text"], f"own amounts: {a}")
+    accs["acc"] = acc0
+    # flag off: items and refused are ignored (the same action as without them)
+    s1, a1 = say(base, verified(base), live + items)
+    s2, a2 = say(base, verified(base), live)
+    check(a1 == a2, f"flag off unchanged: {a1} / {a2}")
+    # the flag reaches the prompt and the hub only when PER_ITEM=1
+    voc = {"topics": CONTRACT_TOPICS, "identity_fields": ["date_of_birth"]}
+    old = os.environ.pop("PER_ITEM", None)
+    try:
+        check("items=" not in field(voc)["extraction_prompt"] and '"per_item"' not in R.hub_source(base), "off by default")
+        os.environ["PER_ITEM"] = "1"
+        pr = field(voc)["extraction_prompt"]
+        check("items=" in pr and "refused=" in pr and '"per_item":true' in R.hub_source(base).replace(" ", ""), "on with PER_ITEM=1")
+        check("five hundred and ten" not in pr and "car loan" not in pr, "the example is not the live sentence")
+    finally:
+        os.environ.pop("PER_ITEM", None)
+        if old is not None:
+            os.environ["PER_ITEM"] = old
+    return True
+
+
 if __name__ == "__main__":
+    print("per-product terms in one turn (raw-2 PUB-12 live, PER_ITEM):", per_item_terms())
     print("gate denial is the callback (PUB-03 live):", gate_denial_is_callback())
     print("a moved day names the day the customer proposed (PUB-07 live):", named_day_on_moved_date())
     print("reject-cued dates and the all-products change (raw-3 live):", date_reject_cues())
