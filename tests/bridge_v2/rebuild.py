@@ -7,11 +7,12 @@ import concurrent.futures as cf, json, os, subprocess, sys, time
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 G = os.path.join(ROOT, "tests", "fixtures", "general")
 OAS = os.path.join(ROOT, "tools", "openapi.json")
-RUNS = {"brief-a": ([os.path.join(ROOT, "briefs", "brief-a.md")], OAS),
+RUNS_ALL = {"brief-a": ([os.path.join(ROOT, "briefs", "brief-a.md")], OAS),
         "brief-ab": ([os.path.join(ROOT, "briefs", "brief-a.md"), os.path.join(ROOT, "briefs", "brief-b.md")], OAS),
         "ins-clean": ([os.path.join(G, "ins-clean", "brief.md")], os.path.join(G, "ins-clean", "openapi.json")),
         "raw-b": ([os.path.join(G, "raw-b", f) for f in ("email-from-dialler-ops.eml", "policy-extract.md", "memo-2026-10-08.md", "codes.csv")], OAS),
         "mut-03": ([os.path.join(ROOT, "tests", "fixtures", "briefs", "mut-03.md")], OAS)}
+RUNS = {k: v for k, v in RUNS_ALL.items() if k in (os.environ.get("REBUILD_SLOTS") or ",".join(RUNS_ALL)).split(",")}   # REBUILD_SLOTS=brief-a,brief-ab
 OUT = sys.argv[1] if len(sys.argv) > 1 else os.path.join(ROOT, "tests", "e2e8")
 
 

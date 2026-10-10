@@ -26,6 +26,7 @@ validate(wf, rp, oas_path, unstable_quotes=()) -> list of problems (empty = pass
 17 hooks: known points, closed-set conditions, speakable text with its quote; the greet says every opening hook
 18 identity answer formats are in the closed set
 19 floor rules, amounts.acceptance and date_rules use the closed shapes (gaps 3-4)
+20 honesty: no recorded/scheduled/transferred/saved/booked in the greet or any line spoken before a write succeeds
 """
 import argparse, json, os, re, sys
 
@@ -356,6 +357,18 @@ def validate(wf, rp, oas_path, unstable_quotes=()):
             errs.append(f"19: date_rules.{sit} {r!r} is outside the closed sets")
         elif r.get("say") and (INSTRUCTION.search(r["say"]) or set(re.findall(r"<[A-Z_]+>", r["say"])) - {"<NAMED>", "<DATE>", "<DEADLINE>"}):
             errs.append(f"19: date_rules.{sit}.say is not a speakable line: {r['say'][:60]!r}")
+    # 20 honesty: no 'recorded'/'scheduled'/'transferred'/'saved'/'booked' in any line spoken before a write succeeds
+    #    (greet, hooks other than on_promise_recorded, sentences other than recorded/text_message, event/who lines)
+    from builder.policy_bridge import HONESTY, RESULT_POINTS, RESULT_SENTENCES
+    lines = [("greet", greet)]
+    lines += [(f"hook {h.get('id')} ({h.get('point')})", h.get("text")) for h in rp.get("hooks") or [] if h.get("point") not in RESULT_POINTS]
+    lines += [(f"sentence {k}", (v or {}).get("text")) for k, v in (rp.get("sentences") or {}).items()
+              if k not in RESULT_SENTENCES and isinstance(v, dict)]
+    lines += [(f"{c} {e.get('topic') or e.get('who')}", e.get("say")) for c in ("events", "who_rules") for e in rp.get(c) or []]
+    for where, t in lines:
+        m = HONESTY.search(str(t or ""))
+        if m:
+            errs.append(f"20: {where} says {m.group(1)!r} before any tool result: {str(t)[:70]!r}")
     # 9 unstable unmapped
     # only where unmapped rules are compiled: the policy's unmapped_rules (reducer input) and the free-talk prompts.
     # (A short generic phrase like "Ask once more." can legitimately appear elsewhere, e.g. a fixed sentence.)

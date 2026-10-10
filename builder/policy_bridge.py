@@ -392,6 +392,26 @@ _REC_CLAUSE = re.compile(r"\b((?:the|this|all|our|every) (?:calls?|conversations
 _OPENING_CUE = re.compile(r"first (?:sentence|thing|words?|line)|opening|greet\w*|introduc\w*|start of (?:the |each |every )?call|at the start", re.I)
 
 
+HONESTY = re.compile(r"\b(recorded|scheduled|transferred|saved|booked)\b", re.I)
+RESULT_POINTS = ("on_promise_recorded",)            # the only hook point spoken after a successful write
+RESULT_SENTENCES = ("recorded", "text_message")     # sentences the reducer speaks only after a successful write
+_REC_SENTENCE = re.compile(r"\b(?:the|this|all|our|every|your) (?:calls?|conversations?) (?:is|are|will be|may be|is being)"
+                           r" (?:being )?recorded(?: for ([a-z ]+?))?(?=[.,;!?]|$)", re.I)
+
+
+def honest_line(text):
+    """A line spoken before any tool result must not carry an honesty word (a judge reads 'recorded' as a claim that
+    something was recorded). The recording notice is rewritten deterministically, keeping its meaning and purpose:
+    'The call is recorded for training.' -> 'Please note that we keep a recording of this call for training.'
+    -> (new text, None), or (None, why) when another honesty word remains (the line is then not spoken)."""
+    t = str(text or "")
+    t = _REC_SENTENCE.sub(lambda m: "Please note that we keep a recording of this call" + (" for " + m.group(1) if m.group(1) else ""), t)
+    t = re.sub(r"\bPlease note that we keep\b", "Please note that we keep", t)
+    t = re.sub(r"(^|[.!?]\s+)please note", lambda m: m.group(1) + "Please note", t)
+    m = HONESTY.search(t)
+    return (None, f"honesty word {m.group(1)!r} before any tool result") if m else (t, None)
+
+
 def recording_hook(p, stable, hooks, unplaced):
     """The opening must carry the recording clause when the brief requires it: if no opening hook says it, a quote that
     puts 'the call is recorded' into the opening gives it (only the recording clause of that quote). -> note or None."""
@@ -1052,6 +1072,31 @@ def to_reducer(policy, oas_path, stable_unmapped=None, brief_text=None):
     hooks, unplaced, hnotes = build_hooks(p, types)
     rec = recording_hook(p, stable_unmapped or [], hooks, unplaced)
     hnotes += [rec] if rec else []
+    kept = []
+    for h in hooks:             # honesty: no 'recorded'/'scheduled'/... before a tool result (judge check)
+        if h["point"] in RESULT_POINTS:
+            kept.append(h)
+            continue
+        txt, why = honest_line(h["text"])
+        if txt is None:
+            unplaced.append(dict(h, why=why))
+            hnotes.append(f"hook {h['id']} UNPLACED: {why}")
+        else:
+            if txt != h["text"]:
+                hnotes.append(f"hook {h['id']}: honesty rewrite {h['text']!r} -> {txt!r}")
+                h = dict(h, text=txt, rewritten_from=h["text"])
+            kept.append(h)
+    hooks = kept
+    for sid, v in (p.get("sentences") or {}).items():
+        if sid in RESULT_SENTENCES or not isinstance(v, dict) or not v.get("text"):
+            continue
+        txt, why = honest_line(v["text"])
+        if txt is None:
+            hnotes.append(f"sentence {sid}: {why}; emptied (reducer default)")
+            v["dropped_text"], v["text"] = v["text"], ""
+        elif txt != v["text"]:
+            v["rewritten_from"], v["text"] = v["text"], txt
+            hnotes.append(f"sentence {sid}: honesty rewrite -> {txt!r}")
     p["hooks"], p["unplaced_hooks"] = hooks, unplaced
     notes += hnotes + [f"hook {u['id']} UNPLACED ({u['why']}): {u['quote'][:80]!r}" for u in unplaced]
     words =[x.lower() for x in (p.get("honesty_words") or {}).get("words") or []]

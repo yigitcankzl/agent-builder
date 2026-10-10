@@ -89,7 +89,7 @@ def gap1():
           "tell the person to X -> Please X.")
     wf = generate(rp, OAS)
     greet = wf["nodes"]["greet"]["on_enter"]["text"]
-    check("recorded" in greet and greet.count("digital assistant") == 1, f"greet carries the recording clause once: {greet!r}")
+    check("keep a recording" in greet and "recorded" not in greet and greet.count("digital assistant") == 1, f"greet carries the recording clause once: {greet!r}")
     check(not [e for e in validate(wf, rp, OAS) if e.startswith("17")], "validator 17 passes")
     bad = copy.deepcopy(rp)
     bad["hooks"].append({"id": "x", "point": "somewhere", "condition": "colour=red", "text": "Then offer the desk.", "quote": "q"})
@@ -245,13 +245,39 @@ def integration_fixes():
     check({e.get("desk") for e in rp["events"] if e["topic"] == "hardship"} == {"wellbeing team"}, "hardship desk name from the brief's words")
 
 
+def honesty():
+    print("== honesty: no 'recorded' before a tool result (PUB-10 judge, call 6818f744)")
+    H = B.honest_line
+    check(H("The call is recorded.")[0] == "Please note that we keep a recording of this call.", "recording notice rewritten")
+    check(H("This call is recorded for training.")[0] == "Please note that we keep a recording of this call for training.",
+          "purpose kept in the rewrite")
+    check(H("Your callback is booked.")[0] is None, "another honesty word -> not spoken")
+    hooks = [{"id": "rec", "point": "opening", "condition": None, "expects_answer": False,
+              "source": src("First sentence: say you are the assistant of the bank, and that the call is recorded.")},
+             {"id": "sav", "point": "after_debt", "condition": None, "expects_answer": False,
+              "source": src("Tell them that their details are saved.")},
+             {"id": "ok", "point": "on_promise_recorded", "condition": None, "expects_answer": False,
+              "source": src('After a recorded promise, say "Your arrangement is saved in our system."')}]
+    rp, _ = bridged(hooks=hooks)
+    by = {h["id"]: h for h in rp["hooks"]}
+    check("recorded" not in by["rec"]["text"] and "keep a recording" in by["rec"]["text"], f"opening hook rewritten: {by['rec']['text']!r}")
+    check("sav" not in by and any(u["id"] == "sav" for u in rp["unplaced_hooks"]), "a pre-result 'saved' line is unplaced")
+    check("saved" in by.get("ok", {}).get("text", ""), "on_promise_recorded keeps its honesty word")
+    wf = generate(rp, OAS)
+    g = wf["nodes"]["greet"]["on_enter"]["text"]
+    check("recorded" not in g.lower() and "keep a recording" in g, f"greet: {g!r}")
+    check(not [e for e in validate(wf, rp, OAS) if e.startswith("20")], "validator 20 passes")
+    wf["nodes"]["greet"]["on_enter"]["text"] = "Hello. The call is recorded."
+    check(any(e.startswith("20") for e in validate(wf, rp, OAS)), "validator 20 catches 'recorded' in the greet")
+
+
 def gap2_exact():
     q = {"field": "postcode", "format": "postcode", "format_evidence": {"source": src("Send the postcode exactly as said, letters and digits.")}}
     check(B.answer_format(q)[0] == "free", "'exactly as said' wins over the postcode format -> free")
 
 
 if __name__ == "__main__":
-    for g in (gap1, gap2, gap2_exact, gap3, gap4, regressions, derive_fixes, integration_fixes):
+    for g in (gap1, gap2, gap2_exact, gap3, gap4, regressions, derive_fixes, integration_fixes, honesty):
         g()
     print("RESULT:", "PASS" if not fails else f"FAIL ({len(fails)})")
     sys.exit(1 if fails else 0)
