@@ -1156,6 +1156,15 @@ def date_event(policy, st, ev, today, cv):
         return resay(st)
     amt = ev.get('amt')
     multi = len(st['products']) > 1
+    if ev.get('also') == 'reject':
+        # 'No, I cannot pay that on the twenty-second' (raw-3 live): a date with a reject cue that is the day we
+        # offered, or a day already refused, is a refusal of that day, never a proposal of it
+        refused = set(x[1] for pd in st['_pd'] for x in pd.get('refused_offers') or [])
+        refused |= set(it['date'] for it in ((st.get('readback') or dict()).get('items') or []) if st['q'] in ('readback', 'what_to_change'))
+        if iso(named) == (st.get('offer') or dict()).get('date') or iso(named) in refused:
+            if st['q'] in ('readback', 'what_to_change'):
+                return no_event(policy, st, dict(kind='no'), today, cv)
+            return reject_event(policy, st, dict(why='flat'), today, cv)
     targets = list(range(len(st['products']))) if (ev.get('prod') == 'all' or (multi and st['cur'] is None and not ev.get('prod'))) else None
     if targets is None:
         idx = st['cur'] if st['cur'] is not None else 0
@@ -1169,6 +1178,8 @@ def date_event(policy, st, ev, today, cv):
             p, pd = _p(st, i)
             if p['status'] == 'refused' and not p.get('note'):
                 p['status'] = 'open'      # the customer's own date for every product revives one refused on our offers
+            if p['status'] == 'agreed' and st['q'] in ('readback', 'what_to_change'):
+                p['status'] = 'open'      # a new day for every product at the read-back replaces the agreed one
             if p['status'] not in ('open', 'proposed'):
                 continue
             r = date_verdict(policy, today, pd, named)
