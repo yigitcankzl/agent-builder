@@ -1,5 +1,6 @@
-# Reducer contract v3 (2026-10-10)
+# Reducer contract v3.1 (2026-10-10)
 
+**v3.1 = v3 + §13** (topics found by policy extraction, `api_mismatch` at runtime, the attempts plan reference).
 **v3 = v2 + §11 (structural rules) + §12 (decisions on the fixture choices).** Where §11 or §12 conflicts with an
 earlier section, §11/§12 win. Inputs: `ext/kickoff/CONTRACT-GAP.md` (G-numbers below), the M0 risks A and B
 (`probe/M0-FINDINGS.md` 11–12), and the independent fixtures on branch `fixtures-briefs` `fd1409a`
@@ -657,3 +658,66 @@ hub edges, in order:
 | 18 | "Friday the 20th" expects `st=ambiguous` | **Reject.** The extractor must not judge calendar consistency (it would need date arithmetic). The label stays `st=complete` with both labels (`d=20;wd=fri`); `date_from_spec` returns `invalid`, and the **reducer** turns that into one counted clarification. **The fixture row should change to `st=complete`.** |
 | 19 | Injection during identity → `t=injection`, not an identity success | **Accept, amended §1.5:** `t=injection` outranks `who`/`identity` in every phase; only the other topics yield to them in the opening and identity phases. |
 | 20 | Tokens: the harness sets `st.tok` to the scripted `n`; `last_tok` starts at `kstart`; tool steps ignore `ev` | **Accept.** |
+
+---
+
+## 13. v3.1: topics found by policy extraction, `api_mismatch` at runtime, the attempts plan
+
+Input: the policy-extract fork's bridge report (`policy-extract` `b07b6c8`, `tests/policy_eval/bridge_eval.txt`). It
+lists the topics its extractor found with no contract topic, plus the `api_mismatch` entries.
+
+### 13.1 Topics: two new `t=` values; the rest map onto existing events
+Rule: a new topic only where a **fixed line** protects a scored check that free LLM talk could break.
+
+| Found topic | Decision | Mechanism |
+|---|---|---|
+| `change_recorded_promise` (A36) | **NEW `t=change_promise`** | Any phase after a product is `persisted`: say `sentences.change_in_app` (A36: "they can change it in the mobile app"), no write, no state change. Also, a `date`/`amount` event aimed at a `persisted` product → the same line (G17). Policy: `events[{topic: change_promise, say: change_in_app}]`. Protects one promise per product and the honesty judge (a free LLM may "update" the promise). |
+| `discount_or_other_terms` (A33) | **NEW `t=terms`** | The customer asks for a discount, a waiver, a lower amount "deal" or any term the brief does not offer: say `sentences.no_other_terms` (a fixed refusal of other terms), then re-ask the open question. No attempt is consumed; it is not a refusal. **Exception:** a request for a new plan or lower instalments stays `t=restructure` (A41 → transfer); the extractor prompt says so. Protects PUB-05's "no discount, waiver or plan offered". **Amends §12 choice 12:** PUB-05's discount line becomes `kind=topic;t=terms`, not `kind=other`; the hardship flow is unchanged. |
+| `busy_or_voicemail` (mut-05, a new outcome reason) | **No new topic.** Maps onto existing events through the policy's `events[].effect` | "I'm busy, call me later" from the customer → `callback` (with or without a time) or `t=stop`. The policy maps that topic/kind in the opening phase to the closing slot `busy`, whose row is the brief's outcome/reason (`events[{kind: callback, phase: opening, effect: end_call(busy)}]`). A voicemail or answering machine is `who=unclear` → the existing unclear row, unless the policy maps it to `busy`. The reducer has no literal `busy`; only the slot does. |
+| `identity_failed` | **No topic.** It is a tool fact | `wrong_answers_left == 0` (or the policy's `max_wrong`) from `verify_identity` → closing slot `id_failed`. The customer cannot "say" it. |
+| `ambiguous_identity_confirmation` (A3: "hello", "who is this" do not count) | **No topic.** Covered by `who=unclear` + `counters.confirm_name` | `who=unclear` → re-ask the name question (counted when spoken, §12 choice 2). At the cap → closing slot `unclear`. A question from the customer is answered first (scam/robot/purpose), and the re-ask that follows is the counted second ask (A3). |
+| `unknown_information` (mut-03), `flat_refusal`, `opening` (raw-a) | **No topic.** Existing | `t=unknown_info`, `kind=reject;why=flat`, and the greet sentence. The bridge should map these names onto the existing ones. |
+
+**New event values in v3 and v3.1, the full list for the fixtures:**
+- topics: `t=decline`, `t=purpose` (v3), `t=change_promise`, `t=terms` (v3.1);
+- who value: `who=handoff` (v3);
+- the `who` payload key `party` replaces `rel` (v2.1).
+
+No new `kind` values in v3.1.
+
+### 13.2 `api_mismatch` at runtime: map at build time to a safe OAS value; block only when no safe value exists
+**One rule. The reducer never sends a string outside the brief's OAS enum.** Sending one would make the mock reject
+the call (an outcome the scorer can't match, or a failed write).
+
+At build time each mismatch gets exactly one of:
+- (a) **`map_to`**: an OAS enum member chosen by the closest name, else the safe family member:
+  - outcome → the `unclear`/not-reached-family outcome;
+  - reason → the closest reason, or omit it if the OAS allows that;
+  - queue → `general`, else the first enum member;
+- (b) **`block`**: no safe member exists (e.g. a note reason with no equivalent).
+  - The reducer skips that tool call and takes the per-tool `on_fail` path (11.5). A note is skipped; an identity
+    field is skipped and the next question is used.
+  - If **every** identity field of the brief is blocked, the OAS enum fields are asked in order, with generic asks
+    (`source: default`).
+
+Example: mut-05's `close_call.outcome: 'no_contact'` → `map_to` = `not_reached` if that is in the OAS, else per the
+rule above. mut-04's `verify_identity.field: postcode, year_of_birth` against an OAS that lacks them → `block`, which
+triggers the all-blocked fallback.
+
+**Failure mode, accepted and logged in the trace:**
+- if the mismatch was REAL (the hidden OAS truly lacks the value), a mapped outcome can still differ from the
+  expected ledger tuple;
+- if the mismatch came from a policy-extraction error, the mapping hides that error.
+
+So the builder treats any mismatch as a **signal to re-check that policy field once**: one targeted re-extraction of
+that field before falling back to `map_to`/`block`. That is the builder's job, outside the reducer.
+
+### 13.3 Attempts plan: referenced, not redefined
+- The policy-extract fork is adding `attempts.plan` to the policy schema: per band and per attempt,
+  `{date_rule, amount_rule}` with closed enums (e.g. `date_rule` ∈ last business day of this week / of next week if
+  today is that day / the deadline …; `amount_rule` ∈ full / floor / floor-again …).
+- The reducer's persuasion step reads `policy.attempts.plan[band][attempt_index]`. It never hard-codes "attempt 1 =
+  Friday, full" or "attempt 2 = floor on the deadline".
+- §7's `attempts` row and §12 choice 8 are read through that plan. The cap is `len(plan[band])`; an empty plan means
+  no persuasion attempts (mut-03: "the early band has no persuasion attempts").
+- Date rules resolve through the date core (`dates.add_business_days`, `deadline_for`, the business-day calendar).
