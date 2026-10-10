@@ -268,6 +268,49 @@ def extract(paths, openapi=None, trace_path=None, repair=True, sink=None, deadli
     return policy, report
 
 
+REEXTRACT = """A tool API rejects some values of a bank's call policy: each value below is not in the allowed list of its tool
+field. Re-read the material for exactly these items and answer for each one:
+- if the material names a value that IS in the allowed list (directly, or through an explicit mapping such as a code
+  list or a table row), give that allowed value and quote the line that supports it;
+- otherwise keep the material's own value unchanged and quote where it is required.
+Never pick an allowed value only because its name looks similar. Output JSON only:
+{"items": [{"policy_path": str, "value": str, "source": {"file": str, "quote": "<verbatim line>"}, "why": str}]}
+"""
+
+
+def reextract_fields(paths, mismatches, openapi=None, sink=None, deadline=None):
+    """Targeted re-extraction (contract §13.2): one focused Claude call for the api_mismatch items only.
+    -> {policy_path: {"value", "source", "why", "accepted": bool}}; a new value is accepted only when it is in the enum
+    and its quote is verbatim in the named file. Nothing else of the policy is touched."""
+    trace = _Forward(sink, deadline) if sink is not None else Trace(None)
+    files, oas = read_files(paths), oas_summary(openapi)
+    items = [{"policy_path": m["policy_path"], "value": m["value"], "field": m["field"], "allowed": m["oas_enum"]} for m in mismatches]
+    out = parse_json(call_claude(REEXTRACT + "\nITEMS:\n" + json.dumps(items, indent=1) + "\n\nMATERIAL:\n" + material_block(files, oas),
+                                 "re-extract api_mismatch fields", trace))
+    enum_of = {m["policy_path"]: m["oas_enum"] for m in mismatches}
+    res = {}
+    for it in out.get("items") or []:
+        pth = it.get("policy_path")
+        if pth not in enum_of:
+            continue
+        verified = not bad_quotes({"x": {"source": [it.get("source") or {}]}}, files)
+        res[pth] = {"value": it.get("value"), "source": it.get("source"), "why": it.get("why"),
+                    "accepted": bool(verified and it.get("value") in (enum_of[pth] or []))}
+    return res
+
+
+def apply_reextraction(policy, mismatches, res):
+    """Patch accepted values into a copy of the extracted (pre-bridge) policy, as sourced aliases the bridge honours."""
+    import copy as _copy
+    p = _copy.deepcopy(policy)
+    for m in mismatches:
+        r = res.get(m["policy_path"])
+        if r and r["accepted"]:
+            p.setdefault("aliases", []).append({"field": m["field"], "brief_value": m["value"], "api_value": r["value"],
+                                                "source": [r["source"]], "why": r.get("why", "")})
+    return p
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("briefs", nargs="+")

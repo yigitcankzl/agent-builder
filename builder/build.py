@@ -21,7 +21,8 @@ sys.path.insert(0, ROOT)
 from builder import generator
 from builder.generator import generate, node_counts
 from builder.policy_bridge import consolidate_unmapped, to_reducer
-from builder.policy_extract import extract, read_files
+from builder.policy_extract import apply_reextraction, extract, read_files, reextract_fields
+from builder.selftest import run_selftest
 from builder.trace import BuildTrace
 from builder.validate_workflow import validate
 
@@ -135,6 +136,24 @@ def build(briefs, openapi, slot=None, freya_client=None, out_dir="submission", t
         rp, brep = to_reducer(pol, openapi, stable)
         trace.log("bridge", attempt=k + 1, api_mismatch=brep["api_mismatch"], notes=brep["notes"], schema_errors=brep["errors"],
                   topics=brep["events"], identity_blocked=(rp.get("identity") or {}).get("blocked"), hangup_default=rp.get("hangup_default"))
+        mism = brep["api_mismatch"]
+        if mism and k == 0 and time.time() < deadline - 60:
+            # targeted re-extraction (contract §13.2): only the mismatching fields, once
+            try:
+                res = reextract_fields(briefs, mism, openapi, trace, deadline)
+            except Exception as e:
+                res = {}
+                trace.log("re_extract", error=str(e)[:300])
+            for m in mism:
+                r = res.get(m["policy_path"]) or {}
+                trace.log("re_extract", field=m["field"], policy_path=m["policy_path"], old=m["value"], new=r.get("value"),
+                          quote=(r.get("source") or {}).get("quote"), why=r.get("why"),
+                          result="mapped (sourced, in the OAS enum)" if r.get("accepted") else "kept block")
+            if any(r.get("accepted") for r in res.values()):
+                pol = apply_reextraction(pol, mism, res)
+                rp, brep = to_reducer(pol, openapi, stable)
+                trace.log("bridge", attempt="1-reextracted", api_mismatch=brep["api_mismatch"], notes=brep["notes"],
+                          identity_blocked=(rp.get("identity") or {}).get("blocked"))
         wf = generate(rp, openapi)
         errs = validate(wf, rp, openapi, [u["quote"] for u in unstable])
         trace.log("validator", attempt=k + 1, passed=not errs, errors=errs, hub_code=generator.GENERATED_FROM.get("hub"),
@@ -163,9 +182,9 @@ def build(briefs, openapi, slot=None, freya_client=None, out_dir="submission", t
         path = freya_client.export_workflow(ids["workflow_id"], os.path.join(out_dir, f"{slot}.workflow.json"))
         result.update(workflow_id=ids["workflow_id"], agent_id=ids["agent_id"], export=path)
         trace.log("save", workflow_id=ids["workflow_id"], agent_id=ids["agent_id"], export=os.path.relpath(path, ROOT) if path.startswith(ROOT) else path)
-    hub = generator.GENERATED_FROM.get("hub")
-    trace.log("self_test", run=False, result=None,
-              note="not run: the reducer is still the stub" if hub == "stub" else "not run in this build (scheduled by the coordinator)")
+    st_res = run_selftest(rp, openapi)
+    trace.log("self_test", **st_res)
+    result["self_test"] = {k: st_res.get(k) for k in ("run", "scenarios", "passed", "failed", "note")}
     return finish()
 
 
