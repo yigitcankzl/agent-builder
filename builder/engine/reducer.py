@@ -2505,10 +2505,15 @@ def _dump(st, sep=None):
     return s
 
 
-# Freya's code_exec prints __CODE_EXEC_RESULT__ plus the vars JSON and cuts the stdout near 10,000 chars.
-# Stay near 6,000 so a 40-turn call never reaches that cut. A cut result is discarded and the error text is
-# stored back into vars, so the next run is larger.
-RETURN_BUDGET = 6000
+# Freya's code_exec prints __CODE_EXEC_RESULT__ plus the vars JSON and cuts the stdout near 10,000 chars (seen at
+# 9,974). Stay under 9,000. A cut result is discarded and the error text is stored back into vars, so the next run
+# is larger.
+RETURN_BUDGET = 9000
+# What the engine and the workflow's edges / bodies / spoken text read: never trimmed (w_*, *_count, *_status_code
+# and the call variables too)
+ENGINE_VARS = ('st', 'route', 'route_ok', 'say_next', 'farewell', 'talk_hint', 'close_outcome', 'close_reason', 'ev',
+               'ev_tok', 'xfer_pre', 'promise_recorded', 'promise_word', 'hook_skip', 'hub_error', 'close_ok', 'ending',
+               'hub_status_code', 'hub_response.status', 'hub_response.status_code')
 _RESULT_MARK = '__CODE_EXEC_RESULT__'
 
 
@@ -2553,38 +2558,51 @@ def _note_promise(vars):
         vars['close_reason'] = ''
 
 
-def enforce_budget(vars):
-    """Keep the printed result under RETURN_BUDGET. Last resort is a close, never a free-talk route."""
+def safe_close(policy):
+    """A close the bank accepts when nothing else is known: the unclear slot, else the table's unclear / refused row,
+    else the closing table's first outcome. Never an empty outcome."""
+    for o, r in (slot(policy, 'unclear'), V(policy)['unclear'], V(policy)['refused']):
+        if o:
+            return o, r
+    row = next((x for x in (policy.get('closing') or dict()).get('table') or [] if _none(x.get('outcome'))), dict())
+    return _none(row.get('outcome')) or '', _none(row.get('reason')) or ''
+
+
+def _engine_var(k, policy):
+    sk = str(k)
+    cv = (policy.get('meta') or dict()).get('call_vars') or dict()
+    return (sk in ENGINE_VARS or sk.startswith('w_') or sk.endswith('_count') or sk.endswith('_status_code')
+            or sk in cv.values() or sk == (policy.get('now') or dict()).get('var', 'now'))
+
+
+def enforce_budget(vars, policy=None):
+    """Keep the printed result under RETURN_BUDGET by dropping what nothing reads, in order: headers, old errors and
+    clock strings, spent tool bodies, then every other non-engine var (largest first). st and the engine vars are
+    never trimmed. A close is the last resort, only when the engine vars alone are over, and it carries a valid
+    outcome (a recorded promise stays promise)."""
+    policy = policy or dict()
     _blank_noise(vars)
     if returned_len(vars) <= RETURN_BUDGET:
         return
     _blank_spent_data(vars)
-    st = _jsonish(vars.get('st'))
-    if isinstance(st, dict):
-        if st.get('_said_last') and st.get('_said_last') == st.get('_last_ask'):
-            st['_said_last'] = ''
-        vars['st'] = _dump(st, (',', ':'))
+    for k in sorted((k for k in vars if not _engine_var(k, policy)), key=lambda k: -len(json.dumps(vars.get(k), default=str))):
+        if returned_len(vars) <= RETURN_BUDGET:
+            return
+        vars.pop(k, None)
     if returned_len(vars) <= RETURN_BUDGET:
         return
-    keep = set(['st', 'route', 'route_ok', 'say_next', 'farewell', 'talk_hint', 'close_outcome', 'close_reason',
-                'ev', 'ev_tok', 'xfer_pre', 'promise_recorded', 'promise_word', 'hook_skip'])
-    for k in list(vars):
-        if k in keep or str(k).endswith('_count') or str(k).endswith('_status_code'):
-            continue
-        if isinstance(vars.get(k), str) and len(vars[k]) > 40:
-            vars[k] = ''
-    if returned_len(vars) <= RETURN_BUDGET:
-        return
-    _note_promise(vars)
+    vars['hub_error'] = 'payload over budget: closed'
     if vars.get('route') not in ('close', 'close_retry', 'end'):
         vars['route'] = 'close'
+        vars['close_outcome'], vars['close_reason'] = safe_close(policy)
+    _note_promise(vars)
+    if not vars.get('close_outcome'):
+        vars['close_outcome'], vars['close_reason'] = safe_close(policy)
     if not vars.get('farewell'):
         vars['farewell'] = D_FAREWELL
-    vars['ev'] = ''
+    vars.pop('ev', None)      # an empty ev is rejected by the extractor's schema; dropped, the platform keeps its own
     vars['say_next'] = ''
     vars['talk_hint'] = ''
-    if returned_len(vars) > RETURN_BUDGET:
-        vars['st'] = ''
 
 
 CLOSE_PREF = dict(refused=('refused', 'dispute', 'hardship', 'write'), dispute=('dispute', 'refused', 'hardship', 'write'),
@@ -2647,7 +2665,7 @@ def hub_main(vars, policy):
     if st.get('phase') == 'closed' and st.get('_close_snap') is not None:
         close_hub(vars, policy, st)        # back from t_close_call: a rejected close is retried once
         _blank_spent_data(vars)
-        enforce_budget(vars)
+        enforce_budget(vars, policy)
         return
     try:
         te = read_tool(vars, st)
@@ -2677,7 +2695,7 @@ def hub_main(vars, policy):
         h = st2.get('hangup') or dict()
         o, r = h.get('outcome'), h.get('reason')
         if not o:
-            o, r = slot(policy, 'unclear')
+            o, r = safe_close(policy)
     vars['close_outcome'], vars['close_reason'] = o or '', r or ''
     if t == 'close':     # the counters before close_call: a later hub run can see whether it was accepted
         st2['_close_snap'] = [_int(vars.get('t_close_call_success_count')), _int(vars.get('t_close_call_failure_count'))]
@@ -2691,7 +2709,7 @@ def hub_main(vars, policy):
     vars['st'] = _dump(st2, (',', ':'))
     _blank_spent_data(vars)
     _note_promise(vars)
-    enforce_budget(vars)
+    enforce_budget(vars, policy)
 
 
 def minify(src):
