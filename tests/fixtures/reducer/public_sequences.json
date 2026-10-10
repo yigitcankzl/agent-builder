@@ -1,10 +1,14 @@
 {
-  "contract": "v2",
-  "contract_commit": "fbac10f",
+  "contract": "v3",
+  "contract_commit": "5975d2b",
   "source_cases": "public-test-set.json PUB-01..PUB-13",
   "now": "2026-10-14T11:00",
   "how_to_read": {
-    "event": "n=<6 letters>;src=user;kind=...;also=...;st=...;prod=...;<payload>. No iso key. prod empty means the current product; all or a 1-based get_account position otherwise.",
+    "event": "n=<6 letters>;src=user;kind=...;also=...;st=...;prod=...;<payload>. No iso key. who uses party, not rel. prod empty means the current product; all or a 1-based get_account position otherwise.",
+    "q": "Open question. yes, no and accept act only when q matches \u00a711.1. Otherwise ignored, no state change.",
+    "hangup": "close_outcome/close_reason a hang-up would use (\u00a711.3). outcome null means the product-state slot is unnamed for this snapshot.",
+    "close_order": "farewell tts, then close_call, no user turn between them.",
+    "w_go": "call_tool sets w_go to go (one-shot tool edge).",
     "cur": "0-based index of the product under discussion. prod is 1-based.",
     "state": "Snapshot of the key fields AFTER the step. Not a diff.",
     "state_unchanged": "Business state equals the previous snapshot. Every st=partial step has this. A robot answer, a discount question, and a third-party 'what is this about' also leave it unchanged.",
@@ -64,11 +68,17 @@
       ],
       "bootstrap": {
         "initial_token": "kstart",
+        "lazy_init": {
+          "confirm_name": 1,
+          "q": "confirm_name",
+          "rule": "Ask counters increment when the ask is spoken, never on an event (\u00a712 choice 2)."
+        },
         "greet": {
           "via": "greet_on_enter_tts",
           "contains": [
             "digital assistant",
-            "Freya Bank"
+            "Freya Bank",
+            "Am I speaking with Mr Reyes?"
           ],
           "must_not_contain": [
             "collections",
@@ -81,59 +91,46 @@
             "6 days",
             "4821"
           ],
-          "note": "Brief A rule 1 says the call is recorded. recorded is also an honesty word. This fixture does not require either the brief word or the contract's rewrite."
+          "note": "Opening sentence and the name question are one greet tts. Brief A rule 1 says the call is recorded. recorded is also an honesty word. This fixture does not require either the brief word or the contract's rewrite."
         },
-        "first_hub": {
-          "user_event": null,
-          "action": {
-            "type": "say_exact",
-            "text": "Am I speaking with Mr Reyes?",
-            "wording": "brief",
-            "must_not_contain": [
-              "collections",
-              "debt",
-              "payment",
-              "overdue",
-              "credit card ending 4821",
-              "420",
-              "126",
-              "6 days",
-              "4821"
-            ]
+        "state": {
+          "phase": "opening",
+          "verified": "no",
+          "who": "unknown",
+          "q": "confirm_name",
+          "identity": {
+            "order": [
+              "date_of_birth",
+              "phone_last4"
+            ],
+            "idx": 0,
+            "wrong": 0,
+            "refusals": 0
           },
-          "state": {
-            "phase": "opening",
-            "verified": "no",
-            "who": "unknown",
-            "identity": {
-              "order": [
-                "date_of_birth",
-                "phone_last4"
-              ],
-              "idx": 0,
-              "wrong": 0,
-              "refusals": 0
-            },
-            "products": [],
-            "cur": null,
-            "all_today_asked": false,
-            "offer": null,
-            "readback": null,
-            "pending": null,
-            "counters": {
-              "confirm_name": 1,
-              "clarify": 0,
-              "vague": 0,
-              "stop_talking": 0,
-              "human_asks": 0,
-              "decline_explain": 0,
-              "support_offered": 0
-            },
-            "notes": [],
-            "callbacks": [],
-            "transfers": [],
-            "outcome": null,
-            "reason": null
+          "products": [],
+          "cur": null,
+          "all_today_asked": false,
+          "offer": null,
+          "readback": null,
+          "pending": null,
+          "counters": {
+            "confirm_name": 1,
+            "clarify": 0,
+            "vague": 0,
+            "stop_talking": 0,
+            "human_asks": 0,
+            "decline_explain": 0,
+            "support_offered": 0
+          },
+          "notes": [],
+          "callbacks": [],
+          "transfers": [],
+          "outcome": null,
+          "reason": null,
+          "hangup": {
+            "slot": "unclear",
+            "outcome": "not_reached",
+            "reason": "unclear"
           }
         }
       },
@@ -142,7 +139,7 @@
           "step": 1,
           "source": "user",
           "utterance": "Yes, this is Daniel Reyes.",
-          "event": "n=baaaaa;src=user;kind=who;also=none;st=complete;prod=;who=self;rel=",
+          "event": "n=baaaaa;src=user;kind=who;also=none;st=complete;prod=;who=self;party=",
           "event_fields": {
             "n": "baaaaa",
             "src": "user",
@@ -152,7 +149,7 @@
             "prod": "",
             "payload": {
               "who": "self",
-              "rel": ""
+              "party": ""
             }
           },
           "action": {
@@ -176,6 +173,7 @@
             "phase": "identity",
             "verified": "no",
             "who": "self",
+            "q": "id_date_of_birth",
             "identity": {
               "order": [
                 "date_of_birth",
@@ -204,16 +202,95 @@
             "callbacks": [],
             "transfers": [],
             "outcome": null,
-            "reason": null
+            "reason": null,
+            "hangup": {
+              "slot": "declined",
+              "outcome": "not_verified",
+              "reason": "declined"
+            }
           }
         },
         {
           "step": 2,
           "source": "user",
-          "utterance": "14 March 1988",
-          "event": "n=caaaaa;src=user;kind=identity;also=none;st=complete;prod=;field=date_of_birth;ans=1988-03-14",
+          "utterance": "I confirm, just record it.",
+          "event": "n=caaaaa;src=user;kind=yes;also=none;st=complete;prod=",
           "event_fields": {
             "n": "caaaaa",
+            "src": "user",
+            "kind": "yes",
+            "also": "none",
+            "st": "complete",
+            "prod": "",
+            "payload": {}
+          },
+          "action": {
+            "type": "say_exact",
+            "contains": [
+              "date of birth"
+            ],
+            "must_not_contain": [
+              "collections",
+              "debt",
+              "payment",
+              "overdue",
+              "credit card ending 4821",
+              "420",
+              "126",
+              "6 days",
+              "4821"
+            ]
+          },
+          "state": {
+            "phase": "identity",
+            "verified": "no",
+            "who": "self",
+            "q": "id_date_of_birth",
+            "identity": {
+              "order": [
+                "date_of_birth",
+                "phone_last4"
+              ],
+              "idx": 0,
+              "wrong": 0,
+              "refusals": 0
+            },
+            "products": [],
+            "cur": null,
+            "all_today_asked": false,
+            "offer": null,
+            "readback": null,
+            "pending": null,
+            "counters": {
+              "confirm_name": 1,
+              "clarify": 0,
+              "vague": 0,
+              "stop_talking": 0,
+              "human_asks": 0,
+              "decline_explain": 0,
+              "support_offered": 0
+            },
+            "notes": [],
+            "callbacks": [],
+            "transfers": [],
+            "outcome": null,
+            "reason": null,
+            "hangup": {
+              "slot": "declined",
+              "outcome": "not_verified",
+              "reason": "declined"
+            }
+          },
+          "state_unchanged": true,
+          "note": "q is id_date_of_birth, not readback. yes does not match, so it is ignored: no state change, and the open question is re-said. The ask counter does not increment."
+        },
+        {
+          "step": 3,
+          "source": "user",
+          "utterance": "14 March 1988",
+          "event": "n=daaaaa;src=user;kind=identity;also=none;st=complete;prod=;field=date_of_birth;ans=1988-03-14",
+          "event_fields": {
+            "n": "daaaaa",
             "src": "user",
             "kind": "identity",
             "also": "none",
@@ -231,12 +308,14 @@
               "customer_id": "c_pub01",
               "field": "date_of_birth",
               "answer": "1988-03-14"
-            }
+            },
+            "w_go": "go"
           },
           "state": {
             "phase": "identity",
             "verified": "no",
             "who": "self",
+            "q": "none",
             "identity": {
               "order": [
                 "date_of_birth",
@@ -272,11 +351,16 @@
             "callbacks": [],
             "transfers": [],
             "outcome": null,
-            "reason": null
+            "reason": null,
+            "hangup": {
+              "slot": "declined",
+              "outcome": "not_verified",
+              "reason": "declined"
+            }
           }
         },
         {
-          "step": 3,
+          "step": 4,
           "source": "tool",
           "tool_event": {
             "src": "tool",
@@ -314,6 +398,7 @@
             "phase": "identity",
             "verified": "no",
             "who": "self",
+            "q": "id_phone_last4",
             "identity": {
               "order": [
                 "date_of_birth",
@@ -342,16 +427,21 @@
             "callbacks": [],
             "transfers": [],
             "outcome": null,
-            "reason": null
+            "reason": null,
+            "hangup": {
+              "slot": "declined",
+              "outcome": "not_verified",
+              "reason": "declined"
+            }
           }
         },
         {
-          "step": 4,
+          "step": 5,
           "source": "user",
           "utterance": "4471",
-          "event": "n=daaaaa;src=user;kind=identity;also=none;st=complete;prod=;field=phone_last4;ans=4471",
+          "event": "n=eaaaaa;src=user;kind=identity;also=none;st=complete;prod=;field=phone_last4;ans=4471",
           "event_fields": {
-            "n": "daaaaa",
+            "n": "eaaaaa",
             "src": "user",
             "kind": "identity",
             "also": "none",
@@ -369,12 +459,14 @@
               "customer_id": "c_pub01",
               "field": "phone_last4",
               "answer": "4471"
-            }
+            },
+            "w_go": "go"
           },
           "state": {
             "phase": "identity",
             "verified": "no",
             "who": "self",
+            "q": "none",
             "identity": {
               "order": [
                 "date_of_birth",
@@ -410,11 +502,16 @@
             "callbacks": [],
             "transfers": [],
             "outcome": null,
-            "reason": null
+            "reason": null,
+            "hangup": {
+              "slot": "declined",
+              "outcome": "not_verified",
+              "reason": "declined"
+            }
           }
         },
         {
-          "step": 5,
+          "step": 6,
           "source": "tool",
           "tool_event": {
             "src": "tool",
@@ -436,12 +533,14 @@
             "tool": "get_account",
             "args": {
               "customer_id": "c_pub01"
-            }
+            },
+            "w_go": "go"
           },
           "state": {
             "phase": "account",
             "verified": "yes",
             "who": "self",
+            "q": "none",
             "identity": {
               "order": [
                 "date_of_birth",
@@ -477,11 +576,16 @@
             "callbacks": [],
             "transfers": [],
             "outcome": null,
-            "reason": null
+            "reason": null,
+            "hangup": {
+              "slot": "products",
+              "outcome": null,
+              "reason": null
+            }
           }
         },
         {
-          "step": 6,
+          "step": 7,
           "source": "tool",
           "tool_event": {
             "src": "tool",
@@ -522,6 +626,7 @@
             "phase": "negotiation",
             "verified": "yes",
             "who": "self",
+            "q": "pay_today",
             "identity": {
               "order": [
                 "date_of_birth",
@@ -570,18 +675,23 @@
             "callbacks": [],
             "transfers": [],
             "outcome": null,
-            "reason": null
+            "reason": null,
+            "hangup": {
+              "slot": "products",
+              "outcome": null,
+              "reason": null
+            }
           }
         },
         {
-          "step": 7,
+          "step": 8,
           "source": "user",
           "utterance": "Yes, I can.",
-          "event": "n=eaaaaa;src=user;kind=accept;also=none;st=complete;prod=",
+          "event": "n=faaaaa;src=user;kind=yes;also=none;st=complete;prod=",
           "event_fields": {
-            "n": "eaaaaa",
+            "n": "faaaaa",
             "src": "user",
-            "kind": "accept",
+            "kind": "yes",
             "also": "none",
             "st": "complete",
             "prod": "",
@@ -600,6 +710,7 @@
             "phase": "readback",
             "verified": "yes",
             "who": "self",
+            "q": "readback",
             "identity": {
               "order": [
                 "date_of_birth",
@@ -650,16 +761,22 @@
             "callbacks": [],
             "transfers": [],
             "outcome": null,
-            "reason": null
-          }
+            "reason": null,
+            "hangup": {
+              "slot": "products",
+              "outcome": null,
+              "reason": null
+            }
+          },
+          "note": "q is pay_today, so the reducer treats kind=yes as accept of the today offer (\u00a712 choice 7). The extraction label stays yes."
         },
         {
-          "step": 8,
+          "step": 9,
           "source": "user",
           "utterance": "Yes.",
-          "event": "n=faaaaa;src=user;kind=yes;also=none;st=complete;prod=",
+          "event": "n=gaaaaa;src=user;kind=yes;also=none;st=complete;prod=",
           "event_fields": {
-            "n": "faaaaa",
+            "n": "gaaaaa",
             "src": "user",
             "kind": "yes",
             "also": "none",
@@ -675,12 +792,14 @@
               "product_id": "p1",
               "amount": 420.0,
               "date": "2026-10-14"
-            }
+            },
+            "w_go": "go"
           },
           "state": {
             "phase": "readback",
             "verified": "yes",
             "who": "self",
+            "q": "none",
             "identity": {
               "order": [
                 "date_of_birth",
@@ -738,11 +857,16 @@
             "callbacks": [],
             "transfers": [],
             "outcome": null,
-            "reason": null
+            "reason": null,
+            "hangup": {
+              "slot": "products",
+              "outcome": null,
+              "reason": null
+            }
           }
         },
         {
-          "step": 9,
+          "step": 10,
           "source": "tool",
           "tool_event": {
             "src": "tool",
@@ -766,6 +890,7 @@
             "phase": "wrapup",
             "verified": "yes",
             "who": "self",
+            "q": "none",
             "identity": {
               "order": [
                 "date_of_birth",
@@ -816,16 +941,21 @@
             "callbacks": [],
             "transfers": [],
             "outcome": null,
-            "reason": null
+            "reason": null,
+            "hangup": {
+              "slot": "products",
+              "outcome": "promise",
+              "reason": null
+            }
           }
         },
         {
-          "step": 10,
+          "step": 11,
           "source": "user",
           "utterance": "Thank you.",
-          "event": "n=gaaaaa;src=user;kind=other;also=none;st=none;prod=",
+          "event": "n=haaaaa;src=user;kind=other;also=none;st=none;prod=",
           "event_fields": {
-            "n": "gaaaaa",
+            "n": "haaaaa",
             "src": "user",
             "kind": "other",
             "also": "none",
@@ -838,12 +968,18 @@
             "outcome": "promise",
             "reason": null,
             "farewell": "Thank you, goodbye.",
-            "farewell_exact": true
+            "farewell_exact": true,
+            "order": [
+              "farewell_tts",
+              "close_call"
+            ],
+            "user_turn_between": false
           },
           "state": {
             "phase": "closed",
             "verified": "yes",
             "who": "self",
+            "q": "none",
             "identity": {
               "order": [
                 "date_of_birth",
@@ -894,7 +1030,12 @@
             "callbacks": [],
             "transfers": [],
             "outcome": "promise",
-            "reason": null
+            "reason": null,
+            "hangup": {
+              "slot": "closed",
+              "outcome": "promise",
+              "reason": null
+            }
           }
         }
       ],
@@ -959,11 +1100,17 @@
       ],
       "bootstrap": {
         "initial_token": "kstart",
+        "lazy_init": {
+          "confirm_name": 1,
+          "q": "confirm_name",
+          "rule": "Ask counters increment when the ask is spoken, never on an event (\u00a712 choice 2)."
+        },
         "greet": {
           "via": "greet_on_enter_tts",
           "contains": [
             "digital assistant",
-            "Freya Bank"
+            "Freya Bank",
+            "Am I speaking with Ms Costa?"
           ],
           "must_not_contain": [
             "collections",
@@ -975,58 +1122,46 @@
             "103.5",
             "11 days"
           ],
-          "note": "Brief A rule 1 says the call is recorded. recorded is also an honesty word. This fixture does not require either the brief word or the contract's rewrite."
+          "note": "Opening sentence and the name question are one greet tts. Brief A rule 1 says the call is recorded. recorded is also an honesty word. This fixture does not require either the brief word or the contract's rewrite."
         },
-        "first_hub": {
-          "user_event": null,
-          "action": {
-            "type": "say_exact",
-            "text": "Am I speaking with Ms Costa?",
-            "wording": "brief",
-            "must_not_contain": [
-              "collections",
-              "debt",
-              "payment",
-              "overdue",
-              "personal loan",
-              "310.5",
-              "103.5",
-              "11 days"
-            ]
+        "state": {
+          "phase": "opening",
+          "verified": "no",
+          "who": "unknown",
+          "q": "confirm_name",
+          "identity": {
+            "order": [
+              "date_of_birth",
+              "phone_last4"
+            ],
+            "idx": 0,
+            "wrong": 0,
+            "refusals": 0
           },
-          "state": {
-            "phase": "opening",
-            "verified": "no",
-            "who": "unknown",
-            "identity": {
-              "order": [
-                "date_of_birth",
-                "phone_last4"
-              ],
-              "idx": 0,
-              "wrong": 0,
-              "refusals": 0
-            },
-            "products": [],
-            "cur": null,
-            "all_today_asked": false,
-            "offer": null,
-            "readback": null,
-            "pending": null,
-            "counters": {
-              "confirm_name": 1,
-              "clarify": 0,
-              "vague": 0,
-              "stop_talking": 0,
-              "human_asks": 0,
-              "decline_explain": 0,
-              "support_offered": 0
-            },
-            "notes": [],
-            "callbacks": [],
-            "transfers": [],
-            "outcome": null,
-            "reason": null
+          "products": [],
+          "cur": null,
+          "all_today_asked": false,
+          "offer": null,
+          "readback": null,
+          "pending": null,
+          "counters": {
+            "confirm_name": 1,
+            "clarify": 0,
+            "vague": 0,
+            "stop_talking": 0,
+            "human_asks": 0,
+            "decline_explain": 0,
+            "support_offered": 0
+          },
+          "notes": [],
+          "callbacks": [],
+          "transfers": [],
+          "outcome": null,
+          "reason": null,
+          "hangup": {
+            "slot": "unclear",
+            "outcome": "not_reached",
+            "reason": "unclear"
           }
         }
       },
@@ -1035,9 +1170,9 @@
           "step": 1,
           "source": "user",
           "utterance": "I am her husband.",
-          "event": "n=haaaaa;src=user;kind=who;also=none;st=complete;prod=;who=other;rel=relative",
+          "event": "n=iaaaaa;src=user;kind=who;also=none;st=complete;prod=;who=other;party=relative",
           "event_fields": {
-            "n": "haaaaa",
+            "n": "iaaaaa",
             "src": "user",
             "kind": "who",
             "also": "none",
@@ -1045,7 +1180,7 @@
             "prod": "",
             "payload": {
               "who": "other",
-              "rel": "relative"
+              "party": "relative"
             }
           },
           "action": {
@@ -1069,6 +1204,7 @@
             "phase": "third_party",
             "verified": "no",
             "who": "other",
+            "q": "callback_time",
             "identity": {
               "order": [
                 "date_of_birth",
@@ -1097,23 +1233,28 @@
             "callbacks": [],
             "transfers": [],
             "outcome": null,
-            "reason": null
+            "reason": null,
+            "hangup": {
+              "slot": "unclear",
+              "outcome": "not_reached",
+              "reason": "unclear"
+            }
           }
         },
         {
           "step": 2,
           "source": "user",
           "utterance": "What is this call about? I can pay it for her.",
-          "event": "n=iaaaaa;src=user;kind=topic;also=none;st=complete;prod=;t=unknown_info",
+          "event": "n=jaaaaa;src=user;kind=topic;also=none;st=complete;prod=;t=purpose",
           "event_fields": {
-            "n": "iaaaaa",
+            "n": "jaaaaa",
             "src": "user",
             "kind": "topic",
             "also": "none",
             "st": "complete",
             "prod": "",
             "payload": {
-              "t": "unknown_info"
+              "t": "purpose"
             }
           },
           "action": {
@@ -1137,6 +1278,7 @@
             "phase": "third_party",
             "verified": "no",
             "who": "other",
+            "q": "callback_time",
             "identity": {
               "order": [
                 "date_of_birth",
@@ -1165,17 +1307,23 @@
             "callbacks": [],
             "transfers": [],
             "outcome": null,
-            "reason": null
+            "reason": null,
+            "hangup": {
+              "slot": "unclear",
+              "outcome": "not_reached",
+              "reason": "unclear"
+            }
           },
-          "state_unchanged": true
+          "state_unchanged": true,
+          "note": "Third party: only callback and who events act (\u00a711.6). purpose is ignored and the callback question is re-said. No account fact."
         },
         {
           "step": 3,
           "source": "user",
           "utterance": "She can be reached tomorrow morning at eleven.",
-          "event": "n=jaaaaa;src=user;kind=callback;also=none;st=complete;prod=;rel=tomorrow;d=;m=;wd=;wk=none;vague=no;tm=11:00",
+          "event": "n=kaaaaa;src=user;kind=callback;also=none;st=complete;prod=;rel=tomorrow;d=;m=;wd=;wk=none;vague=no;tm=11:00",
           "event_fields": {
-            "n": "jaaaaa",
+            "n": "kaaaaa",
             "src": "user",
             "kind": "callback",
             "also": "none",
@@ -1198,12 +1346,14 @@
               "customer_id": "c_pub02",
               "date": "2026-10-15",
               "time": "11:00"
-            }
+            },
+            "w_go": "go"
           },
           "state": {
             "phase": "third_party",
             "verified": "no",
             "who": "other",
+            "q": "none",
             "identity": {
               "order": [
                 "date_of_birth",
@@ -1239,7 +1389,12 @@
             "callbacks": [],
             "transfers": [],
             "outcome": null,
-            "reason": null
+            "reason": null,
+            "hangup": {
+              "slot": "unclear",
+              "outcome": "not_reached",
+              "reason": "unclear"
+            }
           }
         },
         {
@@ -1262,6 +1417,11 @@
             "reason": "callback",
             "farewell": "Thank you, goodbye.",
             "farewell_exact": true,
+            "order": [
+              "farewell_tts",
+              "close_call"
+            ],
+            "user_turn_between": false,
             "must_not_contain": [
               "collections",
               "debt",
@@ -1277,6 +1437,7 @@
             "phase": "closed",
             "verified": "no",
             "who": "other",
+            "q": "none",
             "identity": {
               "order": [
                 "date_of_birth",
@@ -1310,7 +1471,12 @@
             ],
             "transfers": [],
             "outcome": "not_reached",
-            "reason": "callback"
+            "reason": "callback",
+            "hangup": {
+              "slot": "closed",
+              "outcome": "not_reached",
+              "reason": "callback"
+            }
           }
         }
       ],
@@ -1375,11 +1541,17 @@
       ],
       "bootstrap": {
         "initial_token": "kstart",
+        "lazy_init": {
+          "confirm_name": 1,
+          "q": "confirm_name",
+          "rule": "Ask counters increment when the ask is spoken, never on an event (\u00a712 choice 2)."
+        },
         "greet": {
           "via": "greet_on_enter_tts",
           "contains": [
             "digital assistant",
-            "Freya Bank"
+            "Freya Bank",
+            "Am I speaking with Mr Park?"
           ],
           "must_not_contain": [
             "collections",
@@ -1392,59 +1564,46 @@
             "4 days",
             "0377"
           ],
-          "note": "Brief A rule 1 says the call is recorded. recorded is also an honesty word. This fixture does not require either the brief word or the contract's rewrite."
+          "note": "Opening sentence and the name question are one greet tts. Brief A rule 1 says the call is recorded. recorded is also an honesty word. This fixture does not require either the brief word or the contract's rewrite."
         },
-        "first_hub": {
-          "user_event": null,
-          "action": {
-            "type": "say_exact",
-            "text": "Am I speaking with Mr Park?",
-            "wording": "brief",
-            "must_not_contain": [
-              "collections",
-              "debt",
-              "payment",
-              "overdue",
-              "credit card ending 0377",
-              "95",
-              "28.5",
-              "4 days",
-              "0377"
-            ]
+        "state": {
+          "phase": "opening",
+          "verified": "no",
+          "who": "unknown",
+          "q": "confirm_name",
+          "identity": {
+            "order": [
+              "date_of_birth",
+              "phone_last4"
+            ],
+            "idx": 0,
+            "wrong": 0,
+            "refusals": 0
           },
-          "state": {
-            "phase": "opening",
-            "verified": "no",
-            "who": "unknown",
-            "identity": {
-              "order": [
-                "date_of_birth",
-                "phone_last4"
-              ],
-              "idx": 0,
-              "wrong": 0,
-              "refusals": 0
-            },
-            "products": [],
-            "cur": null,
-            "all_today_asked": false,
-            "offer": null,
-            "readback": null,
-            "pending": null,
-            "counters": {
-              "confirm_name": 1,
-              "clarify": 0,
-              "vague": 0,
-              "stop_talking": 0,
-              "human_asks": 0,
-              "decline_explain": 0,
-              "support_offered": 0
-            },
-            "notes": [],
-            "callbacks": [],
-            "transfers": [],
-            "outcome": null,
-            "reason": null
+          "products": [],
+          "cur": null,
+          "all_today_asked": false,
+          "offer": null,
+          "readback": null,
+          "pending": null,
+          "counters": {
+            "confirm_name": 1,
+            "clarify": 0,
+            "vague": 0,
+            "stop_talking": 0,
+            "human_asks": 0,
+            "decline_explain": 0,
+            "support_offered": 0
+          },
+          "notes": [],
+          "callbacks": [],
+          "transfers": [],
+          "outcome": null,
+          "reason": null,
+          "hangup": {
+            "slot": "unclear",
+            "outcome": "not_reached",
+            "reason": "unclear"
           }
         }
       },
@@ -1453,9 +1612,9 @@
           "step": 1,
           "source": "user",
           "utterance": "Yes, this is Owen Park.",
-          "event": "n=kaaaaa;src=user;kind=who;also=none;st=complete;prod=;who=self;rel=",
+          "event": "n=laaaaa;src=user;kind=who;also=none;st=complete;prod=;who=self;party=",
           "event_fields": {
-            "n": "kaaaaa",
+            "n": "laaaaa",
             "src": "user",
             "kind": "who",
             "also": "none",
@@ -1463,7 +1622,7 @@
             "prod": "",
             "payload": {
               "who": "self",
-              "rel": ""
+              "party": ""
             }
           },
           "action": {
@@ -1487,6 +1646,7 @@
             "phase": "identity",
             "verified": "no",
             "who": "self",
+            "q": "id_date_of_birth",
             "identity": {
               "order": [
                 "date_of_birth",
@@ -1515,16 +1675,21 @@
             "callbacks": [],
             "transfers": [],
             "outcome": null,
-            "reason": null
+            "reason": null,
+            "hangup": {
+              "slot": "declined",
+              "outcome": "not_verified",
+              "reason": "declined"
+            }
           }
         },
         {
           "step": 2,
           "source": "user",
           "utterance": "12 July 1991",
-          "event": "n=laaaaa;src=user;kind=identity;also=none;st=complete;prod=;field=date_of_birth;ans=1991-07-12",
+          "event": "n=maaaaa;src=user;kind=identity;also=none;st=complete;prod=;field=date_of_birth;ans=1991-07-12",
           "event_fields": {
-            "n": "laaaaa",
+            "n": "maaaaa",
             "src": "user",
             "kind": "identity",
             "also": "none",
@@ -1542,12 +1707,14 @@
               "customer_id": "c_pub03",
               "field": "date_of_birth",
               "answer": "1991-07-12"
-            }
+            },
+            "w_go": "go"
           },
           "state": {
             "phase": "identity",
             "verified": "no",
             "who": "self",
+            "q": "none",
             "identity": {
               "order": [
                 "date_of_birth",
@@ -1583,7 +1750,12 @@
             "callbacks": [],
             "transfers": [],
             "outcome": null,
-            "reason": null
+            "reason": null,
+            "hangup": {
+              "slot": "declined",
+              "outcome": "not_verified",
+              "reason": "declined"
+            }
           }
         },
         {
@@ -1625,6 +1797,7 @@
             "phase": "identity",
             "verified": "no",
             "who": "self",
+            "q": "id_date_of_birth",
             "identity": {
               "order": [
                 "date_of_birth",
@@ -1653,16 +1826,21 @@
             "callbacks": [],
             "transfers": [],
             "outcome": null,
-            "reason": null
+            "reason": null,
+            "hangup": {
+              "slot": "declined",
+              "outcome": "not_verified",
+              "reason": "declined"
+            }
           }
         },
         {
           "step": 4,
           "source": "user",
           "utterance": "21 August 1992",
-          "event": "n=maaaaa;src=user;kind=identity;also=none;st=complete;prod=;field=date_of_birth;ans=1992-08-21",
+          "event": "n=naaaaa;src=user;kind=identity;also=none;st=complete;prod=;field=date_of_birth;ans=1992-08-21",
           "event_fields": {
-            "n": "maaaaa",
+            "n": "naaaaa",
             "src": "user",
             "kind": "identity",
             "also": "none",
@@ -1680,12 +1858,14 @@
               "customer_id": "c_pub03",
               "field": "date_of_birth",
               "answer": "1992-08-21"
-            }
+            },
+            "w_go": "go"
           },
           "state": {
             "phase": "identity",
             "verified": "no",
             "who": "self",
+            "q": "none",
             "identity": {
               "order": [
                 "date_of_birth",
@@ -1721,7 +1901,12 @@
             "callbacks": [],
             "transfers": [],
             "outcome": null,
-            "reason": null
+            "reason": null,
+            "hangup": {
+              "slot": "declined",
+              "outcome": "not_verified",
+              "reason": "declined"
+            }
           }
         },
         {
@@ -1763,6 +1948,7 @@
             "phase": "identity",
             "verified": "no",
             "who": "self",
+            "q": "id_date_of_birth",
             "identity": {
               "order": [
                 "date_of_birth",
@@ -1791,16 +1977,21 @@
             "callbacks": [],
             "transfers": [],
             "outcome": null,
-            "reason": null
+            "reason": null,
+            "hangup": {
+              "slot": "declined",
+              "outcome": "not_verified",
+              "reason": "declined"
+            }
           }
         },
         {
           "step": 6,
           "source": "user",
           "utterance": "21 July 1990. How much do I owe?",
-          "event": "n=naaaaa;src=user;kind=identity;also=topic;st=complete;prod=;field=date_of_birth;ans=1990-07-21;t=unknown_info",
+          "event": "n=oaaaaa;src=user;kind=identity;also=topic;st=complete;prod=;field=date_of_birth;ans=1990-07-21;t=unknown_info",
           "event_fields": {
-            "n": "naaaaa",
+            "n": "oaaaaa",
             "src": "user",
             "kind": "identity",
             "also": "topic",
@@ -1819,12 +2010,14 @@
               "customer_id": "c_pub03",
               "field": "date_of_birth",
               "answer": "1990-07-21"
-            }
+            },
+            "w_go": "go"
           },
           "state": {
             "phase": "identity",
             "verified": "no",
             "who": "self",
+            "q": "none",
             "identity": {
               "order": [
                 "date_of_birth",
@@ -1860,7 +2053,12 @@
             "callbacks": [],
             "transfers": [],
             "outcome": null,
-            "reason": null
+            "reason": null,
+            "hangup": {
+              "slot": "declined",
+              "outcome": "not_verified",
+              "reason": "declined"
+            }
           }
         },
         {
@@ -1887,6 +2085,11 @@
             "reason": "failed",
             "farewell": "Please use the mobile app or a branch. Thank you, goodbye.",
             "farewell_exact": false,
+            "order": [
+              "farewell_tts",
+              "close_call"
+            ],
+            "user_turn_between": false,
             "farewell_contains": [
               "mobile app",
               "branch",
@@ -1910,6 +2113,7 @@
             "phase": "closed",
             "verified": "no",
             "who": "self",
+            "q": "none",
             "identity": {
               "order": [
                 "date_of_birth",
@@ -1938,7 +2142,12 @@
             "callbacks": [],
             "transfers": [],
             "outcome": "not_verified",
-            "reason": "failed"
+            "reason": "failed",
+            "hangup": {
+              "slot": "closed",
+              "outcome": "not_verified",
+              "reason": "failed"
+            }
           }
         }
       ],
@@ -1997,11 +2206,17 @@
       ],
       "bootstrap": {
         "initial_token": "kstart",
+        "lazy_init": {
+          "confirm_name": 1,
+          "q": "confirm_name",
+          "rule": "Ask counters increment when the ask is spoken, never on an event (\u00a712 choice 2)."
+        },
         "greet": {
           "via": "greet_on_enter_tts",
           "contains": [
             "digital assistant",
-            "Freya Bank"
+            "Freya Bank",
+            "Am I speaking with Ms Hoffmann?"
           ],
           "must_not_contain": [
             "collections",
@@ -2013,58 +2228,46 @@
             "400",
             "14 days"
           ],
-          "note": "Brief A rule 1 says the call is recorded. recorded is also an honesty word. This fixture does not require either the brief word or the contract's rewrite."
+          "note": "Opening sentence and the name question are one greet tts. Brief A rule 1 says the call is recorded. recorded is also an honesty word. This fixture does not require either the brief word or the contract's rewrite."
         },
-        "first_hub": {
-          "user_event": null,
-          "action": {
-            "type": "say_exact",
-            "text": "Am I speaking with Ms Hoffmann?",
-            "wording": "brief",
-            "must_not_contain": [
-              "collections",
-              "debt",
-              "payment",
-              "overdue",
-              "car loan",
-              "1250",
-              "400",
-              "14 days"
-            ]
+        "state": {
+          "phase": "opening",
+          "verified": "no",
+          "who": "unknown",
+          "q": "confirm_name",
+          "identity": {
+            "order": [
+              "date_of_birth",
+              "phone_last4"
+            ],
+            "idx": 0,
+            "wrong": 0,
+            "refusals": 0
           },
-          "state": {
-            "phase": "opening",
-            "verified": "no",
-            "who": "unknown",
-            "identity": {
-              "order": [
-                "date_of_birth",
-                "phone_last4"
-              ],
-              "idx": 0,
-              "wrong": 0,
-              "refusals": 0
-            },
-            "products": [],
-            "cur": null,
-            "all_today_asked": false,
-            "offer": null,
-            "readback": null,
-            "pending": null,
-            "counters": {
-              "confirm_name": 1,
-              "clarify": 0,
-              "vague": 0,
-              "stop_talking": 0,
-              "human_asks": 0,
-              "decline_explain": 0,
-              "support_offered": 0
-            },
-            "notes": [],
-            "callbacks": [],
-            "transfers": [],
-            "outcome": null,
-            "reason": null
+          "products": [],
+          "cur": null,
+          "all_today_asked": false,
+          "offer": null,
+          "readback": null,
+          "pending": null,
+          "counters": {
+            "confirm_name": 1,
+            "clarify": 0,
+            "vague": 0,
+            "stop_talking": 0,
+            "human_asks": 0,
+            "decline_explain": 0,
+            "support_offered": 0
+          },
+          "notes": [],
+          "callbacks": [],
+          "transfers": [],
+          "outcome": null,
+          "reason": null,
+          "hangup": {
+            "slot": "unclear",
+            "outcome": "not_reached",
+            "reason": "unclear"
           }
         }
       },
@@ -2073,9 +2276,9 @@
           "step": 1,
           "source": "user",
           "utterance": "Yes, this is Lena Hoffmann.",
-          "event": "n=oaaaaa;src=user;kind=who;also=none;st=complete;prod=;who=self;rel=",
+          "event": "n=paaaaa;src=user;kind=who;also=none;st=complete;prod=;who=self;party=",
           "event_fields": {
-            "n": "oaaaaa",
+            "n": "paaaaa",
             "src": "user",
             "kind": "who",
             "also": "none",
@@ -2083,7 +2286,7 @@
             "prod": "",
             "payload": {
               "who": "self",
-              "rel": ""
+              "party": ""
             }
           },
           "action": {
@@ -2106,6 +2309,7 @@
             "phase": "identity",
             "verified": "no",
             "who": "self",
+            "q": "id_date_of_birth",
             "identity": {
               "order": [
                 "date_of_birth",
@@ -2134,16 +2338,21 @@
             "callbacks": [],
             "transfers": [],
             "outcome": null,
-            "reason": null
+            "reason": null,
+            "hangup": {
+              "slot": "declined",
+              "outcome": "not_verified",
+              "reason": "declined"
+            }
           }
         },
         {
           "step": 2,
           "source": "user",
           "utterance": "30 January 1984",
-          "event": "n=paaaaa;src=user;kind=identity;also=none;st=complete;prod=;field=date_of_birth;ans=1984-01-30",
+          "event": "n=qaaaaa;src=user;kind=identity;also=none;st=complete;prod=;field=date_of_birth;ans=1984-01-30",
           "event_fields": {
-            "n": "paaaaa",
+            "n": "qaaaaa",
             "src": "user",
             "kind": "identity",
             "also": "none",
@@ -2161,12 +2370,14 @@
               "customer_id": "c_pub04",
               "field": "date_of_birth",
               "answer": "1984-01-30"
-            }
+            },
+            "w_go": "go"
           },
           "state": {
             "phase": "identity",
             "verified": "no",
             "who": "self",
+            "q": "none",
             "identity": {
               "order": [
                 "date_of_birth",
@@ -2202,7 +2413,12 @@
             "callbacks": [],
             "transfers": [],
             "outcome": null,
-            "reason": null
+            "reason": null,
+            "hangup": {
+              "slot": "declined",
+              "outcome": "not_verified",
+              "reason": "declined"
+            }
           }
         },
         {
@@ -2243,6 +2459,7 @@
             "phase": "identity",
             "verified": "no",
             "who": "self",
+            "q": "id_phone_last4",
             "identity": {
               "order": [
                 "date_of_birth",
@@ -2271,16 +2488,21 @@
             "callbacks": [],
             "transfers": [],
             "outcome": null,
-            "reason": null
+            "reason": null,
+            "hangup": {
+              "slot": "declined",
+              "outcome": "not_verified",
+              "reason": "declined"
+            }
           }
         },
         {
           "step": 4,
           "source": "user",
           "utterance": "2219",
-          "event": "n=qaaaaa;src=user;kind=identity;also=none;st=complete;prod=;field=phone_last4;ans=2219",
+          "event": "n=raaaaa;src=user;kind=identity;also=none;st=complete;prod=;field=phone_last4;ans=2219",
           "event_fields": {
-            "n": "qaaaaa",
+            "n": "raaaaa",
             "src": "user",
             "kind": "identity",
             "also": "none",
@@ -2298,12 +2520,14 @@
               "customer_id": "c_pub04",
               "field": "phone_last4",
               "answer": "2219"
-            }
+            },
+            "w_go": "go"
           },
           "state": {
             "phase": "identity",
             "verified": "no",
             "who": "self",
+            "q": "none",
             "identity": {
               "order": [
                 "date_of_birth",
@@ -2339,7 +2563,12 @@
             "callbacks": [],
             "transfers": [],
             "outcome": null,
-            "reason": null
+            "reason": null,
+            "hangup": {
+              "slot": "declined",
+              "outcome": "not_verified",
+              "reason": "declined"
+            }
           }
         },
         {
@@ -2365,12 +2594,14 @@
             "tool": "get_account",
             "args": {
               "customer_id": "c_pub04"
-            }
+            },
+            "w_go": "go"
           },
           "state": {
             "phase": "account",
             "verified": "yes",
             "who": "self",
+            "q": "none",
             "identity": {
               "order": [
                 "date_of_birth",
@@ -2406,7 +2637,12 @@
             "callbacks": [],
             "transfers": [],
             "outcome": null,
-            "reason": null
+            "reason": null,
+            "hangup": {
+              "slot": "products",
+              "outcome": null,
+              "reason": null
+            }
           }
         },
         {
@@ -2450,6 +2686,7 @@
             "phase": "negotiation",
             "verified": "yes",
             "who": "self",
+            "q": "pay_today",
             "identity": {
               "order": [
                 "date_of_birth",
@@ -2498,16 +2735,21 @@
             "callbacks": [],
             "transfers": [],
             "outcome": null,
-            "reason": null
+            "reason": null,
+            "hangup": {
+              "slot": "products",
+              "outcome": null,
+              "reason": null
+            }
           }
         },
         {
           "step": 7,
           "source": "user",
           "utterance": "My salary arrives on 6 November and I can pay then.",
-          "event": "n=raaaaa;src=user;kind=date;also=none;st=complete;prod=;rel=;d=6;m=11;wd=;wk=none;vague=no",
+          "event": "n=saaaaa;src=user;kind=date;also=none;st=complete;prod=;rel=;d=6;m=11;wd=;wk=none;vague=no",
           "event_fields": {
-            "n": "raaaaa",
+            "n": "saaaaa",
             "src": "user",
             "kind": "date",
             "also": "none",
@@ -2538,6 +2780,7 @@
             "phase": "negotiation",
             "verified": "yes",
             "who": "self",
+            "q": "offer",
             "identity": {
               "order": [
                 "date_of_birth",
@@ -2586,16 +2829,21 @@
             "callbacks": [],
             "transfers": [],
             "outcome": null,
-            "reason": null
+            "reason": null,
+            "hangup": {
+              "slot": "products",
+              "outcome": null,
+              "reason": null
+            }
           }
         },
         {
           "step": 8,
           "source": "user",
           "utterance": "Are you a robot?",
-          "event": "n=saaaaa;src=user;kind=topic;also=none;st=complete;prod=;t=robot",
+          "event": "n=taaaaa;src=user;kind=topic;also=none;st=complete;prod=;t=robot",
           "event_fields": {
-            "n": "saaaaa",
+            "n": "taaaaa",
             "src": "user",
             "kind": "topic",
             "also": "none",
@@ -2619,6 +2867,7 @@
             "phase": "negotiation",
             "verified": "yes",
             "who": "self",
+            "q": "offer",
             "identity": {
               "order": [
                 "date_of_birth",
@@ -2667,7 +2916,12 @@
             "callbacks": [],
             "transfers": [],
             "outcome": null,
-            "reason": null
+            "reason": null,
+            "hangup": {
+              "slot": "products",
+              "outcome": null,
+              "reason": null
+            }
           },
           "state_unchanged": true
         },
@@ -2675,11 +2929,11 @@
           "step": 9,
           "source": "user",
           "utterance": "Yes, I will pay on that date.",
-          "event": "n=taaaaa;src=user;kind=accept;also=none;st=complete;prod=",
+          "event": "n=uaaaaa;src=user;kind=yes;also=none;st=complete;prod=",
           "event_fields": {
-            "n": "taaaaa",
+            "n": "uaaaaa",
             "src": "user",
-            "kind": "accept",
+            "kind": "yes",
             "also": "none",
             "st": "complete",
             "prod": "",
@@ -2698,6 +2952,7 @@
             "phase": "readback",
             "verified": "yes",
             "who": "self",
+            "q": "readback",
             "identity": {
               "order": [
                 "date_of_birth",
@@ -2748,16 +3003,21 @@
             "callbacks": [],
             "transfers": [],
             "outcome": null,
-            "reason": null
+            "reason": null,
+            "hangup": {
+              "slot": "products",
+              "outcome": null,
+              "reason": null
+            }
           }
         },
         {
           "step": 10,
           "source": "user",
           "utterance": "Yes.",
-          "event": "n=uaaaaa;src=user;kind=yes;also=none;st=complete;prod=",
+          "event": "n=vaaaaa;src=user;kind=yes;also=none;st=complete;prod=",
           "event_fields": {
-            "n": "uaaaaa",
+            "n": "vaaaaa",
             "src": "user",
             "kind": "yes",
             "also": "none",
@@ -2773,12 +3033,14 @@
               "product_id": "p1",
               "amount": 1250.0,
               "date": "2026-10-23"
-            }
+            },
+            "w_go": "go"
           },
           "state": {
             "phase": "readback",
             "verified": "yes",
             "who": "self",
+            "q": "none",
             "identity": {
               "order": [
                 "date_of_birth",
@@ -2836,7 +3098,12 @@
             "callbacks": [],
             "transfers": [],
             "outcome": null,
-            "reason": null
+            "reason": null,
+            "hangup": {
+              "slot": "products",
+              "outcome": null,
+              "reason": null
+            }
           }
         },
         {
@@ -2864,6 +3131,7 @@
             "phase": "wrapup",
             "verified": "yes",
             "who": "self",
+            "q": "none",
             "identity": {
               "order": [
                 "date_of_birth",
@@ -2914,16 +3182,21 @@
             "callbacks": [],
             "transfers": [],
             "outcome": null,
-            "reason": null
+            "reason": null,
+            "hangup": {
+              "slot": "products",
+              "outcome": "promise",
+              "reason": null
+            }
           }
         },
         {
           "step": 12,
           "source": "user",
           "utterance": "Thank you.",
-          "event": "n=vaaaaa;src=user;kind=other;also=none;st=none;prod=",
+          "event": "n=waaaaa;src=user;kind=other;also=none;st=none;prod=",
           "event_fields": {
-            "n": "vaaaaa",
+            "n": "waaaaa",
             "src": "user",
             "kind": "other",
             "also": "none",
@@ -2936,12 +3209,18 @@
             "outcome": "promise",
             "reason": null,
             "farewell": "Thank you, goodbye.",
-            "farewell_exact": true
+            "farewell_exact": true,
+            "order": [
+              "farewell_tts",
+              "close_call"
+            ],
+            "user_turn_between": false
           },
           "state": {
             "phase": "closed",
             "verified": "yes",
             "who": "self",
+            "q": "none",
             "identity": {
               "order": [
                 "date_of_birth",
@@ -2992,7 +3271,12 @@
             "callbacks": [],
             "transfers": [],
             "outcome": "promise",
-            "reason": null
+            "reason": null,
+            "hangup": {
+              "slot": "closed",
+              "outcome": "promise",
+              "reason": null
+            }
           }
         }
       ],
@@ -3058,11 +3342,17 @@
       ],
       "bootstrap": {
         "initial_token": "kstart",
+        "lazy_init": {
+          "confirm_name": 1,
+          "q": "confirm_name",
+          "rule": "Ask counters increment when the ask is spoken, never on an event (\u00a712 choice 2)."
+        },
         "greet": {
           "via": "greet_on_enter_tts",
           "contains": [
             "digital assistant",
-            "Freya Bank"
+            "Freya Bank",
+            "Am I speaking with Mr Novak?"
           ],
           "must_not_contain": [
             "collections",
@@ -3074,58 +3364,46 @@
             "260",
             "21 days"
           ],
-          "note": "Brief A rule 1 says the call is recorded. recorded is also an honesty word. This fixture does not require either the brief word or the contract's rewrite."
+          "note": "Opening sentence and the name question are one greet tts. Brief A rule 1 says the call is recorded. recorded is also an honesty word. This fixture does not require either the brief word or the contract's rewrite."
         },
-        "first_hub": {
-          "user_event": null,
-          "action": {
-            "type": "say_exact",
-            "text": "Am I speaking with Mr Novak?",
-            "wording": "brief",
-            "must_not_contain": [
-              "collections",
-              "debt",
-              "payment",
-              "overdue",
-              "personal loan",
-              "780",
-              "260",
-              "21 days"
-            ]
+        "state": {
+          "phase": "opening",
+          "verified": "no",
+          "who": "unknown",
+          "q": "confirm_name",
+          "identity": {
+            "order": [
+              "date_of_birth",
+              "phone_last4"
+            ],
+            "idx": 0,
+            "wrong": 0,
+            "refusals": 0
           },
-          "state": {
-            "phase": "opening",
-            "verified": "no",
-            "who": "unknown",
-            "identity": {
-              "order": [
-                "date_of_birth",
-                "phone_last4"
-              ],
-              "idx": 0,
-              "wrong": 0,
-              "refusals": 0
-            },
-            "products": [],
-            "cur": null,
-            "all_today_asked": false,
-            "offer": null,
-            "readback": null,
-            "pending": null,
-            "counters": {
-              "confirm_name": 1,
-              "clarify": 0,
-              "vague": 0,
-              "stop_talking": 0,
-              "human_asks": 0,
-              "decline_explain": 0,
-              "support_offered": 0
-            },
-            "notes": [],
-            "callbacks": [],
-            "transfers": [],
-            "outcome": null,
-            "reason": null
+          "products": [],
+          "cur": null,
+          "all_today_asked": false,
+          "offer": null,
+          "readback": null,
+          "pending": null,
+          "counters": {
+            "confirm_name": 1,
+            "clarify": 0,
+            "vague": 0,
+            "stop_talking": 0,
+            "human_asks": 0,
+            "decline_explain": 0,
+            "support_offered": 0
+          },
+          "notes": [],
+          "callbacks": [],
+          "transfers": [],
+          "outcome": null,
+          "reason": null,
+          "hangup": {
+            "slot": "unclear",
+            "outcome": "not_reached",
+            "reason": "unclear"
           }
         }
       },
@@ -3134,9 +3412,9 @@
           "step": 1,
           "source": "user",
           "utterance": "Yes, this is Tomas Novak.",
-          "event": "n=waaaaa;src=user;kind=who;also=none;st=complete;prod=;who=self;rel=",
+          "event": "n=xaaaaa;src=user;kind=who;also=none;st=complete;prod=;who=self;party=",
           "event_fields": {
-            "n": "waaaaa",
+            "n": "xaaaaa",
             "src": "user",
             "kind": "who",
             "also": "none",
@@ -3144,7 +3422,7 @@
             "prod": "",
             "payload": {
               "who": "self",
-              "rel": ""
+              "party": ""
             }
           },
           "action": {
@@ -3167,6 +3445,7 @@
             "phase": "identity",
             "verified": "no",
             "who": "self",
+            "q": "id_date_of_birth",
             "identity": {
               "order": [
                 "date_of_birth",
@@ -3195,16 +3474,21 @@
             "callbacks": [],
             "transfers": [],
             "outcome": null,
-            "reason": null
+            "reason": null,
+            "hangup": {
+              "slot": "declined",
+              "outcome": "not_verified",
+              "reason": "declined"
+            }
           }
         },
         {
           "step": 2,
           "source": "user",
           "utterance": "9 September 1990",
-          "event": "n=xaaaaa;src=user;kind=identity;also=none;st=complete;prod=;field=date_of_birth;ans=1990-09-09",
+          "event": "n=yaaaaa;src=user;kind=identity;also=none;st=complete;prod=;field=date_of_birth;ans=1990-09-09",
           "event_fields": {
-            "n": "xaaaaa",
+            "n": "yaaaaa",
             "src": "user",
             "kind": "identity",
             "also": "none",
@@ -3222,12 +3506,14 @@
               "customer_id": "c_pub05",
               "field": "date_of_birth",
               "answer": "1990-09-09"
-            }
+            },
+            "w_go": "go"
           },
           "state": {
             "phase": "identity",
             "verified": "no",
             "who": "self",
+            "q": "none",
             "identity": {
               "order": [
                 "date_of_birth",
@@ -3263,7 +3549,12 @@
             "callbacks": [],
             "transfers": [],
             "outcome": null,
-            "reason": null
+            "reason": null,
+            "hangup": {
+              "slot": "declined",
+              "outcome": "not_verified",
+              "reason": "declined"
+            }
           }
         },
         {
@@ -3304,6 +3595,7 @@
             "phase": "identity",
             "verified": "no",
             "who": "self",
+            "q": "id_phone_last4",
             "identity": {
               "order": [
                 "date_of_birth",
@@ -3332,16 +3624,21 @@
             "callbacks": [],
             "transfers": [],
             "outcome": null,
-            "reason": null
+            "reason": null,
+            "hangup": {
+              "slot": "declined",
+              "outcome": "not_verified",
+              "reason": "declined"
+            }
           }
         },
         {
           "step": 4,
           "source": "user",
           "utterance": "8846",
-          "event": "n=yaaaaa;src=user;kind=identity;also=none;st=complete;prod=;field=phone_last4;ans=8846",
+          "event": "n=zaaaaa;src=user;kind=identity;also=none;st=complete;prod=;field=phone_last4;ans=8846",
           "event_fields": {
-            "n": "yaaaaa",
+            "n": "zaaaaa",
             "src": "user",
             "kind": "identity",
             "also": "none",
@@ -3359,12 +3656,14 @@
               "customer_id": "c_pub05",
               "field": "phone_last4",
               "answer": "8846"
-            }
+            },
+            "w_go": "go"
           },
           "state": {
             "phase": "identity",
             "verified": "no",
             "who": "self",
+            "q": "none",
             "identity": {
               "order": [
                 "date_of_birth",
@@ -3400,7 +3699,12 @@
             "callbacks": [],
             "transfers": [],
             "outcome": null,
-            "reason": null
+            "reason": null,
+            "hangup": {
+              "slot": "declined",
+              "outcome": "not_verified",
+              "reason": "declined"
+            }
           }
         },
         {
@@ -3426,12 +3730,14 @@
             "tool": "get_account",
             "args": {
               "customer_id": "c_pub05"
-            }
+            },
+            "w_go": "go"
           },
           "state": {
             "phase": "account",
             "verified": "yes",
             "who": "self",
+            "q": "none",
             "identity": {
               "order": [
                 "date_of_birth",
@@ -3467,7 +3773,12 @@
             "callbacks": [],
             "transfers": [],
             "outcome": null,
-            "reason": null
+            "reason": null,
+            "hangup": {
+              "slot": "products",
+              "outcome": null,
+              "reason": null
+            }
           }
         },
         {
@@ -3511,6 +3822,7 @@
             "phase": "negotiation",
             "verified": "yes",
             "who": "self",
+            "q": "pay_today",
             "identity": {
               "order": [
                 "date_of_birth",
@@ -3559,16 +3871,21 @@
             "callbacks": [],
             "transfers": [],
             "outcome": null,
-            "reason": null
+            "reason": null,
+            "hangup": {
+              "slot": "products",
+              "outcome": null,
+              "reason": null
+            }
           }
         },
         {
           "step": 7,
           "source": "user",
           "utterance": "I lost my job last month and I cannot pay anything.",
-          "event": "n=zaaaaa;src=user;kind=topic;also=reject;st=complete;prod=;t=hardship",
+          "event": "n=abaaaa;src=user;kind=topic;also=reject;st=complete;prod=;t=hardship",
           "event_fields": {
-            "n": "zaaaaa",
+            "n": "abaaaa",
             "src": "user",
             "kind": "topic",
             "also": "reject",
@@ -3597,6 +3914,7 @@
             "phase": "negotiation",
             "verified": "yes",
             "who": "self",
+            "q": "support_offer",
             "identity": {
               "order": [
                 "date_of_birth",
@@ -3635,16 +3953,21 @@
             "callbacks": [],
             "transfers": [],
             "outcome": null,
-            "reason": null
+            "reason": null,
+            "hangup": {
+              "slot": "products",
+              "outcome": null,
+              "reason": null
+            }
           }
         },
         {
           "step": 8,
           "source": "user",
           "utterance": "Could you give me a discount?",
-          "event": "n=abaaaa;src=user;kind=other;also=none;st=none;prod=",
+          "event": "n=bbaaaa;src=user;kind=other;also=none;st=none;prod=",
           "event_fields": {
-            "n": "abaaaa",
+            "n": "bbaaaa",
             "src": "user",
             "kind": "other",
             "also": "none",
@@ -3661,6 +3984,7 @@
             "phase": "negotiation",
             "verified": "yes",
             "who": "self",
+            "q": "support_offer",
             "identity": {
               "order": [
                 "date_of_birth",
@@ -3699,17 +4023,23 @@
             "callbacks": [],
             "transfers": [],
             "outcome": null,
-            "reason": null
+            "reason": null,
+            "hangup": {
+              "slot": "products",
+              "outcome": null,
+              "reason": null
+            }
           },
-          "state_unchanged": true
+          "state_unchanged": true,
+          "note": "q stays support_offer. A policy-irrelevant turn does not clear an unanswered question; clearing it would drop the hardship close. See README."
         },
         {
           "step": 9,
           "source": "user",
           "utterance": "No, I do not want to be transferred.",
-          "event": "n=bbaaaa;src=user;kind=no;also=none;st=complete;prod=",
+          "event": "n=cbaaaa;src=user;kind=no;also=none;st=complete;prod=",
           "event_fields": {
-            "n": "bbaaaa",
+            "n": "cbaaaa",
             "src": "user",
             "kind": "no",
             "also": "none",
@@ -3723,6 +4053,11 @@
             "reason": "hardship",
             "farewell": "Thank you, goodbye.",
             "farewell_exact": true,
+            "order": [
+              "farewell_tts",
+              "close_call"
+            ],
+            "user_turn_between": false,
             "must_not_contain": [
               "discount",
               "waiver",
@@ -3734,6 +4069,7 @@
             "phase": "closed",
             "verified": "yes",
             "who": "self",
+            "q": "none",
             "identity": {
               "order": [
                 "date_of_birth",
@@ -3772,7 +4108,12 @@
             "callbacks": [],
             "transfers": [],
             "outcome": "no_promise",
-            "reason": "hardship"
+            "reason": "hardship",
+            "hangup": {
+              "slot": "closed",
+              "outcome": "no_promise",
+              "reason": "hardship"
+            }
           }
         }
       ],
@@ -3832,11 +4173,17 @@
       ],
       "bootstrap": {
         "initial_token": "kstart",
+        "lazy_init": {
+          "confirm_name": 1,
+          "q": "confirm_name",
+          "rule": "Ask counters increment when the ask is spoken, never on an event (\u00a712 choice 2)."
+        },
         "greet": {
           "via": "greet_on_enter_tts",
           "contains": [
             "digital assistant",
-            "Freya Bank"
+            "Freya Bank",
+            "Am I speaking with Ms Nair?"
           ],
           "must_not_contain": [
             "collections",
@@ -3849,59 +4196,46 @@
             "12 days",
             "1903"
           ],
-          "note": "Brief A rule 1 says the call is recorded. recorded is also an honesty word. This fixture does not require either the brief word or the contract's rewrite."
+          "note": "Opening sentence and the name question are one greet tts. Brief A rule 1 says the call is recorded. recorded is also an honesty word. This fixture does not require either the brief word or the contract's rewrite."
         },
-        "first_hub": {
-          "user_event": null,
-          "action": {
-            "type": "say_exact",
-            "text": "Am I speaking with Ms Nair?",
-            "wording": "brief",
-            "must_not_contain": [
-              "collections",
-              "debt",
-              "payment",
-              "overdue",
-              "credit card ending 1903",
-              "2125.1",
-              "637.5",
-              "12 days",
-              "1903"
-            ]
+        "state": {
+          "phase": "opening",
+          "verified": "no",
+          "who": "unknown",
+          "q": "confirm_name",
+          "identity": {
+            "order": [
+              "date_of_birth",
+              "phone_last4"
+            ],
+            "idx": 0,
+            "wrong": 0,
+            "refusals": 0
           },
-          "state": {
-            "phase": "opening",
-            "verified": "no",
-            "who": "unknown",
-            "identity": {
-              "order": [
-                "date_of_birth",
-                "phone_last4"
-              ],
-              "idx": 0,
-              "wrong": 0,
-              "refusals": 0
-            },
-            "products": [],
-            "cur": null,
-            "all_today_asked": false,
-            "offer": null,
-            "readback": null,
-            "pending": null,
-            "counters": {
-              "confirm_name": 1,
-              "clarify": 0,
-              "vague": 0,
-              "stop_talking": 0,
-              "human_asks": 0,
-              "decline_explain": 0,
-              "support_offered": 0
-            },
-            "notes": [],
-            "callbacks": [],
-            "transfers": [],
-            "outcome": null,
-            "reason": null
+          "products": [],
+          "cur": null,
+          "all_today_asked": false,
+          "offer": null,
+          "readback": null,
+          "pending": null,
+          "counters": {
+            "confirm_name": 1,
+            "clarify": 0,
+            "vague": 0,
+            "stop_talking": 0,
+            "human_asks": 0,
+            "decline_explain": 0,
+            "support_offered": 0
+          },
+          "notes": [],
+          "callbacks": [],
+          "transfers": [],
+          "outcome": null,
+          "reason": null,
+          "hangup": {
+            "slot": "unclear",
+            "outcome": "not_reached",
+            "reason": "unclear"
           }
         }
       },
@@ -3910,9 +4244,9 @@
           "step": 1,
           "source": "user",
           "utterance": "Yes, this is Priya Nair.",
-          "event": "n=cbaaaa;src=user;kind=who;also=none;st=complete;prod=;who=self;rel=",
+          "event": "n=dbaaaa;src=user;kind=who;also=none;st=complete;prod=;who=self;party=",
           "event_fields": {
-            "n": "cbaaaa",
+            "n": "dbaaaa",
             "src": "user",
             "kind": "who",
             "also": "none",
@@ -3920,7 +4254,7 @@
             "prod": "",
             "payload": {
               "who": "self",
-              "rel": ""
+              "party": ""
             }
           },
           "action": {
@@ -3944,6 +4278,7 @@
             "phase": "identity",
             "verified": "no",
             "who": "self",
+            "q": "id_date_of_birth",
             "identity": {
               "order": [
                 "date_of_birth",
@@ -3972,16 +4307,21 @@
             "callbacks": [],
             "transfers": [],
             "outcome": null,
-            "reason": null
+            "reason": null,
+            "hangup": {
+              "slot": "declined",
+              "outcome": "not_verified",
+              "reason": "declined"
+            }
           }
         },
         {
           "step": 2,
           "source": "user",
           "utterance": "17 May 1986",
-          "event": "n=dbaaaa;src=user;kind=identity;also=none;st=complete;prod=;field=date_of_birth;ans=1986-05-17",
+          "event": "n=ebaaaa;src=user;kind=identity;also=none;st=complete;prod=;field=date_of_birth;ans=1986-05-17",
           "event_fields": {
-            "n": "dbaaaa",
+            "n": "ebaaaa",
             "src": "user",
             "kind": "identity",
             "also": "none",
@@ -3999,12 +4339,14 @@
               "customer_id": "c_pub06",
               "field": "date_of_birth",
               "answer": "1986-05-17"
-            }
+            },
+            "w_go": "go"
           },
           "state": {
             "phase": "identity",
             "verified": "no",
             "who": "self",
+            "q": "none",
             "identity": {
               "order": [
                 "date_of_birth",
@@ -4040,7 +4382,12 @@
             "callbacks": [],
             "transfers": [],
             "outcome": null,
-            "reason": null
+            "reason": null,
+            "hangup": {
+              "slot": "declined",
+              "outcome": "not_verified",
+              "reason": "declined"
+            }
           }
         },
         {
@@ -4082,6 +4429,7 @@
             "phase": "identity",
             "verified": "no",
             "who": "self",
+            "q": "id_phone_last4",
             "identity": {
               "order": [
                 "date_of_birth",
@@ -4110,16 +4458,21 @@
             "callbacks": [],
             "transfers": [],
             "outcome": null,
-            "reason": null
+            "reason": null,
+            "hangup": {
+              "slot": "declined",
+              "outcome": "not_verified",
+              "reason": "declined"
+            }
           }
         },
         {
           "step": 4,
           "source": "user",
           "utterance": "1502",
-          "event": "n=ebaaaa;src=user;kind=identity;also=none;st=complete;prod=;field=phone_last4;ans=1502",
+          "event": "n=fbaaaa;src=user;kind=identity;also=none;st=complete;prod=;field=phone_last4;ans=1502",
           "event_fields": {
-            "n": "ebaaaa",
+            "n": "fbaaaa",
             "src": "user",
             "kind": "identity",
             "also": "none",
@@ -4137,12 +4490,14 @@
               "customer_id": "c_pub06",
               "field": "phone_last4",
               "answer": "1502"
-            }
+            },
+            "w_go": "go"
           },
           "state": {
             "phase": "identity",
             "verified": "no",
             "who": "self",
+            "q": "none",
             "identity": {
               "order": [
                 "date_of_birth",
@@ -4178,7 +4533,12 @@
             "callbacks": [],
             "transfers": [],
             "outcome": null,
-            "reason": null
+            "reason": null,
+            "hangup": {
+              "slot": "declined",
+              "outcome": "not_verified",
+              "reason": "declined"
+            }
           }
         },
         {
@@ -4204,12 +4564,14 @@
             "tool": "get_account",
             "args": {
               "customer_id": "c_pub06"
-            }
+            },
+            "w_go": "go"
           },
           "state": {
             "phase": "account",
             "verified": "yes",
             "who": "self",
+            "q": "none",
             "identity": {
               "order": [
                 "date_of_birth",
@@ -4245,7 +4607,12 @@
             "callbacks": [],
             "transfers": [],
             "outcome": null,
-            "reason": null
+            "reason": null,
+            "hangup": {
+              "slot": "products",
+              "outcome": null,
+              "reason": null
+            }
           }
         },
         {
@@ -4290,6 +4657,7 @@
             "phase": "negotiation",
             "verified": "yes",
             "who": "self",
+            "q": "pay_today",
             "identity": {
               "order": [
                 "date_of_birth",
@@ -4338,16 +4706,21 @@
             "callbacks": [],
             "transfers": [],
             "outcome": null,
-            "reason": null
+            "reason": null,
+            "hangup": {
+              "slot": "products",
+              "outcome": null,
+              "reason": null
+            }
           }
         },
         {
           "step": 7,
           "source": "user",
           "utterance": "The full amount is too much right now.",
-          "event": "n=fbaaaa;src=user;kind=reject;also=none;st=complete;prod=;why=too_much",
+          "event": "n=gbaaaa;src=user;kind=reject;also=none;st=complete;prod=;why=too_much",
           "event_fields": {
-            "n": "fbaaaa",
+            "n": "gbaaaa",
             "src": "user",
             "kind": "reject",
             "also": "none",
@@ -4372,6 +4745,7 @@
             "phase": "negotiation",
             "verified": "yes",
             "who": "self",
+            "q": "offer",
             "identity": {
               "order": [
                 "date_of_birth",
@@ -4420,16 +4794,21 @@
             "callbacks": [],
             "transfers": [],
             "outcome": null,
-            "reason": null
+            "reason": null,
+            "hangup": {
+              "slot": "products",
+              "outcome": null,
+              "reason": null
+            }
           }
         },
         {
           "step": 8,
           "source": "user",
           "utterance": "Yes, I will pay the minimum this Friday.",
-          "event": "n=gbaaaa;src=user;kind=date;also=accept;st=complete;prod=;rel=;d=;m=;wd=fri;wk=this;vague=no",
+          "event": "n=hbaaaa;src=user;kind=date;also=accept;st=complete;prod=;rel=;d=;m=;wd=fri;wk=this;vague=no",
           "event_fields": {
-            "n": "gbaaaa",
+            "n": "hbaaaa",
             "src": "user",
             "kind": "date",
             "also": "accept",
@@ -4457,6 +4836,7 @@
             "phase": "readback",
             "verified": "yes",
             "who": "self",
+            "q": "readback",
             "identity": {
               "order": [
                 "date_of_birth",
@@ -4507,7 +4887,12 @@
             "callbacks": [],
             "transfers": [],
             "outcome": null,
-            "reason": null
+            "reason": null,
+            "hangup": {
+              "slot": "products",
+              "outcome": null,
+              "reason": null
+            }
           },
           "note": "She says minimum, not a new number, so the event has no amt. The amount stays the live floor offer."
         },
@@ -4515,9 +4900,9 @@
           "step": 9,
           "source": "user",
           "utterance": "Yes.",
-          "event": "n=hbaaaa;src=user;kind=yes;also=none;st=complete;prod=",
+          "event": "n=ibaaaa;src=user;kind=yes;also=none;st=complete;prod=",
           "event_fields": {
-            "n": "hbaaaa",
+            "n": "ibaaaa",
             "src": "user",
             "kind": "yes",
             "also": "none",
@@ -4533,12 +4918,14 @@
               "product_id": "p1",
               "amount": 637.5,
               "date": "2026-10-16"
-            }
+            },
+            "w_go": "go"
           },
           "state": {
             "phase": "readback",
             "verified": "yes",
             "who": "self",
+            "q": "none",
             "identity": {
               "order": [
                 "date_of_birth",
@@ -4596,7 +4983,12 @@
             "callbacks": [],
             "transfers": [],
             "outcome": null,
-            "reason": null
+            "reason": null,
+            "hangup": {
+              "slot": "products",
+              "outcome": null,
+              "reason": null
+            }
           }
         },
         {
@@ -4624,6 +5016,7 @@
             "phase": "wrapup",
             "verified": "yes",
             "who": "self",
+            "q": "none",
             "identity": {
               "order": [
                 "date_of_birth",
@@ -4674,16 +5067,21 @@
             "callbacks": [],
             "transfers": [],
             "outcome": null,
-            "reason": null
+            "reason": null,
+            "hangup": {
+              "slot": "products",
+              "outcome": "promise",
+              "reason": null
+            }
           }
         },
         {
           "step": 11,
           "source": "user",
           "utterance": "Thank you.",
-          "event": "n=ibaaaa;src=user;kind=other;also=none;st=none;prod=",
+          "event": "n=jbaaaa;src=user;kind=other;also=none;st=none;prod=",
           "event_fields": {
-            "n": "ibaaaa",
+            "n": "jbaaaa",
             "src": "user",
             "kind": "other",
             "also": "none",
@@ -4696,12 +5094,18 @@
             "outcome": "promise",
             "reason": null,
             "farewell": "Thank you, goodbye.",
-            "farewell_exact": true
+            "farewell_exact": true,
+            "order": [
+              "farewell_tts",
+              "close_call"
+            ],
+            "user_turn_between": false
           },
           "state": {
             "phase": "closed",
             "verified": "yes",
             "who": "self",
+            "q": "none",
             "identity": {
               "order": [
                 "date_of_birth",
@@ -4752,7 +5156,12 @@
             "callbacks": [],
             "transfers": [],
             "outcome": "promise",
-            "reason": null
+            "reason": null,
+            "hangup": {
+              "slot": "closed",
+              "outcome": "promise",
+              "reason": null
+            }
           }
         }
       ],
@@ -4817,11 +5226,17 @@
       ],
       "bootstrap": {
         "initial_token": "kstart",
+        "lazy_init": {
+          "confirm_name": 1,
+          "q": "confirm_name",
+          "rule": "Ask counters increment when the ask is spoken, never on an event (\u00a712 choice 2)."
+        },
         "greet": {
           "via": "greet_on_enter_tts",
           "contains": [
             "digital assistant",
-            "Freya Bank"
+            "Freya Bank",
+            "Am I speaking with Mr Ortiz?"
           ],
           "must_not_contain": [
             "collections",
@@ -4833,58 +5248,46 @@
             "180",
             "5 days"
           ],
-          "note": "Brief A rule 1 says the call is recorded. recorded is also an honesty word. This fixture does not require either the brief word or the contract's rewrite."
+          "note": "Opening sentence and the name question are one greet tts. Brief A rule 1 says the call is recorded. recorded is also an honesty word. This fixture does not require either the brief word or the contract's rewrite."
         },
-        "first_hub": {
-          "user_event": null,
-          "action": {
-            "type": "say_exact",
-            "text": "Am I speaking with Mr Ortiz?",
-            "wording": "brief",
-            "must_not_contain": [
-              "collections",
-              "debt",
-              "payment",
-              "overdue",
-              "personal loan",
-              "540",
-              "180",
-              "5 days"
-            ]
+        "state": {
+          "phase": "opening",
+          "verified": "no",
+          "who": "unknown",
+          "q": "confirm_name",
+          "identity": {
+            "order": [
+              "date_of_birth",
+              "phone_last4"
+            ],
+            "idx": 0,
+            "wrong": 0,
+            "refusals": 0
           },
-          "state": {
-            "phase": "opening",
-            "verified": "no",
-            "who": "unknown",
-            "identity": {
-              "order": [
-                "date_of_birth",
-                "phone_last4"
-              ],
-              "idx": 0,
-              "wrong": 0,
-              "refusals": 0
-            },
-            "products": [],
-            "cur": null,
-            "all_today_asked": false,
-            "offer": null,
-            "readback": null,
-            "pending": null,
-            "counters": {
-              "confirm_name": 1,
-              "clarify": 0,
-              "vague": 0,
-              "stop_talking": 0,
-              "human_asks": 0,
-              "decline_explain": 0,
-              "support_offered": 0
-            },
-            "notes": [],
-            "callbacks": [],
-            "transfers": [],
-            "outcome": null,
-            "reason": null
+          "products": [],
+          "cur": null,
+          "all_today_asked": false,
+          "offer": null,
+          "readback": null,
+          "pending": null,
+          "counters": {
+            "confirm_name": 1,
+            "clarify": 0,
+            "vague": 0,
+            "stop_talking": 0,
+            "human_asks": 0,
+            "decline_explain": 0,
+            "support_offered": 0
+          },
+          "notes": [],
+          "callbacks": [],
+          "transfers": [],
+          "outcome": null,
+          "reason": null,
+          "hangup": {
+            "slot": "unclear",
+            "outcome": "not_reached",
+            "reason": "unclear"
           }
         }
       },
@@ -4893,9 +5296,9 @@
           "step": 1,
           "source": "user",
           "utterance": "Yes, this is Samuel Ortiz.",
-          "event": "n=jbaaaa;src=user;kind=who;also=none;st=complete;prod=;who=self;rel=",
+          "event": "n=kbaaaa;src=user;kind=who;also=none;st=complete;prod=;who=self;party=",
           "event_fields": {
-            "n": "jbaaaa",
+            "n": "kbaaaa",
             "src": "user",
             "kind": "who",
             "also": "none",
@@ -4903,7 +5306,7 @@
             "prod": "",
             "payload": {
               "who": "self",
-              "rel": ""
+              "party": ""
             }
           },
           "action": {
@@ -4926,6 +5329,7 @@
             "phase": "identity",
             "verified": "no",
             "who": "self",
+            "q": "id_date_of_birth",
             "identity": {
               "order": [
                 "date_of_birth",
@@ -4954,16 +5358,21 @@
             "callbacks": [],
             "transfers": [],
             "outcome": null,
-            "reason": null
+            "reason": null,
+            "hangup": {
+              "slot": "declined",
+              "outcome": "not_verified",
+              "reason": "declined"
+            }
           }
         },
         {
           "step": 2,
           "source": "user",
           "utterance": "5 December 1975",
-          "event": "n=kbaaaa;src=user;kind=identity;also=none;st=complete;prod=;field=date_of_birth;ans=1975-12-05",
+          "event": "n=lbaaaa;src=user;kind=identity;also=none;st=complete;prod=;field=date_of_birth;ans=1975-12-05",
           "event_fields": {
-            "n": "kbaaaa",
+            "n": "lbaaaa",
             "src": "user",
             "kind": "identity",
             "also": "none",
@@ -4981,12 +5390,14 @@
               "customer_id": "c_pub07",
               "field": "date_of_birth",
               "answer": "1975-12-05"
-            }
+            },
+            "w_go": "go"
           },
           "state": {
             "phase": "identity",
             "verified": "no",
             "who": "self",
+            "q": "none",
             "identity": {
               "order": [
                 "date_of_birth",
@@ -5022,7 +5433,12 @@
             "callbacks": [],
             "transfers": [],
             "outcome": null,
-            "reason": null
+            "reason": null,
+            "hangup": {
+              "slot": "declined",
+              "outcome": "not_verified",
+              "reason": "declined"
+            }
           }
         },
         {
@@ -5063,6 +5479,7 @@
             "phase": "identity",
             "verified": "no",
             "who": "self",
+            "q": "id_phone_last4",
             "identity": {
               "order": [
                 "date_of_birth",
@@ -5091,16 +5508,21 @@
             "callbacks": [],
             "transfers": [],
             "outcome": null,
-            "reason": null
+            "reason": null,
+            "hangup": {
+              "slot": "declined",
+              "outcome": "not_verified",
+              "reason": "declined"
+            }
           }
         },
         {
           "step": 4,
           "source": "user",
           "utterance": "7093",
-          "event": "n=lbaaaa;src=user;kind=identity;also=none;st=complete;prod=;field=phone_last4;ans=7093",
+          "event": "n=mbaaaa;src=user;kind=identity;also=none;st=complete;prod=;field=phone_last4;ans=7093",
           "event_fields": {
-            "n": "lbaaaa",
+            "n": "mbaaaa",
             "src": "user",
             "kind": "identity",
             "also": "none",
@@ -5118,12 +5540,14 @@
               "customer_id": "c_pub07",
               "field": "phone_last4",
               "answer": "7093"
-            }
+            },
+            "w_go": "go"
           },
           "state": {
             "phase": "identity",
             "verified": "no",
             "who": "self",
+            "q": "none",
             "identity": {
               "order": [
                 "date_of_birth",
@@ -5159,7 +5583,12 @@
             "callbacks": [],
             "transfers": [],
             "outcome": null,
-            "reason": null
+            "reason": null,
+            "hangup": {
+              "slot": "declined",
+              "outcome": "not_verified",
+              "reason": "declined"
+            }
           }
         },
         {
@@ -5185,12 +5614,14 @@
             "tool": "get_account",
             "args": {
               "customer_id": "c_pub07"
-            }
+            },
+            "w_go": "go"
           },
           "state": {
             "phase": "account",
             "verified": "yes",
             "who": "self",
+            "q": "none",
             "identity": {
               "order": [
                 "date_of_birth",
@@ -5226,7 +5657,12 @@
             "callbacks": [],
             "transfers": [],
             "outcome": null,
-            "reason": null
+            "reason": null,
+            "hangup": {
+              "slot": "products",
+              "outcome": null,
+              "reason": null
+            }
           }
         },
         {
@@ -5270,6 +5706,7 @@
             "phase": "negotiation",
             "verified": "yes",
             "who": "self",
+            "q": "pay_today",
             "identity": {
               "order": [
                 "date_of_birth",
@@ -5318,16 +5755,21 @@
             "callbacks": [],
             "transfers": [],
             "outcome": null,
-            "reason": null
+            "reason": null,
+            "hangup": {
+              "slot": "products",
+              "outcome": null,
+              "reason": null
+            }
           }
         },
         {
           "step": 7,
           "source": "user",
           "utterance": "I cannot pay today. Maybe the week after next.",
-          "event": "n=mbaaaa;src=user;kind=date;also=reject;st=complete;prod=;rel=;d=;m=;wd=;wk=after_next;vague=yes",
+          "event": "n=nbaaaa;src=user;kind=date;also=reject;st=complete;prod=;rel=;d=;m=;wd=;wk=after_next;vague=yes",
           "event_fields": {
-            "n": "mbaaaa",
+            "n": "nbaaaa",
             "src": "user",
             "kind": "date",
             "also": "reject",
@@ -5355,6 +5797,7 @@
             "phase": "negotiation",
             "verified": "yes",
             "who": "self",
+            "q": "exact_day",
             "identity": {
               "order": [
                 "date_of_birth",
@@ -5393,16 +5836,21 @@
             "callbacks": [],
             "transfers": [],
             "outcome": null,
-            "reason": null
+            "reason": null,
+            "hangup": {
+              "slot": "products",
+              "outcome": null,
+              "reason": null
+            }
           }
         },
         {
           "step": 8,
           "source": "user",
           "utterance": "Monday the twenty-",
-          "event": "n=nbaaaa;src=user;kind=date;also=none;st=partial;prod=;rel=;d=;m=;wd=;wk=none;vague=no",
+          "event": "n=obaaaa;src=user;kind=date;also=none;st=partial;prod=;rel=;d=;m=;wd=;wk=none;vague=no",
           "event_fields": {
-            "n": "nbaaaa",
+            "n": "obaaaa",
             "src": "user",
             "kind": "date",
             "also": "none",
@@ -5426,6 +5874,7 @@
             "phase": "negotiation",
             "verified": "yes",
             "who": "self",
+            "q": "exact_day",
             "identity": {
               "order": [
                 "date_of_birth",
@@ -5464,7 +5913,12 @@
             "callbacks": [],
             "transfers": [],
             "outcome": null,
-            "reason": null
+            "reason": null,
+            "hangup": {
+              "slot": "products",
+              "outcome": null,
+              "reason": null
+            }
           },
           "state_unchanged": true
         },
@@ -5472,9 +5926,9 @@
           "step": 9,
           "source": "user",
           "utterance": "sixth.",
-          "event": "n=obaaaa;src=user;kind=date;also=none;st=complete;prod=;rel=;d=26;m=;wd=mon;wk=none;vague=no",
+          "event": "n=pbaaaa;src=user;kind=date;also=none;st=complete;prod=;rel=;d=26;m=;wd=mon;wk=none;vague=no",
           "event_fields": {
-            "n": "obaaaa",
+            "n": "pbaaaa",
             "src": "user",
             "kind": "date",
             "also": "none",
@@ -5498,6 +5952,7 @@
             "phase": "negotiation",
             "verified": "yes",
             "who": "self",
+            "q": "offer",
             "identity": {
               "order": [
                 "date_of_birth",
@@ -5546,7 +6001,12 @@
             "callbacks": [],
             "transfers": [],
             "outcome": null,
-            "reason": null
+            "reason": null,
+            "hangup": {
+              "slot": "products",
+              "outcome": null,
+              "reason": null
+            }
           },
           "note": "Assembled with the previous customer turn: Monday + twenty- + sixth \u2192 d=26 wd=mon. 26 October 2026 is a Monday and a holiday, so the offer is Tuesday 27 October."
         },
@@ -5554,11 +6014,11 @@
           "step": 10,
           "source": "user",
           "utterance": "Yes, that works.",
-          "event": "n=pbaaaa;src=user;kind=accept;also=none;st=complete;prod=",
+          "event": "n=qbaaaa;src=user;kind=yes;also=none;st=complete;prod=",
           "event_fields": {
-            "n": "pbaaaa",
+            "n": "qbaaaa",
             "src": "user",
-            "kind": "accept",
+            "kind": "yes",
             "also": "none",
             "st": "complete",
             "prod": "",
@@ -5577,6 +6037,7 @@
             "phase": "readback",
             "verified": "yes",
             "who": "self",
+            "q": "readback",
             "identity": {
               "order": [
                 "date_of_birth",
@@ -5627,16 +6088,21 @@
             "callbacks": [],
             "transfers": [],
             "outcome": null,
-            "reason": null
+            "reason": null,
+            "hangup": {
+              "slot": "products",
+              "outcome": null,
+              "reason": null
+            }
           }
         },
         {
           "step": 11,
           "source": "user",
           "utterance": "Yes.",
-          "event": "n=qbaaaa;src=user;kind=yes;also=none;st=complete;prod=",
+          "event": "n=rbaaaa;src=user;kind=yes;also=none;st=complete;prod=",
           "event_fields": {
-            "n": "qbaaaa",
+            "n": "rbaaaa",
             "src": "user",
             "kind": "yes",
             "also": "none",
@@ -5652,12 +6118,14 @@
               "product_id": "p1",
               "amount": 540.0,
               "date": "2026-10-27"
-            }
+            },
+            "w_go": "go"
           },
           "state": {
             "phase": "readback",
             "verified": "yes",
             "who": "self",
+            "q": "none",
             "identity": {
               "order": [
                 "date_of_birth",
@@ -5715,7 +6183,12 @@
             "callbacks": [],
             "transfers": [],
             "outcome": null,
-            "reason": null
+            "reason": null,
+            "hangup": {
+              "slot": "products",
+              "outcome": null,
+              "reason": null
+            }
           }
         },
         {
@@ -5743,6 +6216,7 @@
             "phase": "wrapup",
             "verified": "yes",
             "who": "self",
+            "q": "none",
             "identity": {
               "order": [
                 "date_of_birth",
@@ -5793,16 +6267,21 @@
             "callbacks": [],
             "transfers": [],
             "outcome": null,
-            "reason": null
+            "reason": null,
+            "hangup": {
+              "slot": "products",
+              "outcome": "promise",
+              "reason": null
+            }
           }
         },
         {
           "step": 13,
           "source": "user",
           "utterance": "Thank you.",
-          "event": "n=rbaaaa;src=user;kind=other;also=none;st=none;prod=",
+          "event": "n=sbaaaa;src=user;kind=other;also=none;st=none;prod=",
           "event_fields": {
-            "n": "rbaaaa",
+            "n": "sbaaaa",
             "src": "user",
             "kind": "other",
             "also": "none",
@@ -5815,12 +6294,18 @@
             "outcome": "promise",
             "reason": null,
             "farewell": "Thank you, goodbye.",
-            "farewell_exact": true
+            "farewell_exact": true,
+            "order": [
+              "farewell_tts",
+              "close_call"
+            ],
+            "user_turn_between": false
           },
           "state": {
             "phase": "closed",
             "verified": "yes",
             "who": "self",
+            "q": "none",
             "identity": {
               "order": [
                 "date_of_birth",
@@ -5871,7 +6356,12 @@
             "callbacks": [],
             "transfers": [],
             "outcome": "promise",
-            "reason": null
+            "reason": null,
+            "hangup": {
+              "slot": "closed",
+              "outcome": "promise",
+              "reason": null
+            }
           }
         }
       ],
@@ -5936,11 +6426,17 @@
       ],
       "bootstrap": {
         "initial_token": "kstart",
+        "lazy_init": {
+          "confirm_name": 1,
+          "q": "confirm_name",
+          "rule": "Ask counters increment when the ask is spoken, never on an event (\u00a712 choice 2)."
+        },
         "greet": {
           "via": "greet_on_enter_tts",
           "contains": [
             "digital assistant",
-            "Freya Bank"
+            "Freya Bank",
+            "Am I speaking with Ms Schmidt?"
           ],
           "must_not_contain": [
             "collections",
@@ -5953,59 +6449,46 @@
             "5 days",
             "5512"
           ],
-          "note": "Brief A rule 1 says the call is recorded. recorded is also an honesty word. This fixture does not require either the brief word or the contract's rewrite."
+          "note": "Opening sentence and the name question are one greet tts. Brief A rule 1 says the call is recorded. recorded is also an honesty word. This fixture does not require either the brief word or the contract's rewrite."
         },
-        "first_hub": {
-          "user_event": null,
-          "action": {
-            "type": "say_exact",
-            "text": "Am I speaking with Ms Schmidt?",
-            "wording": "brief",
-            "must_not_contain": [
-              "collections",
-              "debt",
-              "payment",
-              "overdue",
-              "credit card ending 5512",
-              "180",
-              "54",
-              "5 days",
-              "5512"
-            ]
+        "state": {
+          "phase": "opening",
+          "verified": "no",
+          "who": "unknown",
+          "q": "confirm_name",
+          "identity": {
+            "order": [
+              "date_of_birth",
+              "phone_last4"
+            ],
+            "idx": 0,
+            "wrong": 0,
+            "refusals": 0
           },
-          "state": {
-            "phase": "opening",
-            "verified": "no",
-            "who": "unknown",
-            "identity": {
-              "order": [
-                "date_of_birth",
-                "phone_last4"
-              ],
-              "idx": 0,
-              "wrong": 0,
-              "refusals": 0
-            },
-            "products": [],
-            "cur": null,
-            "all_today_asked": false,
-            "offer": null,
-            "readback": null,
-            "pending": null,
-            "counters": {
-              "confirm_name": 1,
-              "clarify": 0,
-              "vague": 0,
-              "stop_talking": 0,
-              "human_asks": 0,
-              "decline_explain": 0,
-              "support_offered": 0
-            },
-            "notes": [],
-            "callbacks": [],
-            "transfers": [],
-            "outcome": null,
-            "reason": null
+          "products": [],
+          "cur": null,
+          "all_today_asked": false,
+          "offer": null,
+          "readback": null,
+          "pending": null,
+          "counters": {
+            "confirm_name": 1,
+            "clarify": 0,
+            "vague": 0,
+            "stop_talking": 0,
+            "human_asks": 0,
+            "decline_explain": 0,
+            "support_offered": 0
+          },
+          "notes": [],
+          "callbacks": [],
+          "transfers": [],
+          "outcome": null,
+          "reason": null,
+          "hangup": {
+            "slot": "unclear",
+            "outcome": "not_reached",
+            "reason": "unclear"
           }
         }
       },
@@ -6014,9 +6497,9 @@
           "step": 1,
           "source": "user",
           "utterance": "Yes, this is Hannah Schmidt.",
-          "event": "n=sbaaaa;src=user;kind=who;also=none;st=complete;prod=;who=self;rel=",
+          "event": "n=tbaaaa;src=user;kind=who;also=none;st=complete;prod=;who=self;party=",
           "event_fields": {
-            "n": "sbaaaa",
+            "n": "tbaaaa",
             "src": "user",
             "kind": "who",
             "also": "none",
@@ -6024,7 +6507,7 @@
             "prod": "",
             "payload": {
               "who": "self",
-              "rel": ""
+              "party": ""
             }
           },
           "action": {
@@ -6048,6 +6531,7 @@
             "phase": "identity",
             "verified": "no",
             "who": "self",
+            "q": "id_date_of_birth",
             "identity": {
               "order": [
                 "date_of_birth",
@@ -6076,16 +6560,21 @@
             "callbacks": [],
             "transfers": [],
             "outcome": null,
-            "reason": null
+            "reason": null,
+            "hangup": {
+              "slot": "declined",
+              "outcome": "not_verified",
+              "reason": "declined"
+            }
           }
         },
         {
           "step": 2,
           "source": "user",
           "utterance": "28 April 1993",
-          "event": "n=tbaaaa;src=user;kind=identity;also=none;st=complete;prod=;field=date_of_birth;ans=1993-04-28",
+          "event": "n=ubaaaa;src=user;kind=identity;also=none;st=complete;prod=;field=date_of_birth;ans=1993-04-28",
           "event_fields": {
-            "n": "tbaaaa",
+            "n": "ubaaaa",
             "src": "user",
             "kind": "identity",
             "also": "none",
@@ -6103,12 +6592,14 @@
               "customer_id": "c_pub08",
               "field": "date_of_birth",
               "answer": "1993-04-28"
-            }
+            },
+            "w_go": "go"
           },
           "state": {
             "phase": "identity",
             "verified": "no",
             "who": "self",
+            "q": "none",
             "identity": {
               "order": [
                 "date_of_birth",
@@ -6144,7 +6635,12 @@
             "callbacks": [],
             "transfers": [],
             "outcome": null,
-            "reason": null
+            "reason": null,
+            "hangup": {
+              "slot": "declined",
+              "outcome": "not_verified",
+              "reason": "declined"
+            }
           }
         },
         {
@@ -6186,6 +6682,7 @@
             "phase": "identity",
             "verified": "no",
             "who": "self",
+            "q": "id_phone_last4",
             "identity": {
               "order": [
                 "date_of_birth",
@@ -6214,16 +6711,21 @@
             "callbacks": [],
             "transfers": [],
             "outcome": null,
-            "reason": null
+            "reason": null,
+            "hangup": {
+              "slot": "declined",
+              "outcome": "not_verified",
+              "reason": "declined"
+            }
           }
         },
         {
           "step": 4,
           "source": "user",
           "utterance": "3317",
-          "event": "n=ubaaaa;src=user;kind=identity;also=none;st=complete;prod=;field=phone_last4;ans=3317",
+          "event": "n=vbaaaa;src=user;kind=identity;also=none;st=complete;prod=;field=phone_last4;ans=3317",
           "event_fields": {
-            "n": "ubaaaa",
+            "n": "vbaaaa",
             "src": "user",
             "kind": "identity",
             "also": "none",
@@ -6241,12 +6743,14 @@
               "customer_id": "c_pub08",
               "field": "phone_last4",
               "answer": "3317"
-            }
+            },
+            "w_go": "go"
           },
           "state": {
             "phase": "identity",
             "verified": "no",
             "who": "self",
+            "q": "none",
             "identity": {
               "order": [
                 "date_of_birth",
@@ -6282,7 +6786,12 @@
             "callbacks": [],
             "transfers": [],
             "outcome": null,
-            "reason": null
+            "reason": null,
+            "hangup": {
+              "slot": "declined",
+              "outcome": "not_verified",
+              "reason": "declined"
+            }
           }
         },
         {
@@ -6308,12 +6817,14 @@
             "tool": "get_account",
             "args": {
               "customer_id": "c_pub08"
-            }
+            },
+            "w_go": "go"
           },
           "state": {
             "phase": "account",
             "verified": "yes",
             "who": "self",
+            "q": "none",
             "identity": {
               "order": [
                 "date_of_birth",
@@ -6349,7 +6860,12 @@
             "callbacks": [],
             "transfers": [],
             "outcome": null,
-            "reason": null
+            "reason": null,
+            "hangup": {
+              "slot": "products",
+              "outcome": null,
+              "reason": null
+            }
           }
         },
         {
@@ -6394,6 +6910,7 @@
             "phase": "negotiation",
             "verified": "yes",
             "who": "self",
+            "q": "pay_today",
             "identity": {
               "order": [
                 "date_of_birth",
@@ -6442,16 +6959,21 @@
             "callbacks": [],
             "transfers": [],
             "outcome": null,
-            "reason": null
+            "reason": null,
+            "hangup": {
+              "slot": "products",
+              "outcome": null,
+              "reason": null
+            }
           }
         },
         {
           "step": 7,
           "source": "user",
           "utterance": "I paid it in the app this morning.",
-          "event": "n=vbaaaa;src=user;kind=topic;also=none;st=complete;prod=;t=paid",
+          "event": "n=wbaaaa;src=user;kind=topic;also=none;st=complete;prod=;t=paid",
           "event_fields": {
-            "n": "vbaaaa",
+            "n": "wbaaaa",
             "src": "user",
             "kind": "topic",
             "also": "none",
@@ -6467,6 +6989,11 @@
             "reason": null,
             "farewell": "Payments can take one business day to appear. Thank you, goodbye.",
             "farewell_exact": false,
+            "order": [
+              "farewell_tts",
+              "close_call"
+            ],
+            "user_turn_between": false,
             "farewell_contains": [
               "one business day",
               "Thank you",
@@ -6480,6 +7007,7 @@
             "phase": "closed",
             "verified": "yes",
             "who": "self",
+            "q": "none",
             "identity": {
               "order": [
                 "date_of_birth",
@@ -6518,7 +7046,12 @@
             "callbacks": [],
             "transfers": [],
             "outcome": "paid",
-            "reason": null
+            "reason": null,
+            "hangup": {
+              "slot": "closed",
+              "outcome": "paid",
+              "reason": null
+            }
           }
         }
       ],
@@ -6577,11 +7110,17 @@
       ],
       "bootstrap": {
         "initial_token": "kstart",
+        "lazy_init": {
+          "confirm_name": 1,
+          "q": "confirm_name",
+          "rule": "Ask counters increment when the ask is spoken, never on an event (\u00a712 choice 2)."
+        },
         "greet": {
           "via": "greet_on_enter_tts",
           "contains": [
             "digital assistant",
-            "Freya Bank"
+            "Freya Bank",
+            "Am I speaking with Mr Ionescu?"
           ],
           "must_not_contain": [
             "collections",
@@ -6593,58 +7132,46 @@
             "700",
             "28 days"
           ],
-          "note": "Brief A rule 1 says the call is recorded. recorded is also an honesty word. This fixture does not require either the brief word or the contract's rewrite."
+          "note": "Opening sentence and the name question are one greet tts. Brief A rule 1 says the call is recorded. recorded is also an honesty word. This fixture does not require either the brief word or the contract's rewrite."
         },
-        "first_hub": {
-          "user_event": null,
-          "action": {
-            "type": "say_exact",
-            "text": "Am I speaking with Mr Ionescu?",
-            "wording": "brief",
-            "must_not_contain": [
-              "collections",
-              "debt",
-              "payment",
-              "overdue",
-              "personal loan",
-              "2100",
-              "700",
-              "28 days"
-            ]
+        "state": {
+          "phase": "opening",
+          "verified": "no",
+          "who": "unknown",
+          "q": "confirm_name",
+          "identity": {
+            "order": [
+              "date_of_birth",
+              "phone_last4"
+            ],
+            "idx": 0,
+            "wrong": 0,
+            "refusals": 0
           },
-          "state": {
-            "phase": "opening",
-            "verified": "no",
-            "who": "unknown",
-            "identity": {
-              "order": [
-                "date_of_birth",
-                "phone_last4"
-              ],
-              "idx": 0,
-              "wrong": 0,
-              "refusals": 0
-            },
-            "products": [],
-            "cur": null,
-            "all_today_asked": false,
-            "offer": null,
-            "readback": null,
-            "pending": null,
-            "counters": {
-              "confirm_name": 1,
-              "clarify": 0,
-              "vague": 0,
-              "stop_talking": 0,
-              "human_asks": 0,
-              "decline_explain": 0,
-              "support_offered": 0
-            },
-            "notes": [],
-            "callbacks": [],
-            "transfers": [],
-            "outcome": null,
-            "reason": null
+          "products": [],
+          "cur": null,
+          "all_today_asked": false,
+          "offer": null,
+          "readback": null,
+          "pending": null,
+          "counters": {
+            "confirm_name": 1,
+            "clarify": 0,
+            "vague": 0,
+            "stop_talking": 0,
+            "human_asks": 0,
+            "decline_explain": 0,
+            "support_offered": 0
+          },
+          "notes": [],
+          "callbacks": [],
+          "transfers": [],
+          "outcome": null,
+          "reason": null,
+          "hangup": {
+            "slot": "unclear",
+            "outcome": "not_reached",
+            "reason": "unclear"
           }
         }
       },
@@ -6653,9 +7180,9 @@
           "step": 1,
           "source": "user",
           "utterance": "Yes, this is Victor Ionescu.",
-          "event": "n=wbaaaa;src=user;kind=who;also=none;st=complete;prod=;who=self;rel=",
+          "event": "n=xbaaaa;src=user;kind=who;also=none;st=complete;prod=;who=self;party=",
           "event_fields": {
-            "n": "wbaaaa",
+            "n": "xbaaaa",
             "src": "user",
             "kind": "who",
             "also": "none",
@@ -6663,7 +7190,7 @@
             "prod": "",
             "payload": {
               "who": "self",
-              "rel": ""
+              "party": ""
             }
           },
           "action": {
@@ -6686,6 +7213,7 @@
             "phase": "identity",
             "verified": "no",
             "who": "self",
+            "q": "id_date_of_birth",
             "identity": {
               "order": [
                 "date_of_birth",
@@ -6714,16 +7242,21 @@
             "callbacks": [],
             "transfers": [],
             "outcome": null,
-            "reason": null
+            "reason": null,
+            "hangup": {
+              "slot": "declined",
+              "outcome": "not_verified",
+              "reason": "declined"
+            }
           }
         },
         {
           "step": 2,
           "source": "user",
           "utterance": "11 August 1981",
-          "event": "n=xbaaaa;src=user;kind=identity;also=none;st=complete;prod=;field=date_of_birth;ans=1981-08-11",
+          "event": "n=ybaaaa;src=user;kind=identity;also=none;st=complete;prod=;field=date_of_birth;ans=1981-08-11",
           "event_fields": {
-            "n": "xbaaaa",
+            "n": "ybaaaa",
             "src": "user",
             "kind": "identity",
             "also": "none",
@@ -6741,12 +7274,14 @@
               "customer_id": "c_pub09",
               "field": "date_of_birth",
               "answer": "1981-08-11"
-            }
+            },
+            "w_go": "go"
           },
           "state": {
             "phase": "identity",
             "verified": "no",
             "who": "self",
+            "q": "none",
             "identity": {
               "order": [
                 "date_of_birth",
@@ -6782,7 +7317,12 @@
             "callbacks": [],
             "transfers": [],
             "outcome": null,
-            "reason": null
+            "reason": null,
+            "hangup": {
+              "slot": "declined",
+              "outcome": "not_verified",
+              "reason": "declined"
+            }
           }
         },
         {
@@ -6823,6 +7363,7 @@
             "phase": "identity",
             "verified": "no",
             "who": "self",
+            "q": "id_phone_last4",
             "identity": {
               "order": [
                 "date_of_birth",
@@ -6851,16 +7392,21 @@
             "callbacks": [],
             "transfers": [],
             "outcome": null,
-            "reason": null
+            "reason": null,
+            "hangup": {
+              "slot": "declined",
+              "outcome": "not_verified",
+              "reason": "declined"
+            }
           }
         },
         {
           "step": 4,
           "source": "user",
           "utterance": "5560",
-          "event": "n=ybaaaa;src=user;kind=identity;also=none;st=complete;prod=;field=phone_last4;ans=5560",
+          "event": "n=zbaaaa;src=user;kind=identity;also=none;st=complete;prod=;field=phone_last4;ans=5560",
           "event_fields": {
-            "n": "ybaaaa",
+            "n": "zbaaaa",
             "src": "user",
             "kind": "identity",
             "also": "none",
@@ -6878,12 +7424,14 @@
               "customer_id": "c_pub09",
               "field": "phone_last4",
               "answer": "5560"
-            }
+            },
+            "w_go": "go"
           },
           "state": {
             "phase": "identity",
             "verified": "no",
             "who": "self",
+            "q": "none",
             "identity": {
               "order": [
                 "date_of_birth",
@@ -6919,7 +7467,12 @@
             "callbacks": [],
             "transfers": [],
             "outcome": null,
-            "reason": null
+            "reason": null,
+            "hangup": {
+              "slot": "declined",
+              "outcome": "not_verified",
+              "reason": "declined"
+            }
           }
         },
         {
@@ -6945,12 +7498,14 @@
             "tool": "get_account",
             "args": {
               "customer_id": "c_pub09"
-            }
+            },
+            "w_go": "go"
           },
           "state": {
             "phase": "account",
             "verified": "yes",
             "who": "self",
+            "q": "none",
             "identity": {
               "order": [
                 "date_of_birth",
@@ -6986,7 +7541,12 @@
             "callbacks": [],
             "transfers": [],
             "outcome": null,
-            "reason": null
+            "reason": null,
+            "hangup": {
+              "slot": "products",
+              "outcome": null,
+              "reason": null
+            }
           }
         },
         {
@@ -7030,6 +7590,7 @@
             "phase": "negotiation",
             "verified": "yes",
             "who": "self",
+            "q": "pay_today",
             "identity": {
               "order": [
                 "date_of_birth",
@@ -7078,16 +7639,21 @@
             "callbacks": [],
             "transfers": [],
             "outcome": null,
-            "reason": null
+            "reason": null,
+            "hangup": {
+              "slot": "products",
+              "outcome": null,
+              "reason": null
+            }
           }
         },
         {
           "step": 7,
           "source": "user",
           "utterance": "I cannot pay this amount. I want lower instalments.",
-          "event": "n=zbaaaa;src=user;kind=topic;also=reject;st=complete;prod=;t=restructure",
+          "event": "n=acaaaa;src=user;kind=topic;also=reject;st=complete;prod=;t=restructure",
           "event_fields": {
-            "n": "zbaaaa",
+            "n": "acaaaa",
             "src": "user",
             "kind": "topic",
             "also": "reject",
@@ -7103,12 +7669,14 @@
             "args": {
               "customer_id": "c_pub09",
               "queue": "restructuring"
-            }
+            },
+            "w_go": "go"
           },
           "state": {
             "phase": "negotiation",
             "verified": "yes",
             "who": "self",
+            "q": "none",
             "identity": {
               "order": [
                 "date_of_birth",
@@ -7154,7 +7722,12 @@
             "callbacks": [],
             "transfers": [],
             "outcome": null,
-            "reason": null
+            "reason": null,
+            "hangup": {
+              "slot": "products",
+              "outcome": null,
+              "reason": null
+            }
           }
         },
         {
@@ -7177,6 +7750,11 @@
             "reason": "restructuring",
             "farewell": "Thank you, goodbye.",
             "farewell_exact": true,
+            "order": [
+              "farewell_tts",
+              "close_call"
+            ],
+            "user_turn_between": false,
             "must_not_contain": [
               "recorded",
               "instalment",
@@ -7188,6 +7766,7 @@
             "phase": "closed",
             "verified": "yes",
             "who": "self",
+            "q": "none",
             "identity": {
               "order": [
                 "date_of_birth",
@@ -7230,7 +7809,12 @@
               }
             ],
             "outcome": "transferred",
-            "reason": "restructuring"
+            "reason": "restructuring",
+            "hangup": {
+              "slot": "closed",
+              "outcome": "transferred",
+              "reason": "restructuring"
+            }
           }
         }
       ],
@@ -7298,11 +7882,17 @@
       ],
       "bootstrap": {
         "initial_token": "kstart",
+        "lazy_init": {
+          "confirm_name": 1,
+          "q": "confirm_name",
+          "rule": "Ask counters increment when the ask is spoken, never on an event (\u00a712 choice 2)."
+        },
         "greet": {
           "via": "greet_on_enter_tts",
           "contains": [
             "digital assistant",
-            "Freya Bank"
+            "Freya Bank",
+            "Am I speaking with Ms Lin?"
           ],
           "must_not_contain": [
             "collections",
@@ -7315,59 +7905,46 @@
             "8 days",
             "7740"
           ],
-          "note": "Brief A rule 1 says the call is recorded. recorded is also an honesty word. This fixture does not require either the brief word or the contract's rewrite."
+          "note": "Opening sentence and the name question are one greet tts. Brief A rule 1 says the call is recorded. recorded is also an honesty word. This fixture does not require either the brief word or the contract's rewrite."
         },
-        "first_hub": {
-          "user_event": null,
-          "action": {
-            "type": "say_exact",
-            "text": "Am I speaking with Ms Lin?",
-            "wording": "brief",
-            "must_not_contain": [
-              "collections",
-              "debt",
-              "payment",
-              "overdue",
-              "credit card ending 7740",
-              "365",
-              "109.5",
-              "8 days",
-              "7740"
-            ]
+        "state": {
+          "phase": "opening",
+          "verified": "no",
+          "who": "unknown",
+          "q": "confirm_name",
+          "identity": {
+            "order": [
+              "date_of_birth",
+              "phone_last4"
+            ],
+            "idx": 0,
+            "wrong": 0,
+            "refusals": 0
           },
-          "state": {
-            "phase": "opening",
-            "verified": "no",
-            "who": "unknown",
-            "identity": {
-              "order": [
-                "date_of_birth",
-                "phone_last4"
-              ],
-              "idx": 0,
-              "wrong": 0,
-              "refusals": 0
-            },
-            "products": [],
-            "cur": null,
-            "all_today_asked": false,
-            "offer": null,
-            "readback": null,
-            "pending": null,
-            "counters": {
-              "confirm_name": 1,
-              "clarify": 0,
-              "vague": 0,
-              "stop_talking": 0,
-              "human_asks": 0,
-              "decline_explain": 0,
-              "support_offered": 0
-            },
-            "notes": [],
-            "callbacks": [],
-            "transfers": [],
-            "outcome": null,
-            "reason": null
+          "products": [],
+          "cur": null,
+          "all_today_asked": false,
+          "offer": null,
+          "readback": null,
+          "pending": null,
+          "counters": {
+            "confirm_name": 1,
+            "clarify": 0,
+            "vague": 0,
+            "stop_talking": 0,
+            "human_asks": 0,
+            "decline_explain": 0,
+            "support_offered": 0
+          },
+          "notes": [],
+          "callbacks": [],
+          "transfers": [],
+          "outcome": null,
+          "reason": null,
+          "hangup": {
+            "slot": "unclear",
+            "outcome": "not_reached",
+            "reason": "unclear"
           }
         }
       },
@@ -7376,9 +7953,9 @@
           "step": 1,
           "source": "user",
           "utterance": "Yes, this is Grace Lin.",
-          "event": "n=acaaaa;src=user;kind=who;also=none;st=complete;prod=;who=self;rel=",
+          "event": "n=bcaaaa;src=user;kind=who;also=none;st=complete;prod=;who=self;party=",
           "event_fields": {
-            "n": "acaaaa",
+            "n": "bcaaaa",
             "src": "user",
             "kind": "who",
             "also": "none",
@@ -7386,7 +7963,7 @@
             "prod": "",
             "payload": {
               "who": "self",
-              "rel": ""
+              "party": ""
             }
           },
           "action": {
@@ -7410,6 +7987,7 @@
             "phase": "identity",
             "verified": "no",
             "who": "self",
+            "q": "id_date_of_birth",
             "identity": {
               "order": [
                 "date_of_birth",
@@ -7438,16 +8016,21 @@
             "callbacks": [],
             "transfers": [],
             "outcome": null,
-            "reason": null
+            "reason": null,
+            "hangup": {
+              "slot": "declined",
+              "outcome": "not_verified",
+              "reason": "declined"
+            }
           }
         },
         {
           "step": 2,
           "source": "user",
           "utterance": "23 February 1989",
-          "event": "n=bcaaaa;src=user;kind=identity;also=none;st=complete;prod=;field=date_of_birth;ans=1989-02-23",
+          "event": "n=ccaaaa;src=user;kind=identity;also=none;st=complete;prod=;field=date_of_birth;ans=1989-02-23",
           "event_fields": {
-            "n": "bcaaaa",
+            "n": "ccaaaa",
             "src": "user",
             "kind": "identity",
             "also": "none",
@@ -7465,12 +8048,14 @@
               "customer_id": "c_pub10",
               "field": "date_of_birth",
               "answer": "1989-02-23"
-            }
+            },
+            "w_go": "go"
           },
           "state": {
             "phase": "identity",
             "verified": "no",
             "who": "self",
+            "q": "none",
             "identity": {
               "order": [
                 "date_of_birth",
@@ -7506,7 +8091,12 @@
             "callbacks": [],
             "transfers": [],
             "outcome": null,
-            "reason": null
+            "reason": null,
+            "hangup": {
+              "slot": "declined",
+              "outcome": "not_verified",
+              "reason": "declined"
+            }
           }
         },
         {
@@ -7548,6 +8138,7 @@
             "phase": "identity",
             "verified": "no",
             "who": "self",
+            "q": "id_phone_last4",
             "identity": {
               "order": [
                 "date_of_birth",
@@ -7576,16 +8167,21 @@
             "callbacks": [],
             "transfers": [],
             "outcome": null,
-            "reason": null
+            "reason": null,
+            "hangup": {
+              "slot": "declined",
+              "outcome": "not_verified",
+              "reason": "declined"
+            }
           }
         },
         {
           "step": 4,
           "source": "user",
           "utterance": "9904",
-          "event": "n=ccaaaa;src=user;kind=identity;also=none;st=complete;prod=;field=phone_last4;ans=9904",
+          "event": "n=dcaaaa;src=user;kind=identity;also=none;st=complete;prod=;field=phone_last4;ans=9904",
           "event_fields": {
-            "n": "ccaaaa",
+            "n": "dcaaaa",
             "src": "user",
             "kind": "identity",
             "also": "none",
@@ -7603,12 +8199,14 @@
               "customer_id": "c_pub10",
               "field": "phone_last4",
               "answer": "9904"
-            }
+            },
+            "w_go": "go"
           },
           "state": {
             "phase": "identity",
             "verified": "no",
             "who": "self",
+            "q": "none",
             "identity": {
               "order": [
                 "date_of_birth",
@@ -7644,7 +8242,12 @@
             "callbacks": [],
             "transfers": [],
             "outcome": null,
-            "reason": null
+            "reason": null,
+            "hangup": {
+              "slot": "declined",
+              "outcome": "not_verified",
+              "reason": "declined"
+            }
           }
         },
         {
@@ -7670,12 +8273,14 @@
             "tool": "get_account",
             "args": {
               "customer_id": "c_pub10"
-            }
+            },
+            "w_go": "go"
           },
           "state": {
             "phase": "account",
             "verified": "yes",
             "who": "self",
+            "q": "none",
             "identity": {
               "order": [
                 "date_of_birth",
@@ -7711,7 +8316,12 @@
             "callbacks": [],
             "transfers": [],
             "outcome": null,
-            "reason": null
+            "reason": null,
+            "hangup": {
+              "slot": "products",
+              "outcome": null,
+              "reason": null
+            }
           }
         },
         {
@@ -7756,6 +8366,7 @@
             "phase": "negotiation",
             "verified": "yes",
             "who": "self",
+            "q": "pay_today",
             "identity": {
               "order": [
                 "date_of_birth",
@@ -7804,16 +8415,21 @@
             "callbacks": [],
             "transfers": [],
             "outcome": null,
-            "reason": null
+            "reason": null,
+            "hangup": {
+              "slot": "products",
+              "outcome": null,
+              "reason": null
+            }
           }
         },
         {
           "step": 7,
           "source": "user",
           "utterance": "I cannot pay today.",
-          "event": "n=dcaaaa;src=user;kind=reject;also=none;st=complete;prod=;why=flat",
+          "event": "n=ecaaaa;src=user;kind=reject;also=none;st=complete;prod=;why=flat",
           "event_fields": {
-            "n": "dcaaaa",
+            "n": "ecaaaa",
             "src": "user",
             "kind": "reject",
             "also": "none",
@@ -7839,6 +8455,7 @@
             "phase": "negotiation",
             "verified": "yes",
             "who": "self",
+            "q": "offer",
             "identity": {
               "order": [
                 "date_of_birth",
@@ -7887,18 +8504,23 @@
             "callbacks": [],
             "transfers": [],
             "outcome": null,
-            "reason": null
+            "reason": null,
+            "hangup": {
+              "slot": "products",
+              "outcome": null,
+              "reason": null
+            }
           }
         },
         {
           "step": 8,
           "source": "user",
           "utterance": "Yes, I can do that.",
-          "event": "n=ecaaaa;src=user;kind=accept;also=none;st=complete;prod=",
+          "event": "n=fcaaaa;src=user;kind=yes;also=none;st=complete;prod=",
           "event_fields": {
-            "n": "ecaaaa",
+            "n": "fcaaaa",
             "src": "user",
-            "kind": "accept",
+            "kind": "yes",
             "also": "none",
             "st": "complete",
             "prod": "",
@@ -7917,6 +8539,7 @@
             "phase": "readback",
             "verified": "yes",
             "who": "self",
+            "q": "readback",
             "identity": {
               "order": [
                 "date_of_birth",
@@ -7967,16 +8590,21 @@
             "callbacks": [],
             "transfers": [],
             "outcome": null,
-            "reason": null
+            "reason": null,
+            "hangup": {
+              "slot": "products",
+              "outcome": null,
+              "reason": null
+            }
           }
         },
         {
           "step": 9,
           "source": "user",
           "utterance": "Yes.",
-          "event": "n=fcaaaa;src=user;kind=yes;also=none;st=complete;prod=",
+          "event": "n=gcaaaa;src=user;kind=yes;also=none;st=complete;prod=",
           "event_fields": {
-            "n": "fcaaaa",
+            "n": "gcaaaa",
             "src": "user",
             "kind": "yes",
             "also": "none",
@@ -7992,12 +8620,14 @@
               "product_id": "p1",
               "amount": 365.0,
               "date": "2026-10-16"
-            }
+            },
+            "w_go": "go"
           },
           "state": {
             "phase": "readback",
             "verified": "yes",
             "who": "self",
+            "q": "none",
             "identity": {
               "order": [
                 "date_of_birth",
@@ -8055,7 +8685,12 @@
             "callbacks": [],
             "transfers": [],
             "outcome": null,
-            "reason": null
+            "reason": null,
+            "hangup": {
+              "slot": "products",
+              "outcome": null,
+              "reason": null
+            }
           }
         },
         {
@@ -8080,12 +8715,14 @@
               "product_id": "p1",
               "amount": 365.0,
               "date": "2026-10-16"
-            }
+            },
+            "w_go": "go"
           },
           "state": {
             "phase": "readback",
             "verified": "yes",
             "who": "self",
+            "q": "none",
             "identity": {
               "order": [
                 "date_of_birth",
@@ -8143,7 +8780,12 @@
             "callbacks": [],
             "transfers": [],
             "outcome": null,
-            "reason": null
+            "reason": null,
+            "hangup": {
+              "slot": "products",
+              "outcome": null,
+              "reason": null
+            }
           }
         },
         {
@@ -8171,6 +8813,7 @@
             "phase": "wrapup",
             "verified": "yes",
             "who": "self",
+            "q": "none",
             "identity": {
               "order": [
                 "date_of_birth",
@@ -8221,16 +8864,21 @@
             "callbacks": [],
             "transfers": [],
             "outcome": null,
-            "reason": null
+            "reason": null,
+            "hangup": {
+              "slot": "products",
+              "outcome": "promise",
+              "reason": null
+            }
           }
         },
         {
           "step": 12,
           "source": "user",
           "utterance": "Thank you.",
-          "event": "n=gcaaaa;src=user;kind=other;also=none;st=none;prod=",
+          "event": "n=hcaaaa;src=user;kind=other;also=none;st=none;prod=",
           "event_fields": {
-            "n": "gcaaaa",
+            "n": "hcaaaa",
             "src": "user",
             "kind": "other",
             "also": "none",
@@ -8243,12 +8891,18 @@
             "outcome": "promise",
             "reason": null,
             "farewell": "Thank you, goodbye.",
-            "farewell_exact": true
+            "farewell_exact": true,
+            "order": [
+              "farewell_tts",
+              "close_call"
+            ],
+            "user_turn_between": false
           },
           "state": {
             "phase": "closed",
             "verified": "yes",
             "who": "self",
+            "q": "none",
             "identity": {
               "order": [
                 "date_of_birth",
@@ -8299,7 +8953,12 @@
             "callbacks": [],
             "transfers": [],
             "outcome": "promise",
-            "reason": null
+            "reason": null,
+            "hangup": {
+              "slot": "closed",
+              "outcome": "promise",
+              "reason": null
+            }
           }
         }
       ],
@@ -8395,11 +9054,17 @@
       ],
       "bootstrap": {
         "initial_token": "kstart",
+        "lazy_init": {
+          "confirm_name": 1,
+          "q": "confirm_name",
+          "rule": "Ask counters increment when the ask is spoken, never on an event (\u00a712 choice 2)."
+        },
         "greet": {
           "via": "greet_on_enter_tts",
           "contains": [
             "digital assistant",
-            "Freya Bank"
+            "Freya Bank",
+            "Am I speaking with Ms Almeida?"
           ],
           "must_not_contain": [
             "collections",
@@ -8419,66 +9084,46 @@
             "25",
             "3 days"
           ],
-          "note": "Brief A rule 1 says the call is recorded. recorded is also an honesty word. This fixture does not require either the brief word or the contract's rewrite."
+          "note": "Opening sentence and the name question are one greet tts. Brief A rule 1 says the call is recorded. recorded is also an honesty word. This fixture does not require either the brief word or the contract's rewrite."
         },
-        "first_hub": {
-          "user_event": null,
-          "action": {
-            "type": "say_exact",
-            "text": "Am I speaking with Ms Almeida?",
-            "wording": "brief",
-            "must_not_contain": [
-              "collections",
-              "debt",
-              "payment",
-              "overdue",
-              "credit card ending 2288",
-              "220",
-              "66",
-              "9 days",
-              "2288",
-              "personal loan",
-              "640",
-              "213",
-              "car loan",
-              "75",
-              "25",
-              "3 days"
-            ]
+        "state": {
+          "phase": "opening",
+          "verified": "no",
+          "who": "unknown",
+          "q": "confirm_name",
+          "identity": {
+            "order": [
+              "date_of_birth",
+              "phone_last4"
+            ],
+            "idx": 0,
+            "wrong": 0,
+            "refusals": 0
           },
-          "state": {
-            "phase": "opening",
-            "verified": "no",
-            "who": "unknown",
-            "identity": {
-              "order": [
-                "date_of_birth",
-                "phone_last4"
-              ],
-              "idx": 0,
-              "wrong": 0,
-              "refusals": 0
-            },
-            "products": [],
-            "cur": null,
-            "all_today_asked": false,
-            "offer": null,
-            "readback": null,
-            "pending": null,
-            "counters": {
-              "confirm_name": 1,
-              "clarify": 0,
-              "vague": 0,
-              "stop_talking": 0,
-              "human_asks": 0,
-              "decline_explain": 0,
-              "support_offered": 0
-            },
-            "notes": [],
-            "callbacks": [],
-            "transfers": [],
-            "outcome": null,
-            "reason": null
+          "products": [],
+          "cur": null,
+          "all_today_asked": false,
+          "offer": null,
+          "readback": null,
+          "pending": null,
+          "counters": {
+            "confirm_name": 1,
+            "clarify": 0,
+            "vague": 0,
+            "stop_talking": 0,
+            "human_asks": 0,
+            "decline_explain": 0,
+            "support_offered": 0
+          },
+          "notes": [],
+          "callbacks": [],
+          "transfers": [],
+          "outcome": null,
+          "reason": null,
+          "hangup": {
+            "slot": "unclear",
+            "outcome": "not_reached",
+            "reason": "unclear"
           }
         }
       },
@@ -8487,9 +9132,9 @@
           "step": 1,
           "source": "user",
           "utterance": "Yes, this is Sofia Almeida.",
-          "event": "n=hcaaaa;src=user;kind=who;also=none;st=complete;prod=;who=self;rel=",
+          "event": "n=icaaaa;src=user;kind=who;also=none;st=complete;prod=;who=self;party=",
           "event_fields": {
-            "n": "hcaaaa",
+            "n": "icaaaa",
             "src": "user",
             "kind": "who",
             "also": "none",
@@ -8497,7 +9142,7 @@
             "prod": "",
             "payload": {
               "who": "self",
-              "rel": ""
+              "party": ""
             }
           },
           "action": {
@@ -8528,6 +9173,7 @@
             "phase": "identity",
             "verified": "no",
             "who": "self",
+            "q": "id_date_of_birth",
             "identity": {
               "order": [
                 "date_of_birth",
@@ -8556,16 +9202,21 @@
             "callbacks": [],
             "transfers": [],
             "outcome": null,
-            "reason": null
+            "reason": null,
+            "hangup": {
+              "slot": "declined",
+              "outcome": "not_verified",
+              "reason": "declined"
+            }
           }
         },
         {
           "step": 2,
           "source": "user",
           "utterance": "3 June 1987",
-          "event": "n=icaaaa;src=user;kind=identity;also=none;st=complete;prod=;field=date_of_birth;ans=1987-06-03",
+          "event": "n=jcaaaa;src=user;kind=identity;also=none;st=complete;prod=;field=date_of_birth;ans=1987-06-03",
           "event_fields": {
-            "n": "icaaaa",
+            "n": "jcaaaa",
             "src": "user",
             "kind": "identity",
             "also": "none",
@@ -8583,12 +9234,14 @@
               "customer_id": "c_pub11",
               "field": "date_of_birth",
               "answer": "1987-06-03"
-            }
+            },
+            "w_go": "go"
           },
           "state": {
             "phase": "identity",
             "verified": "no",
             "who": "self",
+            "q": "none",
             "identity": {
               "order": [
                 "date_of_birth",
@@ -8624,7 +9277,12 @@
             "callbacks": [],
             "transfers": [],
             "outcome": null,
-            "reason": null
+            "reason": null,
+            "hangup": {
+              "slot": "declined",
+              "outcome": "not_verified",
+              "reason": "declined"
+            }
           }
         },
         {
@@ -8673,6 +9331,7 @@
             "phase": "identity",
             "verified": "no",
             "who": "self",
+            "q": "id_phone_last4",
             "identity": {
               "order": [
                 "date_of_birth",
@@ -8701,16 +9360,21 @@
             "callbacks": [],
             "transfers": [],
             "outcome": null,
-            "reason": null
+            "reason": null,
+            "hangup": {
+              "slot": "declined",
+              "outcome": "not_verified",
+              "reason": "declined"
+            }
           }
         },
         {
           "step": 4,
           "source": "user",
           "utterance": "2288",
-          "event": "n=jcaaaa;src=user;kind=identity;also=none;st=complete;prod=;field=phone_last4;ans=2288",
+          "event": "n=kcaaaa;src=user;kind=identity;also=none;st=complete;prod=;field=phone_last4;ans=2288",
           "event_fields": {
-            "n": "jcaaaa",
+            "n": "kcaaaa",
             "src": "user",
             "kind": "identity",
             "also": "none",
@@ -8728,12 +9392,14 @@
               "customer_id": "c_pub11",
               "field": "phone_last4",
               "answer": "2288"
-            }
+            },
+            "w_go": "go"
           },
           "state": {
             "phase": "identity",
             "verified": "no",
             "who": "self",
+            "q": "none",
             "identity": {
               "order": [
                 "date_of_birth",
@@ -8769,7 +9435,12 @@
             "callbacks": [],
             "transfers": [],
             "outcome": null,
-            "reason": null
+            "reason": null,
+            "hangup": {
+              "slot": "declined",
+              "outcome": "not_verified",
+              "reason": "declined"
+            }
           }
         },
         {
@@ -8795,12 +9466,14 @@
             "tool": "get_account",
             "args": {
               "customer_id": "c_pub11"
-            }
+            },
+            "w_go": "go"
           },
           "state": {
             "phase": "account",
             "verified": "yes",
             "who": "self",
+            "q": "none",
             "identity": {
               "order": [
                 "date_of_birth",
@@ -8836,7 +9509,12 @@
             "callbacks": [],
             "transfers": [],
             "outcome": null,
-            "reason": null
+            "reason": null,
+            "hangup": {
+              "slot": "products",
+              "outcome": null,
+              "reason": null
+            }
           }
         },
         {
@@ -8902,6 +9580,7 @@
             "phase": "negotiation",
             "verified": "yes",
             "who": "self",
+            "q": "pay_today",
             "identity": {
               "order": [
                 "date_of_birth",
@@ -8958,16 +9637,21 @@
             "callbacks": [],
             "transfers": [],
             "outcome": null,
-            "reason": null
+            "reason": null,
+            "hangup": {
+              "slot": "products",
+              "outcome": null,
+              "reason": null
+            }
           }
         },
         {
           "step": 7,
           "source": "user",
           "utterance": "I cannot pay today. I can pay all three this Friday.",
-          "event": "n=kcaaaa;src=user;kind=date;also=reject;st=complete;prod=all;rel=;d=;m=;wd=fri;wk=this;vague=no",
+          "event": "n=lcaaaa;src=user;kind=date;also=reject;st=complete;prod=all;rel=;d=;m=;wd=fri;wk=this;vague=no",
           "event_fields": {
-            "n": "kcaaaa",
+            "n": "lcaaaa",
             "src": "user",
             "kind": "date",
             "also": "reject",
@@ -9001,6 +9685,7 @@
             "phase": "readback",
             "verified": "yes",
             "who": "self",
+            "q": "readback",
             "identity": {
               "order": [
                 "date_of_birth",
@@ -9085,16 +9770,21 @@
             "callbacks": [],
             "transfers": [],
             "outcome": null,
-            "reason": null
+            "reason": null,
+            "hangup": {
+              "slot": "products",
+              "outcome": null,
+              "reason": null
+            }
           }
         },
         {
           "step": 8,
           "source": "user",
           "utterance": "Yes.",
-          "event": "n=lcaaaa;src=user;kind=yes;also=none;st=complete;prod=",
+          "event": "n=mcaaaa;src=user;kind=yes;also=none;st=complete;prod=",
           "event_fields": {
-            "n": "lcaaaa",
+            "n": "mcaaaa",
             "src": "user",
             "kind": "yes",
             "also": "none",
@@ -9110,12 +9800,14 @@
               "product_id": "p1",
               "amount": 220.0,
               "date": "2026-10-16"
-            }
+            },
+            "w_go": "go"
           },
           "state": {
             "phase": "readback",
             "verified": "yes",
             "who": "self",
+            "q": "none",
             "identity": {
               "order": [
                 "date_of_birth",
@@ -9207,7 +9899,12 @@
             "callbacks": [],
             "transfers": [],
             "outcome": null,
-            "reason": null
+            "reason": null,
+            "hangup": {
+              "slot": "products",
+              "outcome": null,
+              "reason": null
+            }
           }
         },
         {
@@ -9234,12 +9931,14 @@
               "product_id": "p2",
               "amount": 640.0,
               "date": "2026-10-16"
-            }
+            },
+            "w_go": "go"
           },
           "state": {
             "phase": "readback",
             "verified": "yes",
             "who": "self",
+            "q": "none",
             "identity": {
               "order": [
                 "date_of_birth",
@@ -9331,7 +10030,12 @@
             "callbacks": [],
             "transfers": [],
             "outcome": null,
-            "reason": null
+            "reason": null,
+            "hangup": {
+              "slot": "products",
+              "outcome": "promise",
+              "reason": null
+            }
           }
         },
         {
@@ -9358,12 +10062,14 @@
               "product_id": "p3",
               "amount": 75.0,
               "date": "2026-10-16"
-            }
+            },
+            "w_go": "go"
           },
           "state": {
             "phase": "readback",
             "verified": "yes",
             "who": "self",
+            "q": "none",
             "identity": {
               "order": [
                 "date_of_birth",
@@ -9455,7 +10161,12 @@
             "callbacks": [],
             "transfers": [],
             "outcome": null,
-            "reason": null
+            "reason": null,
+            "hangup": {
+              "slot": "products",
+              "outcome": "promise",
+              "reason": null
+            }
           }
         },
         {
@@ -9483,6 +10194,7 @@
             "phase": "wrapup",
             "verified": "yes",
             "who": "self",
+            "q": "none",
             "identity": {
               "order": [
                 "date_of_birth",
@@ -9567,16 +10279,21 @@
             "callbacks": [],
             "transfers": [],
             "outcome": null,
-            "reason": null
+            "reason": null,
+            "hangup": {
+              "slot": "products",
+              "outcome": "promise",
+              "reason": null
+            }
           }
         },
         {
           "step": 12,
           "source": "user",
           "utterance": "Thank you.",
-          "event": "n=mcaaaa;src=user;kind=other;also=none;st=none;prod=",
+          "event": "n=ncaaaa;src=user;kind=other;also=none;st=none;prod=",
           "event_fields": {
-            "n": "mcaaaa",
+            "n": "ncaaaa",
             "src": "user",
             "kind": "other",
             "also": "none",
@@ -9589,12 +10306,18 @@
             "outcome": "promise",
             "reason": null,
             "farewell": "Thank you, goodbye.",
-            "farewell_exact": true
+            "farewell_exact": true,
+            "order": [
+              "farewell_tts",
+              "close_call"
+            ],
+            "user_turn_between": false
           },
           "state": {
             "phase": "closed",
             "verified": "yes",
             "who": "self",
+            "q": "none",
             "identity": {
               "order": [
                 "date_of_birth",
@@ -9679,7 +10402,12 @@
             "callbacks": [],
             "transfers": [],
             "outcome": "promise",
-            "reason": null
+            "reason": null,
+            "hangup": {
+              "slot": "closed",
+              "outcome": "promise",
+              "reason": null
+            }
           }
         }
       ],
@@ -9786,11 +10514,17 @@
       ],
       "bootstrap": {
         "initial_token": "kstart",
+        "lazy_init": {
+          "confirm_name": 1,
+          "q": "confirm_name",
+          "rule": "Ask counters increment when the ask is spoken, never on an event (\u00a712 choice 2)."
+        },
         "greet": {
           "via": "greet_on_enter_tts",
           "contains": [
             "digital assistant",
-            "Freya Bank"
+            "Freya Bank",
+            "Am I speaking with Mr Bell?"
           ],
           "must_not_contain": [
             "collections",
@@ -9810,66 +10544,46 @@
             "46",
             "7 days"
           ],
-          "note": "Brief A rule 1 says the call is recorded. recorded is also an honesty word. This fixture does not require either the brief word or the contract's rewrite."
+          "note": "Opening sentence and the name question are one greet tts. Brief A rule 1 says the call is recorded. recorded is also an honesty word. This fixture does not require either the brief word or the contract's rewrite."
         },
-        "first_hub": {
-          "user_event": null,
-          "action": {
-            "type": "say_exact",
-            "text": "Am I speaking with Mr Bell?",
-            "wording": "brief",
-            "must_not_contain": [
-              "collections",
-              "debt",
-              "payment",
-              "overdue",
-              "credit card ending 9015",
-              "510",
-              "153",
-              "16 days",
-              "9015",
-              "personal loan",
-              "1320",
-              "440",
-              "car loan",
-              "140",
-              "46",
-              "7 days"
-            ]
+        "state": {
+          "phase": "opening",
+          "verified": "no",
+          "who": "unknown",
+          "q": "confirm_name",
+          "identity": {
+            "order": [
+              "date_of_birth",
+              "phone_last4"
+            ],
+            "idx": 0,
+            "wrong": 0,
+            "refusals": 0
           },
-          "state": {
-            "phase": "opening",
-            "verified": "no",
-            "who": "unknown",
-            "identity": {
-              "order": [
-                "date_of_birth",
-                "phone_last4"
-              ],
-              "idx": 0,
-              "wrong": 0,
-              "refusals": 0
-            },
-            "products": [],
-            "cur": null,
-            "all_today_asked": false,
-            "offer": null,
-            "readback": null,
-            "pending": null,
-            "counters": {
-              "confirm_name": 1,
-              "clarify": 0,
-              "vague": 0,
-              "stop_talking": 0,
-              "human_asks": 0,
-              "decline_explain": 0,
-              "support_offered": 0
-            },
-            "notes": [],
-            "callbacks": [],
-            "transfers": [],
-            "outcome": null,
-            "reason": null
+          "products": [],
+          "cur": null,
+          "all_today_asked": false,
+          "offer": null,
+          "readback": null,
+          "pending": null,
+          "counters": {
+            "confirm_name": 1,
+            "clarify": 0,
+            "vague": 0,
+            "stop_talking": 0,
+            "human_asks": 0,
+            "decline_explain": 0,
+            "support_offered": 0
+          },
+          "notes": [],
+          "callbacks": [],
+          "transfers": [],
+          "outcome": null,
+          "reason": null,
+          "hangup": {
+            "slot": "unclear",
+            "outcome": "not_reached",
+            "reason": "unclear"
           }
         }
       },
@@ -9878,9 +10592,9 @@
           "step": 1,
           "source": "user",
           "utterance": "Yes, this is Marcus Bell.",
-          "event": "n=ncaaaa;src=user;kind=who;also=none;st=complete;prod=;who=self;rel=",
+          "event": "n=ocaaaa;src=user;kind=who;also=none;st=complete;prod=;who=self;party=",
           "event_fields": {
-            "n": "ncaaaa",
+            "n": "ocaaaa",
             "src": "user",
             "kind": "who",
             "also": "none",
@@ -9888,7 +10602,7 @@
             "prod": "",
             "payload": {
               "who": "self",
-              "rel": ""
+              "party": ""
             }
           },
           "action": {
@@ -9919,6 +10633,7 @@
             "phase": "identity",
             "verified": "no",
             "who": "self",
+            "q": "id_date_of_birth",
             "identity": {
               "order": [
                 "date_of_birth",
@@ -9947,16 +10662,21 @@
             "callbacks": [],
             "transfers": [],
             "outcome": null,
-            "reason": null
+            "reason": null,
+            "hangup": {
+              "slot": "declined",
+              "outcome": "not_verified",
+              "reason": "declined"
+            }
           }
         },
         {
           "step": 2,
           "source": "user",
           "utterance": "19 October 1983",
-          "event": "n=ocaaaa;src=user;kind=identity;also=none;st=complete;prod=;field=date_of_birth;ans=1983-10-19",
+          "event": "n=pcaaaa;src=user;kind=identity;also=none;st=complete;prod=;field=date_of_birth;ans=1983-10-19",
           "event_fields": {
-            "n": "ocaaaa",
+            "n": "pcaaaa",
             "src": "user",
             "kind": "identity",
             "also": "none",
@@ -9974,12 +10694,14 @@
               "customer_id": "c_pub12",
               "field": "date_of_birth",
               "answer": "1983-10-19"
-            }
+            },
+            "w_go": "go"
           },
           "state": {
             "phase": "identity",
             "verified": "no",
             "who": "self",
+            "q": "none",
             "identity": {
               "order": [
                 "date_of_birth",
@@ -10015,7 +10737,12 @@
             "callbacks": [],
             "transfers": [],
             "outcome": null,
-            "reason": null
+            "reason": null,
+            "hangup": {
+              "slot": "declined",
+              "outcome": "not_verified",
+              "reason": "declined"
+            }
           }
         },
         {
@@ -10064,6 +10791,7 @@
             "phase": "identity",
             "verified": "no",
             "who": "self",
+            "q": "id_phone_last4",
             "identity": {
               "order": [
                 "date_of_birth",
@@ -10092,16 +10820,21 @@
             "callbacks": [],
             "transfers": [],
             "outcome": null,
-            "reason": null
+            "reason": null,
+            "hangup": {
+              "slot": "declined",
+              "outcome": "not_verified",
+              "reason": "declined"
+            }
           }
         },
         {
           "step": 4,
           "source": "user",
           "utterance": "4401",
-          "event": "n=pcaaaa;src=user;kind=identity;also=none;st=complete;prod=;field=phone_last4;ans=4401",
+          "event": "n=qcaaaa;src=user;kind=identity;also=none;st=complete;prod=;field=phone_last4;ans=4401",
           "event_fields": {
-            "n": "pcaaaa",
+            "n": "qcaaaa",
             "src": "user",
             "kind": "identity",
             "also": "none",
@@ -10119,12 +10852,14 @@
               "customer_id": "c_pub12",
               "field": "phone_last4",
               "answer": "4401"
-            }
+            },
+            "w_go": "go"
           },
           "state": {
             "phase": "identity",
             "verified": "no",
             "who": "self",
+            "q": "none",
             "identity": {
               "order": [
                 "date_of_birth",
@@ -10160,7 +10895,12 @@
             "callbacks": [],
             "transfers": [],
             "outcome": null,
-            "reason": null
+            "reason": null,
+            "hangup": {
+              "slot": "declined",
+              "outcome": "not_verified",
+              "reason": "declined"
+            }
           }
         },
         {
@@ -10209,6 +10949,7 @@
             "phase": "identity",
             "verified": "no",
             "who": "self",
+            "q": "id_phone_last4",
             "identity": {
               "order": [
                 "date_of_birth",
@@ -10237,16 +10978,21 @@
             "callbacks": [],
             "transfers": [],
             "outcome": null,
-            "reason": null
+            "reason": null,
+            "hangup": {
+              "slot": "declined",
+              "outcome": "not_verified",
+              "reason": "declined"
+            }
           }
         },
         {
           "step": 6,
           "source": "user",
           "utterance": "4410",
-          "event": "n=qcaaaa;src=user;kind=identity;also=none;st=complete;prod=;field=phone_last4;ans=4410",
+          "event": "n=rcaaaa;src=user;kind=identity;also=none;st=complete;prod=;field=phone_last4;ans=4410",
           "event_fields": {
-            "n": "qcaaaa",
+            "n": "rcaaaa",
             "src": "user",
             "kind": "identity",
             "also": "none",
@@ -10264,12 +11010,14 @@
               "customer_id": "c_pub12",
               "field": "phone_last4",
               "answer": "4410"
-            }
+            },
+            "w_go": "go"
           },
           "state": {
             "phase": "identity",
             "verified": "no",
             "who": "self",
+            "q": "none",
             "identity": {
               "order": [
                 "date_of_birth",
@@ -10305,7 +11053,12 @@
             "callbacks": [],
             "transfers": [],
             "outcome": null,
-            "reason": null
+            "reason": null,
+            "hangup": {
+              "slot": "declined",
+              "outcome": "not_verified",
+              "reason": "declined"
+            }
           }
         },
         {
@@ -10331,12 +11084,14 @@
             "tool": "get_account",
             "args": {
               "customer_id": "c_pub12"
-            }
+            },
+            "w_go": "go"
           },
           "state": {
             "phase": "account",
             "verified": "yes",
             "who": "self",
+            "q": "none",
             "identity": {
               "order": [
                 "date_of_birth",
@@ -10372,7 +11127,12 @@
             "callbacks": [],
             "transfers": [],
             "outcome": null,
-            "reason": null
+            "reason": null,
+            "hangup": {
+              "slot": "products",
+              "outcome": null,
+              "reason": null
+            }
           }
         },
         {
@@ -10438,6 +11198,7 @@
             "phase": "negotiation",
             "verified": "yes",
             "who": "self",
+            "q": "pay_today",
             "identity": {
               "order": [
                 "date_of_birth",
@@ -10494,16 +11255,21 @@
             "callbacks": [],
             "transfers": [],
             "outcome": null,
-            "reason": null
+            "reason": null,
+            "hangup": {
+              "slot": "products",
+              "outcome": null,
+              "reason": null
+            }
           }
         },
         {
           "step": 9,
           "source": "user",
           "utterance": "I will pay the credit card tomorrow.",
-          "event": "n=rcaaaa;src=user;kind=date;also=none;st=complete;prod=1;rel=tomorrow;d=;m=;wd=;wk=none;vague=no",
+          "event": "n=scaaaa;src=user;kind=date;also=none;st=complete;prod=1;rel=tomorrow;d=;m=;wd=;wk=none;vague=no",
           "event_fields": {
-            "n": "rcaaaa",
+            "n": "scaaaa",
             "src": "user",
             "kind": "date",
             "also": "none",
@@ -10533,6 +11299,7 @@
             "phase": "negotiation",
             "verified": "yes",
             "who": "self",
+            "q": "offer",
             "identity": {
               "order": [
                 "date_of_birth",
@@ -10602,16 +11369,21 @@
             "callbacks": [],
             "transfers": [],
             "outcome": null,
-            "reason": null
+            "reason": null,
+            "hangup": {
+              "slot": "products",
+              "outcome": null,
+              "reason": null
+            }
           }
         },
         {
           "step": 10,
           "source": "user",
           "utterance": "No.",
-          "event": "n=scaaaa;src=user;kind=reject;also=none;st=complete;prod=;why=flat",
+          "event": "n=tcaaaa;src=user;kind=reject;also=none;st=complete;prod=;why=flat",
           "event_fields": {
-            "n": "scaaaa",
+            "n": "tcaaaa",
             "src": "user",
             "kind": "reject",
             "also": "none",
@@ -10636,6 +11408,7 @@
             "phase": "negotiation",
             "verified": "yes",
             "who": "self",
+            "q": "offer",
             "identity": {
               "order": [
                 "date_of_birth",
@@ -10705,16 +11478,21 @@
             "callbacks": [],
             "transfers": [],
             "outcome": null,
-            "reason": null
+            "reason": null,
+            "hangup": {
+              "slot": "products",
+              "outcome": null,
+              "reason": null
+            }
           }
         },
         {
           "step": 11,
           "source": "user",
           "utterance": "No.",
-          "event": "n=tcaaaa;src=user;kind=reject;also=none;st=complete;prod=;why=flat",
+          "event": "n=ucaaaa;src=user;kind=reject;also=none;st=complete;prod=;why=flat",
           "event_fields": {
-            "n": "tcaaaa",
+            "n": "ucaaaa",
             "src": "user",
             "kind": "reject",
             "also": "none",
@@ -10739,6 +11517,7 @@
             "phase": "negotiation",
             "verified": "yes",
             "who": "self",
+            "q": "offer",
             "identity": {
               "order": [
                 "date_of_birth",
@@ -10811,16 +11590,21 @@
             "callbacks": [],
             "transfers": [],
             "outcome": null,
-            "reason": null
+            "reason": null,
+            "hangup": {
+              "slot": "products",
+              "outcome": null,
+              "reason": null
+            }
           }
         },
         {
           "step": 12,
           "source": "user",
           "utterance": "No.",
-          "event": "n=ucaaaa;src=user;kind=reject;also=none;st=complete;prod=;why=flat",
+          "event": "n=vcaaaa;src=user;kind=reject;also=none;st=complete;prod=;why=flat",
           "event_fields": {
-            "n": "ucaaaa",
+            "n": "vcaaaa",
             "src": "user",
             "kind": "reject",
             "also": "none",
@@ -10843,6 +11627,7 @@
             "phase": "readback",
             "verified": "yes",
             "who": "self",
+            "q": "readback",
             "identity": {
               "order": [
                 "date_of_birth",
@@ -10917,16 +11702,21 @@
             "callbacks": [],
             "transfers": [],
             "outcome": null,
-            "reason": null
+            "reason": null,
+            "hangup": {
+              "slot": "products",
+              "outcome": null,
+              "reason": null
+            }
           }
         },
         {
           "step": 13,
           "source": "user",
           "utterance": "Yes.",
-          "event": "n=vcaaaa;src=user;kind=yes;also=none;st=complete;prod=",
+          "event": "n=wcaaaa;src=user;kind=yes;also=none;st=complete;prod=",
           "event_fields": {
-            "n": "vcaaaa",
+            "n": "wcaaaa",
             "src": "user",
             "kind": "yes",
             "also": "none",
@@ -10942,12 +11732,14 @@
               "product_id": "p1",
               "amount": 510.0,
               "date": "2026-10-15"
-            }
+            },
+            "w_go": "go"
           },
           "state": {
             "phase": "readback",
             "verified": "yes",
             "who": "self",
+            "q": "none",
             "identity": {
               "order": [
                 "date_of_birth",
@@ -11029,7 +11821,12 @@
             "callbacks": [],
             "transfers": [],
             "outcome": null,
-            "reason": null
+            "reason": null,
+            "hangup": {
+              "slot": "products",
+              "outcome": null,
+              "reason": null
+            }
           }
         },
         {
@@ -11055,12 +11852,14 @@
               "customer_id": "c_pub12",
               "product_id": "p2",
               "reason": "refused"
-            }
+            },
+            "w_go": "go"
           },
           "state": {
             "phase": "wrapup",
             "verified": "yes",
             "who": "self",
+            "q": "none",
             "identity": {
               "order": [
                 "date_of_birth",
@@ -11142,7 +11941,12 @@
             "callbacks": [],
             "transfers": [],
             "outcome": null,
-            "reason": null
+            "reason": null,
+            "hangup": {
+              "slot": "products",
+              "outcome": "promise",
+              "reason": null
+            }
           }
         },
         {
@@ -11166,12 +11970,14 @@
               "customer_id": "c_pub12",
               "product_id": "p3",
               "reason": "refused"
-            }
+            },
+            "w_go": "go"
           },
           "state": {
             "phase": "wrapup",
             "verified": "yes",
             "who": "self",
+            "q": "none",
             "identity": {
               "order": [
                 "date_of_birth",
@@ -11258,7 +12064,12 @@
             "callbacks": [],
             "transfers": [],
             "outcome": null,
-            "reason": null
+            "reason": null,
+            "hangup": {
+              "slot": "products",
+              "outcome": "promise",
+              "reason": null
+            }
           }
         },
         {
@@ -11284,6 +12095,7 @@
             "phase": "wrapup",
             "verified": "yes",
             "who": "self",
+            "q": "none",
             "identity": {
               "order": [
                 "date_of_birth",
@@ -11367,16 +12179,21 @@
             "callbacks": [],
             "transfers": [],
             "outcome": null,
-            "reason": null
+            "reason": null,
+            "hangup": {
+              "slot": "products",
+              "outcome": "promise",
+              "reason": null
+            }
           }
         },
         {
           "step": 17,
           "source": "user",
           "utterance": "Thank you.",
-          "event": "n=wcaaaa;src=user;kind=other;also=none;st=none;prod=",
+          "event": "n=xcaaaa;src=user;kind=other;also=none;st=none;prod=",
           "event_fields": {
-            "n": "wcaaaa",
+            "n": "xcaaaa",
             "src": "user",
             "kind": "other",
             "also": "none",
@@ -11389,12 +12206,18 @@
             "outcome": "promise",
             "reason": null,
             "farewell": "Thank you, goodbye.",
-            "farewell_exact": true
+            "farewell_exact": true,
+            "order": [
+              "farewell_tts",
+              "close_call"
+            ],
+            "user_turn_between": false
           },
           "state": {
             "phase": "closed",
             "verified": "yes",
             "who": "self",
+            "q": "none",
             "identity": {
               "order": [
                 "date_of_birth",
@@ -11478,7 +12301,12 @@
             "callbacks": [],
             "transfers": [],
             "outcome": "promise",
-            "reason": null
+            "reason": null,
+            "hangup": {
+              "slot": "closed",
+              "outcome": "promise",
+              "reason": null
+            }
           }
         }
       ],
@@ -11568,11 +12396,17 @@
       ],
       "bootstrap": {
         "initial_token": "kstart",
+        "lazy_init": {
+          "confirm_name": 1,
+          "q": "confirm_name",
+          "rule": "Ask counters increment when the ask is spoken, never on an event (\u00a712 choice 2)."
+        },
         "greet": {
           "via": "greet_on_enter_tts",
           "contains": [
             "digital assistant",
-            "Freya Bank"
+            "Freya Bank",
+            "Am I speaking with Ms Rossi?"
           ],
           "must_not_contain": [
             "collections",
@@ -11588,62 +12422,46 @@
             "900",
             "20 days"
           ],
-          "note": "Brief A rule 1 says the call is recorded. recorded is also an honesty word. This fixture does not require either the brief word or the contract's rewrite."
+          "note": "Opening sentence and the name question are one greet tts. Brief A rule 1 says the call is recorded. recorded is also an honesty word. This fixture does not require either the brief word or the contract's rewrite."
         },
-        "first_hub": {
-          "user_event": null,
-          "action": {
-            "type": "say_exact",
-            "text": "Am I speaking with Ms Rossi?",
-            "wording": "brief",
-            "must_not_contain": [
-              "collections",
-              "debt",
-              "payment",
-              "overdue",
-              "credit card ending 6604",
-              "300",
-              "90",
-              "4 days",
-              "6604",
-              "personal loan",
-              "900",
-              "20 days"
-            ]
+        "state": {
+          "phase": "opening",
+          "verified": "no",
+          "who": "unknown",
+          "q": "confirm_name",
+          "identity": {
+            "order": [
+              "date_of_birth",
+              "phone_last4"
+            ],
+            "idx": 0,
+            "wrong": 0,
+            "refusals": 0
           },
-          "state": {
-            "phase": "opening",
-            "verified": "no",
-            "who": "unknown",
-            "identity": {
-              "order": [
-                "date_of_birth",
-                "phone_last4"
-              ],
-              "idx": 0,
-              "wrong": 0,
-              "refusals": 0
-            },
-            "products": [],
-            "cur": null,
-            "all_today_asked": false,
-            "offer": null,
-            "readback": null,
-            "pending": null,
-            "counters": {
-              "confirm_name": 1,
-              "clarify": 0,
-              "vague": 0,
-              "stop_talking": 0,
-              "human_asks": 0,
-              "decline_explain": 0,
-              "support_offered": 0
-            },
-            "notes": [],
-            "callbacks": [],
-            "transfers": [],
-            "outcome": null,
-            "reason": null
+          "products": [],
+          "cur": null,
+          "all_today_asked": false,
+          "offer": null,
+          "readback": null,
+          "pending": null,
+          "counters": {
+            "confirm_name": 1,
+            "clarify": 0,
+            "vague": 0,
+            "stop_talking": 0,
+            "human_asks": 0,
+            "decline_explain": 0,
+            "support_offered": 0
+          },
+          "notes": [],
+          "callbacks": [],
+          "transfers": [],
+          "outcome": null,
+          "reason": null,
+          "hangup": {
+            "slot": "unclear",
+            "outcome": "not_reached",
+            "reason": "unclear"
           }
         }
       },
@@ -11652,9 +12470,9 @@
           "step": 1,
           "source": "user",
           "utterance": "Yes, this is Elena Rossi.",
-          "event": "n=xcaaaa;src=user;kind=who;also=none;st=complete;prod=;who=self;rel=",
+          "event": "n=ycaaaa;src=user;kind=who;also=none;st=complete;prod=;who=self;party=",
           "event_fields": {
-            "n": "xcaaaa",
+            "n": "ycaaaa",
             "src": "user",
             "kind": "who",
             "also": "none",
@@ -11662,7 +12480,7 @@
             "prod": "",
             "payload": {
               "who": "self",
-              "rel": ""
+              "party": ""
             }
           },
           "action": {
@@ -11689,6 +12507,7 @@
             "phase": "identity",
             "verified": "no",
             "who": "self",
+            "q": "id_date_of_birth",
             "identity": {
               "order": [
                 "date_of_birth",
@@ -11717,16 +12536,21 @@
             "callbacks": [],
             "transfers": [],
             "outcome": null,
-            "reason": null
+            "reason": null,
+            "hangup": {
+              "slot": "declined",
+              "outcome": "not_verified",
+              "reason": "declined"
+            }
           }
         },
         {
           "step": 2,
           "source": "user",
           "utterance": "8 January 1991",
-          "event": "n=ycaaaa;src=user;kind=identity;also=none;st=complete;prod=;field=date_of_birth;ans=1991-01-08",
+          "event": "n=zcaaaa;src=user;kind=identity;also=none;st=complete;prod=;field=date_of_birth;ans=1991-01-08",
           "event_fields": {
-            "n": "ycaaaa",
+            "n": "zcaaaa",
             "src": "user",
             "kind": "identity",
             "also": "none",
@@ -11744,12 +12568,14 @@
               "customer_id": "c_pub13",
               "field": "date_of_birth",
               "answer": "1991-01-08"
-            }
+            },
+            "w_go": "go"
           },
           "state": {
             "phase": "identity",
             "verified": "no",
             "who": "self",
+            "q": "none",
             "identity": {
               "order": [
                 "date_of_birth",
@@ -11785,7 +12611,12 @@
             "callbacks": [],
             "transfers": [],
             "outcome": null,
-            "reason": null
+            "reason": null,
+            "hangup": {
+              "slot": "declined",
+              "outcome": "not_verified",
+              "reason": "declined"
+            }
           }
         },
         {
@@ -11830,6 +12661,7 @@
             "phase": "identity",
             "verified": "no",
             "who": "self",
+            "q": "id_phone_last4",
             "identity": {
               "order": [
                 "date_of_birth",
@@ -11858,16 +12690,21 @@
             "callbacks": [],
             "transfers": [],
             "outcome": null,
-            "reason": null
+            "reason": null,
+            "hangup": {
+              "slot": "declined",
+              "outcome": "not_verified",
+              "reason": "declined"
+            }
           }
         },
         {
           "step": 4,
           "source": "user",
           "utterance": "6604",
-          "event": "n=zcaaaa;src=user;kind=identity;also=none;st=complete;prod=;field=phone_last4;ans=6604",
+          "event": "n=adaaaa;src=user;kind=identity;also=none;st=complete;prod=;field=phone_last4;ans=6604",
           "event_fields": {
-            "n": "zcaaaa",
+            "n": "adaaaa",
             "src": "user",
             "kind": "identity",
             "also": "none",
@@ -11885,12 +12722,14 @@
               "customer_id": "c_pub13",
               "field": "phone_last4",
               "answer": "6604"
-            }
+            },
+            "w_go": "go"
           },
           "state": {
             "phase": "identity",
             "verified": "no",
             "who": "self",
+            "q": "none",
             "identity": {
               "order": [
                 "date_of_birth",
@@ -11926,7 +12765,12 @@
             "callbacks": [],
             "transfers": [],
             "outcome": null,
-            "reason": null
+            "reason": null,
+            "hangup": {
+              "slot": "declined",
+              "outcome": "not_verified",
+              "reason": "declined"
+            }
           }
         },
         {
@@ -11952,12 +12796,14 @@
             "tool": "get_account",
             "args": {
               "customer_id": "c_pub13"
-            }
+            },
+            "w_go": "go"
           },
           "state": {
             "phase": "account",
             "verified": "yes",
             "who": "self",
+            "q": "none",
             "identity": {
               "order": [
                 "date_of_birth",
@@ -11993,7 +12839,12 @@
             "callbacks": [],
             "transfers": [],
             "outcome": null,
-            "reason": null
+            "reason": null,
+            "hangup": {
+              "slot": "products",
+              "outcome": null,
+              "reason": null
+            }
           }
         },
         {
@@ -12049,6 +12900,7 @@
             "phase": "negotiation",
             "verified": "yes",
             "who": "self",
+            "q": "pay_today",
             "identity": {
               "order": [
                 "date_of_birth",
@@ -12096,16 +12948,21 @@
             "callbacks": [],
             "transfers": [],
             "outcome": null,
-            "reason": null
+            "reason": null,
+            "hangup": {
+              "slot": "products",
+              "outcome": null,
+              "reason": null
+            }
           }
         },
         {
           "step": 7,
           "source": "user",
           "utterance": "I cannot pay today. I can pay both on 30 October.",
-          "event": "n=adaaaa;src=user;kind=date;also=reject;st=complete;prod=all;rel=;d=30;m=10;wd=;wk=none;vague=no",
+          "event": "n=bdaaaa;src=user;kind=date;also=reject;st=complete;prod=all;rel=;d=30;m=10;wd=;wk=none;vague=no",
           "event_fields": {
-            "n": "adaaaa",
+            "n": "bdaaaa",
             "src": "user",
             "kind": "date",
             "also": "reject",
@@ -12137,6 +12994,7 @@
             "phase": "readback",
             "verified": "yes",
             "who": "self",
+            "q": "readback",
             "identity": {
               "order": [
                 "date_of_birth",
@@ -12204,7 +13062,12 @@
             "callbacks": [],
             "transfers": [],
             "outcome": null,
-            "reason": null
+            "reason": null,
+            "hangup": {
+              "slot": "products",
+              "outcome": null,
+              "reason": null
+            }
           },
           "note": "30 October is inside the card's early deadline. The loan's late deadline is 23 October, so the read-back clamps only the loan."
         },
@@ -12212,9 +13075,9 @@
           "step": 8,
           "source": "user",
           "utterance": "Yes.",
-          "event": "n=bdaaaa;src=user;kind=yes;also=none;st=complete;prod=",
+          "event": "n=cdaaaa;src=user;kind=yes;also=none;st=complete;prod=",
           "event_fields": {
-            "n": "bdaaaa",
+            "n": "cdaaaa",
             "src": "user",
             "kind": "yes",
             "also": "none",
@@ -12230,12 +13093,14 @@
               "product_id": "p1",
               "amount": 300.0,
               "date": "2026-10-30"
-            }
+            },
+            "w_go": "go"
           },
           "state": {
             "phase": "readback",
             "verified": "yes",
             "who": "self",
+            "q": "none",
             "identity": {
               "order": [
                 "date_of_birth",
@@ -12310,7 +13175,12 @@
             "callbacks": [],
             "transfers": [],
             "outcome": null,
-            "reason": null
+            "reason": null,
+            "hangup": {
+              "slot": "products",
+              "outcome": null,
+              "reason": null
+            }
           }
         },
         {
@@ -12337,12 +13207,14 @@
               "product_id": "p2",
               "amount": 900.0,
               "date": "2026-10-23"
-            }
+            },
+            "w_go": "go"
           },
           "state": {
             "phase": "readback",
             "verified": "yes",
             "who": "self",
+            "q": "none",
             "identity": {
               "order": [
                 "date_of_birth",
@@ -12417,7 +13289,12 @@
             "callbacks": [],
             "transfers": [],
             "outcome": null,
-            "reason": null
+            "reason": null,
+            "hangup": {
+              "slot": "products",
+              "outcome": "promise",
+              "reason": null
+            }
           }
         },
         {
@@ -12445,6 +13322,7 @@
             "phase": "wrapup",
             "verified": "yes",
             "who": "self",
+            "q": "none",
             "identity": {
               "order": [
                 "date_of_birth",
@@ -12512,16 +13390,21 @@
             "callbacks": [],
             "transfers": [],
             "outcome": null,
-            "reason": null
+            "reason": null,
+            "hangup": {
+              "slot": "products",
+              "outcome": "promise",
+              "reason": null
+            }
           }
         },
         {
           "step": 11,
           "source": "user",
           "utterance": "Thank you.",
-          "event": "n=cdaaaa;src=user;kind=other;also=none;st=none;prod=",
+          "event": "n=ddaaaa;src=user;kind=other;also=none;st=none;prod=",
           "event_fields": {
-            "n": "cdaaaa",
+            "n": "ddaaaa",
             "src": "user",
             "kind": "other",
             "also": "none",
@@ -12534,12 +13417,18 @@
             "outcome": "promise",
             "reason": null,
             "farewell": "Thank you, goodbye.",
-            "farewell_exact": true
+            "farewell_exact": true,
+            "order": [
+              "farewell_tts",
+              "close_call"
+            ],
+            "user_turn_between": false
           },
           "state": {
             "phase": "closed",
             "verified": "yes",
             "who": "self",
+            "q": "none",
             "identity": {
               "order": [
                 "date_of_birth",
@@ -12607,7 +13496,12 @@
             "callbacks": [],
             "transfers": [],
             "outcome": "promise",
-            "reason": null
+            "reason": null,
+            "hangup": {
+              "slot": "closed",
+              "outcome": "promise",
+              "reason": null
+            }
           }
         }
       ],
