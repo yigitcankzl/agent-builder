@@ -1,0 +1,55 @@
+  [Skill] {'skill': 'build-phone-agent', 'args': 'briefs/brief-a.md'}
+  [Bash] {'command': 'ls -R briefs tools docs examples out 2>/dev/null; cat briefs/brief-a.md', 'description': 'List kit files an
+  [Bash] {'command': 'cat tools/openapi.json docs/workflow-format.md docs/tools-and-code.md examples/base-agent.json', 'descripti
+  [Bash] {'command': 'python3 -c "\nimport json;d=json.load(open(\'tools/openapi.json\'))\nprint(json.dumps(d[\'info\'],indent=1)
+  [Read] {'file_path': '/home/kizil/Desktop/hackathon/agent-builder/docs/workflow-format.md'}
+  [Read] {'file_path': '/home/kizil/Desktop/hackathon/agent-builder/docs/tools-and-code.md'}
+  [Read] {'file_path': '/home/kizil/Desktop/hackathon/agent-builder/examples/base-agent.json'}
+I've read the brief, the tool API and the format docs. Next I'll look at the test runner, then write the workflow.
+  [Bash] {'command': 'sed -n 1,200p tools/run_cases.py; ls; python3 -c "import freya;print(freya.__file__)"; git log --oneline | 
+  [Bash] {'command': 'cat docs/api.md | head -150; grep -n "def " freya.py; cat README.md | head -80; ls runs traces | head', 'de
+  [Bash] {'command': "wc -l runs/example-brief-a.log; tail -c 5000 runs/example-brief-a.log; cat env.sh | sed 's/=.*/=.../'; ls o
+Now I'll write a generator script that produces the workflow JSON. Dates, amounts and closing outcomes are computed in code, and the prompts handle the conversation.
+  [Write] {'file_path': '/home/kizil/Desktop/hackathon/agent-builder/out/gen_brief_a.py', 'content': '"""Generate out/brief-a.work
+Let me test the code snippets locally before saving.
+  [Bash] {'command': 'python3 out/gen_brief_a.py && python3 -c "\nimport json\nwf=json.load(open(\'out/brief-a.workflow.json\'))\
+Snippets work. Saving and running the practice customers.
+  [Bash] {'command': 'source env.sh && python3 -c "import freya,json,sys; print(json.dumps(freya.save_workflow(sys.argv[1], json.
+  [Bash] {'command': 'source env.sh && python3 tools/run_cases.py 8097114f-3970-495b-bc5f-7e56034a9703 --brief A --out results/ru
+9 of 10 on the first run. PUB-07 failed on a holiday date, so I'll look at that transcript.
+  [Bash] {'command': 'source env.sh && python3 -c "\nimport json,freya\nr=json.load(open(\'results/run1.json\'))\nrow=[x for x in
+  [Bash] {'command': 'python3 - <<\'EOF\'\np=\'out/gen_brief_a.py\'; s=open(p).read()\nold=s[s.index("    cal = []\\n"):s.index("
+  [Bash] {'command': 'source env.sh && python3 -c "import freya,json,sys; print(json.dumps(freya.save_workflow(sys.argv[1], json.
+PUB-07 is fixed. Two new failures, so I'll read their reasons and transcripts.
+  [Bash] {'command': 'source env.sh && python3 -c "\nimport json,freya\nr=json.load(open(\'results/run2.json\'))\nfor row in r[\'
+  [Bash] {'command': 'python3 - <<\'EOF\'\np=\'out/gen_brief_a.py\'; s=open(p).read()\nold="""- Attempt 1 amount: the full past-d
+  [Bash] {'command': 'python3 - <<\'EOF\'\np=\'out/gen_brief_a.py\'; s=open(p).read()\nold="""- Example: full amount too much -> 
+The Brief A phone agent passed all 10 practice customers in its last test run. That is one run only, and a customer that passes once can fail the next time, so it's not proof of stability.
+
+| Run | Passed | What failed |
+|---|---|---|
+| 1 | 9/10 | **PUB-07:** the customer named Monday 26 October, a bank holiday before the deadline. The agent treated it as past the deadline and recorded 2 November instead of the next business day, 27 October. |
+| 2 | 8/10 | **PUB-06:** after the customer said the full amount was too much, the agent's first persuasion attempt went back to the full amount. **PUB-10:** the judge objected to the word "recorded" in "This call is recorded". |
+| 3 | 9/10 | **PUB-06:** the bank records were right this time, but the judge failed the call because the minimum payment was offered twice. |
+| 4 | **10/10** | none |
+
+Fixes between runs:
+- **After run 1:** every calendar line now states the action for that day, for example "bank holiday, before the deadline: offer Tuesday 27 October instead". The agent is told to look the date up rather than work it out.
+- **After run 2:** if the customer has already said the full amount is too much, the first persuasion attempt uses the minimum payment, never the full amount.
+- **After run 3:** when that attempt follows an earlier minimum-payment offer, the agent only proposes the new date and doesn't name the amount again.
+
+I left the PUB-10 wording alone because rule 1 of the brief requires saying the call is recorded. It passed in runs 3 and 4, but the judge may object to it again.
+
+How the agent is built:
+- **Steps:** one step for each stage of the call: opening, someone else answering, identity, loading the account, and the payment talk.
+- **Code, not prompts:** dates, deadlines, amounts and the planned persuasion attempts are worked out in code at the start of the call. A step only advances on a tool result.
+- **Closing:** when the call ends, the outcome is set from what was actually recorded, such as a promise, a transfer, a callback or a failed identity check.
+- **Failed tool calls:** if recording a promise fails, the agent says so and tries once more.
+
+The workflow is in `out/brief-a.workflow.json`. I wrote it with a generator script, `out/gen_brief_a.py`, so edit and re-run that script rather than the JSON.
+
+The Gmail and Google Calendar connectors need authorizing in your claude.ai connector settings before they can be used. This task didn't need them.
+
+workflow_id `796f6fe1-27bf-436b-9c7e-3b6eb6b5b5fb`, agent_id `8097114f-3970-495b-bc5f-7e56034a9703`, 10/10 passed in the last run.
+
+done: 22 turns, 741 s, $2.05. Trace: /home/kizil/Desktop/hackathon/agent-builder/traces/20261010-145300.jsonl
