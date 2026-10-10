@@ -541,7 +541,46 @@ def multi_date_rules():
     return True
 
 
+def date_reject_cues():
+    """raw-3-single live (3e3e65e0): 'No, I cannot pay that on the twenty-second' (kind=date;also=reject;d=22, the day we
+    offered) was read back as a promise on the 22nd; at what_to_change 'Tuesday works for all three' (prod=all) was
+    ignored. A reject-cued date equal to the offer (or a refused day) is a refusal; a prod=all day at the read-back
+    moves every product (refused ones revived). 'Not Friday, Tuesday works' still proposes Tuesday."""
+    import json
+    pol = json.load(open(os.path.join(ROOT, "tests/generated/rehearsal/raw-2.reducer_policy.json")))
+    cv = dict(customer_id="c_r3", first_name="Sofia", last_name="Almeida", title="Ms", now=NOW)
+    acc = [dict(product_id="p1", type="credit_card", past_due=220.0, days_late=9, minimum_payment=66.0),
+           dict(product_id="p2", type="personal_loan", past_due=640.0, days_late=9, instalment_amount=213.0),
+           dict(product_id="p3", type="car_loan", past_due=75.0, days_late=3, instalment_amount=25.0)]
+    st = R.init_state(pol, cv)
+    st, a = say(pol, st, "kind=who;also=none;st=complete;prod=;who=self;party=")
+    st, a = say(pol, st, "kind=identity;also=none;st=complete;prod=;field=date_of_birth;ans=1987-06-03;y=1987")
+    st, a = tool(pol, st, dict(verified=True, all_verified=False, wrong_answers_left=3))
+    st, a = say(pol, st, "kind=identity;also=none;st=complete;prod=;field=phone_last4;ans=2288")
+    st, a = tool(pol, st, dict(verified=True, all_verified=True, wrong_answers_left=3))
+    st, a = tool(pol, st, dict(products=acc))
+    st, a = say(pol, st, "kind=reject;also=none;st=complete;prod=all;why=flat")
+    st, a = say(pol, st, "kind=reject;also=none;st=complete;prod=;why=flat")
+    st, a = say(pol, st, "kind=reject;also=none;st=complete;prod=;why=flat")
+    o = st["offer"]
+    check(o and st["cur"] == 2, f"the car loan offer: {a}")
+    y, m, d = o["date"].split("-")
+    s_car = R.json.loads(R.json.dumps(st))
+    x, a = say(pol, R.json.loads(R.json.dumps(st)), "kind=date;also=reject;st=complete;prod=3;rel=;d=%d;m=%d;wd=;wk=none;vague=no" % (int(d), int(m)))
+    check(x["q"] != "readback" and x["products"][2]["status"] != "agreed", f"a refused offered day is no promise: {a}")
+    # 'not Friday, Tuesday works': a different day with a reject cue proposes it
+    x, a = say(pol, R.json.loads(R.json.dumps(s_car)), "kind=date;also=reject;st=complete;prod=3;rel=;d=20;m=10;wd=tue;wk=none;vague=no")
+    check(x["q"] == "readback" and "20 October" in a["text"], f"another day proposes: {a}")
+    # at what_to_change, a prod=all day moves every product, refused ones revived
+    x, a = say(pol, x, "kind=no;also=none;st=complete;prod=")
+    check(x["q"] == "what_to_change", f"what to change: {a}")
+    x, a = say(pol, x, "kind=date;also=none;st=complete;prod=all;rel=;d=;m=;wd=tue;wk=none;vague=no")
+    check(x["q"] == "readback" and all(v_ in a["text"] for v_ in ("220.00", "640.00", "75.00")), f"all three moved: {a}")
+    return True
+
+
 if __name__ == "__main__":
+    print("reject-cued dates and the all-products change (raw-3 live):", date_reject_cues())
     print("multi-product dates: own amounts, revive, holiday said, ok:false fails (raw-2 live):", multi_date_rules())
     print("the open offer's own amount/date accepts (biz-1 PUB-07):", offer_echo_accepts())
     print("hedged denial re-asks the name:", hedged_denial())
