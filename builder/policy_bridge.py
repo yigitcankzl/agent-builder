@@ -3,7 +3,8 @@ deterministic, no model calls.
 
 to_reducer(policy, oas_path, stable_unmapped=None) -> (reducer_policy, report)
   - every value sent to a tool is checked against its OpenAPI enum; a missing one becomes an `api_mismatch` entry
-    {policy_path, value, field, oas_enum, fallback} and the policy carries the fallback value (§11.7). The reducer never
+    {policy_path, value, field, oas_enum, action}: map_to only for an exact OAS value or a SOURCED alias, else block
+    (safety rules overriding v3.1 §13.2: no closest-name mapping; a required identity field is never skipped). The reducer never
     sends a value outside the enum;
   - product type keys onto the get_account response enum; naming placeholders onto account fields;
   - event topics onto the contract vocabulary by topic NAME (incl. v3 decline/purpose); opening-phase situations
@@ -13,7 +14,7 @@ to_reducer(policy, oas_path, stable_unmapped=None) -> (reducer_policy, report)
   - default continue/safe lines; honesty words separated from disclosure words;
   - `unmapped` is never passed through: only rules stable across runs (consolidate_unmapped) become soft rules.
 """
-import copy, difflib, json, os, re, sys
+import copy, json, os, re, sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from builder.engine.date_policy import _norm, validate
@@ -22,23 +23,28 @@ from builder.policy_extract import oas_summary
 DEFAULT = [{"file": "default", "quote": ""}]
 # Generic cue words per contract topic (vocabulary of a collections call, not values of any brief); matched on the
 # topic NAME with word boundaries. Order matters: the first topic whose cue matches wins.
-TOPIC_CUES = {"hardship": ("hardship", "illness", "job loss", "bereavement", "death in the family"),
+TOPIC_CUES = {"change_promise": ("change (the )?(recorded )?promise", "change recorded promise", "modify (the )?promise",
+                                 "cancel (the )?promise", "change promise"),
+              "hardship":("hardship", "illness", "job loss", "bereavement", "death in the family"),
               "dispute": ("dispute", "not mine", "never had"),
               "paid": ("already paid", "paid"),
               "restructure": ("restructur\\w*", "payment plan", "lower instalments?"),
+              "terms": ("discount", "waiver", "other terms", "terms"),   # after restructure: a plan request stays restructure
               "human": ("human", "person", "real agent"),
               "scam": ("scam", "fraud"),
               "robot": ("robot", "ai", "bot"),
               "unknown_info": ("unanswerable", "cannot answer", "unknown", "no information"),
               "stop": ("not want to talk", "dont want to talk", "don t want to talk", "stop talking", "stop"),
               "decline": ("declines? to answer", "refuses? to answer", "won t answer", "declines? identity",
-                          "refuses? (the )?security questions?", "refuses? identity", "decline"),
+                          "refuses? (the )?security questions?", "declines? (the )?security questions?",
+                          "not want to answer", "refuses? identity", "decline"),
               "purpose": ("purpose", "what (is )?(this|the call|call) is about", "what (this|the call) is about",
                           "why (are you )?calling", "asks why"),
               "injection": ("injection", "ignore instructions")}
 WHO_CUES = {"handoff": ("hand", "handoff", "passes the phone", "gets the customer"),
             "wrong_number": ("wrong number",), "deceased": ("deceased", "died", "death of the customer"),
             "other": ("someone else", "third party", "relative"), "unclear": ("unclear", "ambiguous"),
+            "busy": ("busy", "voicemail", "answering machine"),   # v3.1: callback or t=stop, closing slot `busy`
             "callback": ("callback",)}
 V3_ALWAYS = ("decline", "purpose")          # §11.6: always present in the generated grammar
 DEFAULT_SENTENCES = {"continue_line": "Go on, please.", "safe_repeat": "Sorry, could you say that again?"}
@@ -114,9 +120,14 @@ def consolidate_unmapped(runs):
     return dedup, unstable
 
 
-def _closest(value, enum, cutoff=0.4):
-    m = difflib.get_close_matches(str(value), enum, n=1, cutoff=cutoff)
-    return m[0] if m else None
+def _alias(policy, field, value, enum):
+    """An exact, SOURCED alias from the material (policy.aliases: [{field, brief_value, api_value, source}], e.g. a
+    code-list row) that maps value onto an enum member. No fuzzy or closest-name mapping, ever."""
+    for a in policy.get("aliases") or []:
+        if (a.get("field") in (field, None) and str(a.get("brief_value")) == str(value) and a.get("api_value") in enum
+                and any(isinstance(s, dict) and s.get("quote") and s.get("file") != "default" for s in a.get("source") or [])):
+            return a["api_value"]
+    return None
 
 
 def to_reducer(policy, oas_path, stable_unmapped=None):
@@ -124,8 +135,14 @@ def to_reducer(policy, oas_path, stable_unmapped=None):
     p = copy.deepcopy(policy)
     mism, notes = [], []
 
-    def mismatch(path, value, field, enum, fallback):
-        mism.append({"policy_path": path, "value": value, "field": field, "oas_enum": enum, "fallback": fallback})
+    def resolve(path, value, field, enum):
+        """-> the value to use, or None = BLOCKED. Exact OAS value, or an explicit sourced alias; else api_mismatch."""
+        if not enum or value in enum:
+            return value
+        mapped = _alias(p, field, value, enum)
+        mism.append({"policy_path": path, "value": value, "field": field, "oas_enum": enum,
+                     "action": ("map_to:" + mapped) if mapped else "block"})
+        return mapped
 
     # ---- products
     types = _enum(oas, "get_account", "products[].type", response=True)
@@ -135,10 +152,9 @@ def to_reducer(policy, oas_path, stable_unmapped=None):
         for t, v in (prod.get(k) or {}).items():
             nt = _ptype(t)
             if types and nt not in types:
-                fb = _closest(nt, types)
-                mismatch(f"products.{k}.{t}", t, "get_account.products[].type", types, fb)
-                nt = fb or nt
-            m[nt] = v
+                nt = resolve(f"products.{k}.{t}", nt, "get_account.products[].type", types)
+            if nt:
+                m[nt] = v
         if k in prod:
             prod[k] = m
     for t, tpl in (prod.get("naming_by_type") or {}).items():
@@ -146,49 +162,68 @@ def to_reducer(policy, oas_path, stable_unmapped=None):
             words = mo.group(1).lower()
             return "{card_last4}" if "last" in words else "{" + re.sub(r"\W+", "_", words).strip("_") + "}"
         prod["naming_by_type"][t] = re.sub(r"<([^>]+)>", repl, str(tpl))
-    # ---- identity (§11.7: a field outside the enum is skipped, the next question is used)
-    idn = p.setdefault("identity", {})
-    e = _enum(oas, "verify_identity", "field")
-    for i, q in enumerate(idn.get("questions") or []):
-        if e and q.get("field") not in e:
-            mismatch(f"identity.questions[{i}].field", q.get("field"), "verify_identity.field", e, "skip")
-            q["skip"] = True
-    # ---- closing (§11.7: closest enum member by name, else the unclear-family member)
+    # ---- closing: rows whose outcome is outside the enum (and has no sourced alias) are BLOCKED, never re-labelled
     cl = p.setdefault("closing", {})
     e_out = _enum(oas, "close_call", "outcome")
     table = cl.get("table") or []
-    for r in table:
-        r["reason"] = r.get("reason") or None
-    unclear_row = next((r for r in table if r["reason"] and _match(re.sub(r"_", " ", r["reason"]), WHO_CUES["unclear"])), None)
     for i, r in enumerate(table):
+        r["reason"] = r.get("reason") or None
         if e_out and r["outcome"] not in e_out:
-            fb = _closest(r["outcome"], e_out) or _closest("not reached unclear", e_out, 0.0)
-            if not any(m["value"] == r["outcome"] for m in mism):
-                mismatch(f"closing.table[{i}].outcome", r["outcome"], "close_call.outcome", e_out, fb)
-            r["brief_outcome"], r["outcome"] = r["outcome"], fb
+            r["brief_outcome"] = r["outcome"]
+            r["outcome"] = resolve(f"closing.table[{i}].outcome", r["outcome"], "close_call.outcome", e_out)
+            r["blocked"] = r["outcome"] is None
     by_outcome = {}
     for r in table:
-        by_outcome.setdefault(r["outcome"], []).append(r["reason"])
+        if not r.get("blocked"):
+            by_outcome.setdefault(r["outcome"], []).append(r["reason"])
     cl["reason_omitted_for"] = sorted(o for o, rs in by_outcome.items() if all(x is None for x in rs))
-    # ---- hang-up defaults (§11.3)
-    declined_row = idn.get("on_decline") or next((r for r in table if r["reason"] and "declin" in r["reason"]), None)
+    live = [r for r in table if not r.get("blocked")]
+    row = lambda *cues: next((r for r in live if r["reason"] and _match(re.sub(r"_", " ", r["reason"]), cues)), None)
+    # closing slots the reducer refers to (v3.1 §13.1); a slot may be empty -> noted
+    slots = {"unclear": row(*WHO_CUES["unclear"]), "declined": row("declin\\w*"), "id_failed": row("fail\\w*"),
+             "busy": row("busy", "voicemail"), "no_callback": row("no callback")}
+    cl["slots"] = {k: ({"outcome": v["outcome"], "reason": v["reason"]} if v else None) for k, v in slots.items()}
+    # ---- identity: a required field outside the enum is BLOCKED; it is never skipped silently (safety rule 2)
+    idn = p.setdefault("identity", {})
+    e = _enum(oas, "verify_identity", "field")
+    blocked = []
+    for i, q in enumerate(idn.get("questions") or []):
+        if e and q.get("field") not in e:
+            mapped = resolve(f"identity.questions[{i}].field", q.get("field"), "verify_identity.field", e)
+            if mapped:
+                q["field"] = mapped
+            else:
+                q["blocked"] = True
+                blocked.append(q.get("field"))
+    if blocked:
+        fail = idn.get("on_fail") or cl["slots"]["id_failed"] or cl["slots"]["unclear"]
+        idn["blocked"] = {"fields": blocked, "action": "close", "close": fail,
+                          "why": "the brief requires identity fields the tool API cannot verify; identity cannot pass"}
+        notes.append(f"identity BLOCKED: {blocked} are not in verify_identity.field; the call closes on {fail} before any account fact")
+    # ---- hang-up defaults (§11.3); before_who falls back to a defined row when the brief has no 'unclear' row
+    before_who, src = slots["unclear"], DEFAULT
+    if not before_who:
+        before_who = slots["no_callback"] or row("callback") or slots["busy"]
+        notes.append("no 'unclear' row: hangup_default.before_who = " + (f"{before_who['outcome']}/{before_who['reason']}" if before_who else "NONE (reducer must end without close_call)"))
+    declined = idn.get("on_decline") if (idn.get("on_decline") or {}).get("outcome") in (e_out or [(idn.get("on_decline") or {}).get("outcome")]) else slots["declined"]
     p["hangup_default"] = {
-        "before_who": {"outcome": (unclear_row or {}).get("outcome"), "reason": (unclear_row or {}).get("reason")},
-        "before_verified": {"outcome": (declined_row or {}).get("outcome"), "reason": (declined_row or {}).get("reason")},
-        "after_verified": "computed", "source": DEFAULT}
-    if not unclear_row:
-        notes.append("no 'unclear' row in the closing table: hangup_default.before_who is empty")
+        # defined even when every opening-phase row is blocked: end the call without an explicit close_call
+        "before_who": ({"outcome": before_who["outcome"], "reason": before_who["reason"]} if before_who
+                       else {"outcome": None, "reason": None, "action": "end_without_close",
+                             "why": "no usable not-reached row in the OAS enum"}),
+        "before_verified": {"outcome": (declined or {}).get("outcome"), "reason": (declined or {}).get("reason")},
+        "after_verified": "computed", "source": src}
     # ---- writes, transfer, tools
     w = p.setdefault("writes", {})
     tr = w.get("transfer") or {}
     e_q = _enum(oas, "transfer_to_agent", "queue")
-    qfb = lambda q: q if not e_q or q in e_q else ("general" if "general" in e_q else e_q[0])
     qmap = {}
     for sit, q in (tr.get("queue_map") or {}).items():
-        if e_q and q not in e_q:
-            mismatch(f"writes.transfer.queue_map.{sit}", q, "transfer_to_agent.queue", e_q, qfb(q))
-        qmap[sit] = qfb(q)
-    pre = [qfb(q) for q in tr.get("pre_verification_queues") or []]
+        v = resolve(f"writes.transfer.queue_map.{sit}", q, "transfer_to_agent.queue", e_q)
+        if v:
+            qmap[sit] = v
+    pre = [v for i, q in enumerate(tr.get("pre_verification_queues") or [])
+           if (v := resolve(f"writes.transfer.pre_verification_queues[{i}]", q, "transfer_to_agent.queue", e_q))]
     p["transfer"] = {"queue_map": qmap, "pre_verification_queues": pre,
                      "source": w.get("source") or DEFAULT}
     if not tr.get("pre_verification_queues"):
@@ -201,8 +236,7 @@ def to_reducer(policy, oas_path, stable_unmapped=None):
         if nr in ("none", "null", "n/a", "-"):
             ev["note_reason"], nr = "", ""
         if nr and e_n and nr not in e_n:
-            mismatch(f"events[{i}].note_reason", nr, "add_note.reason", e_n, "skip")
-            ev["note_reason"] = ""
+            ev["note_reason"] = resolve(f"events[{i}].note_reason", nr, "add_note.reason", e_n) or ""
     tools = {}
     for tool, d in TOOL_DEFAULTS.items():
         tools[tool] = dict(d, fail_say="", source=DEFAULT)

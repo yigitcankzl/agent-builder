@@ -23,7 +23,7 @@ Diff extractor output against each `*.expected.json`. Use `*.cases.json` for a f
 | **mut-01** | Holiday list replaced; business days **Monday–Saturday** | Hard-coded Mon–Fri calendars; stale holiday lists; treating Saturday as non-working |
 | **mut-02** | Deadline bands: 1–10 → 15th BD, 11–60 → 5th BD; scope to 60 days late | Assuming Brief A’s 1–7 / 8–45 cutovers; wrong `business_days_after_today` |
 | **mut-03** | Persuasion early=**0**, late=**3**; floor = **30% of past due, round up** for all products | Ignoring zero-attempt early band; still reading `minimum_payment` / `instalment_amount` |
-| **mut-04** | Identity: **postcode** then **year of birth**; **2** wrong answers | Keeping DOB / phone-last-four; failing only after three wrongs |
+| **mut-04** | Identity: **postcode** then **year of birth**; **2** wrong answers | Keeping DOB / `phone_last4`; failing only after three wrongs |
 | **mut-05** | `not_reached` → **`no_contact`**; `unclear` → **`ambiguous`**; new reason **`busy`** | Emitting legacy outcome/reason strings; dropping new reasons |
 
 ## Raw material (`raw-a/`)
@@ -59,6 +59,10 @@ Each `*.expected.json` exposes (with `value` + `source.file` + `source.quote` pe
 Each case includes `now`, `days_late`, a `customer_request`, and `expected` (action + ISO dates / outcomes as applicable). Deadlines count **business days after** the calendar date of `now`, skipping weekends (or Sunday only in mut-01) and listed holidays.
 
 Example (Brief A / late band): `now=2026-10-14`, `days_late=9`, customer asks `2026-10-30` → offer deadline `2026-10-23`. Under **raw-a** (memo), the same inputs offer `2026-10-22`.
+
+## Identity field name (contract v3)
+
+`verify_identity.field` uses the OAS enum `phone_last4`. Expected JSON that still asks for the phone question stores that enum, not `phone_last_four`. mut-04 does not ask it. Source quotes in the briefs are unchanged.
 
 ## Synthetic data
 

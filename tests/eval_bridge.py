@@ -119,7 +119,7 @@ if __name__ == "__main__":
         rp, rep = to_reducer(runs(b)[0], OAS, stable_all[b])
         print(f"   {b}: {len(rep['api_mismatch'])} mismatch, {len(rp['events'])} topics, {len(rp['who_rules'])} who rules, errors {len(rep['errors'])}")
         for m in rep["api_mismatch"]:
-            print(f"      api_mismatch {m['policy_path']} ({m['field']}): {m['value']!r} -> fallback {m['fallback']!r}")
+            print(f"      api_mismatch {m['policy_path']} ({m['field']}): {m['value']!r} -> {m['action']}")
         print(f"      hangup_default {json.dumps({k: v for k, v in rp['hangup_default'].items() if k != 'source'})}, "
               f"pre-verification queues {rp['transfer']['pre_verification_queues']}, notes enabled {rp['writes']['notes']['enabled']}, "
               f"who {[x[1] for x in rep['who']]}")
