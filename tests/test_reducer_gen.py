@@ -216,7 +216,7 @@ def date_refusal():
         st, a = to_statement(pol, EARLY)
         st, a = say(pol, st, "kind=no;also=none;st=complete;prod=")
         return say(pol, st, f"kind=date;also=none;st=complete;prod=;rel={rel};d={d};m={m};wd=;wk=none;vague=no")
-    base = POL["A"]
+    base = {k: v for k, v in POL["A"].items() if k != "date_rules"}   # the legacy sections decide (a bridged A may carry date_rules)
     st, a = at(base, 17, 10)          # legacy default: weekend -> the next business day
     check("Monday 19 October" in a["text"] and st["offer"]["date"] == "2026-10-19", f"legacy shift: {a}")
     pol = copy.deepcopy(base)
@@ -261,7 +261,76 @@ def date_refusal():
     return True
 
 
+# ---------------------------------------------------------------- nested response paths (policy.tool_results)
+def nested_paths():
+    """verify_identity / get_account results read through policy.tool_results paths when the bank nests them; the
+    same call through step() and through the hub string (flattened t_<tool>_response.data.* vars)."""
+    pol = copy.deepcopy(POL["A"])
+    pol["tool_results"] = dict(
+        verify_identity=dict(ok="data.status.ok", verified_this="data.result.verified", verified_all="data.result.all",
+                             wrong_left="data.result.left", hint="data.result.hint"),
+        get_account=dict(ok="data.status.ok", products="data.account.items", id="item.ids.product", type="item.kind",
+                         past_due="item.balance.past_due", days_late="item.balance.days_late",
+                         **{"floor.personal_loan": "item.balance.instalment"}),
+        create_promise=dict(ok="data.status.ok"))
+    ver = lambda v, a, left: dict(status=dict(ok=True), result=dict(verified=v, all=a, left=left))
+    acct = dict(status=dict(ok=True), account=dict(items=[dict(ids=dict(product="p9"), kind="personal_loan",
+                                                              balance=dict(past_due=540.0, days_late=5, instalment=180.0))]))
+    # step(): the te carries the nested data and no flat ok
+    st = R.init_state(pol, CV)
+    st, a = say(pol, st, "kind=who;also=none;st=complete;prod=;who=self;party=")
+    turns = [("kind=identity;also=none;st=complete;prod=;field=date_of_birth;ans=1990-01-01", ver(False, False, 2)),
+             ("kind=identity;also=none;st=complete;prod=;field=date_of_birth;ans=1990-01-02", ver(True, False, 2)),
+             ("kind=identity;also=none;st=complete;prod=;field=phone_last4;ans=1234", ver(True, True, 2))]
+    for body, data in turns:
+        st, a = say(pol, st, body)
+        p = st["pending"]
+        st, a = R.step(pol, st, None, dict(node=p["node"], success=p["snap_success"] + 1, failure=p["snap_failure"],
+                                           status_code=200, ok=None, data=data), NOW, CV)
+    check(st["identity"]["wrong"] == 1 and a["type"] == "call_tool" and a["tool"] == "get_account", f"nested verify: {a} {st['identity']}")
+    p = st["pending"]
+    st, a = R.step(pol, st, None, dict(node=p["node"], success=p["snap_success"] + 1, failure=p["snap_failure"],
+                                       status_code=200, ok=None, data=acct), NOW, CV)
+    check("540.00" in a["text"] and "5 days" in a["text"] and st["products"][0]["id"] == "p9" and st["_pd"][0]["floor"] == 180.0,
+          f"nested account: {a} {st['_pd']}")
+    st, a = say(pol, st, "kind=reject;also=none;st=complete;prod=;why=too_much")
+    check("180.00" in a["text"], f"nested floor field: {a}")
+    # the hub string, with Freya's flattened response vars
+    def flat(prefix, obj, out):
+        if isinstance(obj, dict):
+            for k, v in obj.items():
+                flat(prefix + "." + k, v, out)
+        elif isinstance(obj, list):
+            for i, v in enumerate(obj):
+                flat(prefix + "." + str(i), v, out)
+        else:
+            out[prefix] = obj
+        return out
+    code = compile(R.hub_source(pol), "hub", "exec")
+    v = dict(CV, ev="n=kstart;src=user;kind=who;also=none;st=complete;prod=;who=self;party=")
+    exec(code, dict(vars=v))
+    counts = dict()
+    for body, data in turns + [(None, acct)]:
+        if body:
+            v["ev"] = "n=" + v["ev_tok"] + ";src=user;" + body
+            exec(code, dict(vars=v))
+        node = v["route"]
+        check(node.startswith("t_"), f"hub route: {node} {v.get('say_next')}")
+        counts[node] = counts.get(node, 0) + 1
+        v[node + "_success_count"] = counts[node]
+        v[node + "_failure_count"] = 0
+        v[node + "_response.status_code"] = 200
+        for k in [k for k in v if k.startswith(node + "_response.data.")]:
+            del v[k]
+        v.update(flat(node + "_response.data", data, dict()))
+        exec(code, dict(vars=v))
+    check(v["route"] == "say" and "540.00" in v["say_next"] and "5 days" in v["say_next"] and not v.get("hub_error"),
+          f"hub nested: {v.get('route')} {v.get('say_next')} {v.get('hub_error')}")
+    return True
+
+
 if __name__ == "__main__":
+    print("nested response paths:", nested_paths())
     print("gap 4 date refusal:", date_refusal())
     print("gap 3 floor and acceptance:", floor_acceptance())
     print("gap 2 identity formats:", identity_formats())

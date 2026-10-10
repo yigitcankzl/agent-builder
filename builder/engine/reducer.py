@@ -373,8 +373,44 @@ def _plan(policy, band):
     return plan
 
 
-def _account_rows(tool_event):
+def get_path(obj, path):
+    """'data.result.verified' / 'item.balance.past_due' -> the value, or None. The first segment names the root
+    ('data' = the response data, 'item' = one product row) and is dropped; digits index lists."""
+    parts = [x for x in str(path or '').split('.') if x]
+    if parts and parts[0] in ('data', 'item'):
+        parts = parts[1:]
+    cur = obj
+    for part in parts:
+        if isinstance(cur, dict) and part in cur:
+            cur = cur[part]
+        elif isinstance(cur, list) and part.isdigit() and int(part) < len(cur):
+            cur = cur[int(part)]
+        else:
+            return None
+    return cur
+
+
+def tr_path(policy, tool, key):
+    return ((policy.get('tool_results') or dict()).get(tool) or dict()).get(key)
+
+
+def tr_get(policy, tool, key, data, default_key):
+    """A tool-result field through policy.tool_results[tool][key] (nested), else data[default_key]."""
+    path = tr_path(policy, tool, key)
+    v = get_path(data, path) if path and isinstance(data, dict) else None
+    return v if v is not None else (data.get(default_key) if isinstance(data, dict) else None)
+
+
+def _account_rows(tool_event, policy=None):
     data = (tool_event or dict()).get('data')
+    if isinstance(data, str):
+        try:
+            data = json.loads(data)
+        except Exception:
+            data = None
+    path = tr_path(policy or dict(), 'get_account', 'products')
+    if path and isinstance(data, dict) and isinstance(get_path(data, path), list):
+        return [_row_paths(policy, r) for r in get_path(data, path) if isinstance(r, dict)]
     if isinstance(data, str):
         try:
             data = json.loads(data)
@@ -391,7 +427,26 @@ def _account_rows(tool_event):
     if isinstance(data, dict):
         lists = [v for v in data.values() if isinstance(v, list)]
         data = data.get('products') or (lists[0] if lists else None)
-    return [r for r in (data or []) if isinstance(r, dict)]
+    return [_row_paths(policy or dict(), r) for r in (data or []) if isinstance(r, dict)]
+
+
+def _row_paths(policy, r0):
+    """A product row with its nested fields (tool_results.get_account item.* paths) copied to the names the reducer
+    reads (products.fields roles, the floor field per type). A row without paths is unchanged."""
+    paths = (policy.get('tool_results') or dict()).get('get_account') or dict()
+    if not any(str(v).startswith('item.') and '.' in str(v)[5:] for v in paths.values()):
+        return r0
+    r = dict(r0)
+    for role in ('id', 'type', 'past_due', 'days_late'):
+        v = get_path(r0, paths.get(role))
+        if v is not None:
+            r[pfield(policy, role)] = v
+    t = r.get(pfield(policy, 'type'))
+    fb = ((policy.get('products') or dict()).get('floor_by_type') or dict()).get(str(t)) or dict()
+    v = get_path(r0, paths.get('floor.' + str(t)))
+    if v is not None and isinstance(fb, dict) and fb.get('field'):
+        r[fb['field']] = v
+    return r
 
 
 def pfield(policy, role):
@@ -688,7 +743,10 @@ def on_tool(policy, st, te, today, cv):
         sc = int(sc) if sc not in (None, '') else None
     except Exception:
         sc = None
-    ok = str(te.get('ok')).lower() == 'true'
+    okv = te.get('ok')
+    if okv is None and isinstance(te.get('data'), dict) and tr_path(policy, pend['node'][2:], 'ok'):
+        okv = get_path(te['data'], tr_path(policy, pend['node'][2:], 'ok'))    # a nested ok flag
+    ok = str(okv).lower() == 'true'
     success = (not te.get('no_delta')) and ds > 0 and df <= 0 and (sc is None or sc < 400) and ok
     op = pend['op']
     data = te.get('data') if isinstance(te.get('data'), dict) else dict()
@@ -698,7 +756,7 @@ def on_tool(policy, st, te, today, cv):
     if op == 'verify':
         return verify_result(policy, st, data, cv)
     if op == 'account':
-        load_products(policy, st, _account_rows(te), today)
+        load_products(policy, st, _account_rows(te, policy), today)
         return account_statement(policy, st, today)
     if op == 'promise':
         i = _index(st, pend['product_id'])
@@ -762,6 +820,10 @@ def tool_failed(policy, st, te, today, cv):
 def verify_result(policy, st, data, cv):
     idt = st['identity']
     qs = (policy.get('identity') or dict()).get('questions') or []
+    data = dict(data, hint=tr_get(policy, 'verify_identity', 'hint', data, 'hint'),
+                verified=tr_get(policy, 'verify_identity', 'verified_this', data, 'verified'),
+                all_verified=tr_get(policy, 'verify_identity', 'verified_all', data, 'all_verified'),
+                wrong_answers_left=tr_get(policy, 'verify_identity', 'wrong_left', data, 'wrong_answers_left'))
     if str(data.get('hint') or '') == 'day_month_swapped' and st['_id_hint'] < 1:
         st['_id_hint'] += 1
         return ask(st, D_HINT_MONTH, 'id_' + idt['order'][idt['idx']])

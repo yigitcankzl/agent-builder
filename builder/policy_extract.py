@@ -12,6 +12,7 @@ import argparse, json, os, re, subprocess, sys, time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from builder.engine.date_policy import AMOUNT_RULES, DATE_RULES, bad_quotes, core_missing, validate
+from builder.oas import load_oas
 
 MODEL = os.environ.get("POLICY_MODEL", "")          # empty: the CLI's default model
 TEXT_EXT = (".md", ".txt", ".eml", ".csv", ".json", ".yaml", ".yml")
@@ -174,7 +175,7 @@ def oas_summary(path):
     """Tool name -> {field: enum list or type}, read from an OpenAPI file."""
     if not path or not os.path.exists(path):
         return {}
-    d = json.load(open(path))
+    d = load_oas(path)
     out = {}
     for p, ops in d.get("paths", {}).items():
         for op in ops.values():
@@ -204,16 +205,10 @@ def _collect_enums(s, path, acc):
 
 
 def read_files(paths):
-    files = {}
-    for p in paths:
-        if os.path.isdir(p):
-            for root, _, fs in os.walk(p):
-                for f in sorted(fs):
-                    if f.lower().endswith(TEXT_EXT):
-                        files[os.path.relpath(os.path.join(root, f), os.path.dirname(p.rstrip("/")))] = open(os.path.join(root, f), errors="replace").read()
-        else:
-            files[os.path.basename(p)] = open(p, errors="replace").read()
-    return files
+    """{name: text} of every readable source (builder.ingest: folders, zip, pdf, docx, html, xlsx; binaries never read
+    as text). The manifest of what happened to each file is logged by build.py."""
+    from builder.ingest import ingest
+    return ingest(paths)[0]
 
 
 class Trace:

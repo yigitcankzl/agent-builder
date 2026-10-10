@@ -16,6 +16,7 @@ import argparse, json, os, re, sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from builder.integration import ev_field, hub_code
+from builder.oas import load_oas, request_schema
 
 GENERATED_FROM = {}   # which hub code / event field the last generate() used (stub or Fork 3's module), for the trace
 
@@ -26,7 +27,7 @@ OPEN = ("verify_identity", "schedule_callback")                 # reachable befo
 
 def oas_tools(oas_path):
     """tool -> {url, props: {name: schema}, required}"""
-    d = json.load(open(oas_path))
+    d = load_oas(oas_path)
     base = (d.get("servers") or [{}])[0].get("url", "").rstrip("/")
     out = {}
     for path, ops in d.get("paths", {}).items():

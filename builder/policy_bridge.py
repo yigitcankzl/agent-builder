@@ -19,6 +19,7 @@ import copy, json, os, re, sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from builder.engine.date_policy import _norm, validate
 from builder.policy_extract import oas_summary
+from builder.oas import load_oas
 
 DEFAULT = [{"file": "default", "quote": ""}]
 CALL_ROLES = ("customer_id", "first_name", "last_name", "title", "now")   # the reducer's call-variable roles
@@ -85,7 +86,7 @@ def _enum(oas, tool, field, response=False):
 
 def response_fields(oas_path, tool):
     """All property names in a tool's 200 response schema (nested), e.g. the account fields of each product."""
-    d = json.load(open(oas_path)) if oas_path and os.path.exists(oas_path) else {}
+    d = load_oas(oas_path)
     out = []
 
     def walk(s):
@@ -454,7 +455,7 @@ def _format_words(s):
 
 def _oas_answer_text(oas_path):
     try:
-        d = json.load(open(oas_path))
+        d = load_oas(oas_path)
     except Exception:
         return ""
     for path, ops in (d.get("paths") or {}).items():
@@ -880,7 +881,7 @@ def to_reducer(policy, oas_path, stable_unmapped=None, brief_text=None):
     p["tool_args"] = ta
     # tool_results: where the reducer reads each fact in the tool responses (exact OAS response fields)
     from builder.oas_bindings import tool_results
-    tr_, missing = tool_results(oas_path, p)
+    tr_, missing = tool_results(oas_path, p, brief_text)
     p["tool_results"] = tr_
     for tool, fact in missing:
         mism.append({"policy_path": f"tool_results.{tool}.{fact}", "value": fact, "field": f"{tool}.response", "oas_enum": None,

@@ -130,6 +130,52 @@ if __name__ == "__main__":
             print("ok S2: re-extraction fills identity -> build continues, exit 0")
         finally:
             BB.reextract_core = real_rc
+        # L3 hook (Fork 5's fallback_llm): a fake writer object with start/cancel/wait
+        l3_wf = json.load(open(os.path.join(ROOT, "tests", "fallback", "brief-a.l3.workflow.json")))
+
+        class FakeL3:
+            made = []
+
+            def __init__(self, briefs, openapi, log, wf=l3_wf, errors=()):
+                self.wf, self.errors, self.cancelled, self.started = wf, list(errors), False, False
+                FakeL3.made.append(self)
+
+            def start(self):
+                self.started = True
+                return self
+
+            def cancel(self):
+                self.cancelled = True
+
+            def wait(self, timeout):
+                return {"workflow": self.wf, "errors": self.errors, "seconds": 1.0}
+        fr = MockFreya()
+        r9 = build([os.path.join(ROOT, "briefs", "brief-a.md")], OAS, "l3", fr, os.path.join(tmp, "sub9"), os.path.join(tmp, "tr"),
+                   2, 1500, boom, fallback=FakeL3)
+        ev9 = [json.loads(l) for l in open(r9["trace"])]
+        sel = [e for e in ev9 if e["event"] == "fallback_selection"]
+        check(r9["exit_code"] == 0 and r9.get("fallback_used") == "L3" and r9["main_signal"] == "EXTRACT" and len(fr.saved) == 1, r9)
+        check(sel and sel[0]["candidate"] == "llm" and [e["candidate"] for e in ev9 if e["event"] == "save"] == ["llm"], "one save, of the L3 candidate")
+        print("ok L3: main path failed (EXTRACT) -> L3 saved once, exit 0, fallback_used=L3")
+        fr2 = MockFreya()
+        FakeL3.made.clear()
+        r10 = build([os.path.join(ROOT, "briefs", "brief-a.md")], OAS, "l3main", fr2, os.path.join(tmp, "sub10"), os.path.join(tmp, "tr"),
+                    2, 1500, saved_extractor("brief-a"), fallback=FakeL3)
+        ev10 = [json.loads(l) for l in open(r10["trace"])]
+        check(r10["exit_code"] == 0 and not r10.get("fallback_used") and len(fr2.saved) == 1 and FakeL3.made[0].cancelled, r10)
+        check([e["candidate"] for e in ev10 if e["event"] == "save"] == ["main"], "one save, of the main candidate; L3 cancelled first")
+        print("ok L3: main path passed -> L3 cancelled, the main workflow saved once")
+        fr3 = MockFreya()
+        bad = lambda b, o, log: FakeL3(b, o, log, errors=["shape: no greet"])
+        r11 = build([os.path.join(ROOT, "briefs", "brief-a.md")], OAS, "l3bad", fr3, os.path.join(tmp, "sub11"), os.path.join(tmp, "tr"),
+                    2, 1500, boom, fallback=bad)
+        check(r11["exit_code"] == 2 and not fr3.saved and r11["signal"] == "EXTRACT", r11)
+        print("ok L3: main failed and L3 invalid -> exit 2, nothing saved")
+        FakeL3.made.clear()
+        r12 = build([os.path.join(clone, "missing.md")], OAS, "l3s1", MockFreya(), os.path.join(tmp, "sub12"), os.path.join(tmp, "tr"),
+                    2, 1500, boom, fallback=FakeL3)
+        check(r12["exit_code"] == 2 and r12["signal"] == "S1" and not FakeL3.made, "S1 (nothing readable): L3 never starts")
+        print("ok L3: nothing readable -> L3 not started")
         print("PASS")
     finally:
         shutil.rmtree(tmp)

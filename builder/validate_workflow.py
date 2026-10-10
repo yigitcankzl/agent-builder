@@ -31,6 +31,7 @@ import argparse, json, os, re, sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from builder.generator import CALL_VARS, GATED, arg_map, oas_tools
+from builder.oas import load_oas
 
 
 def _targets(n):
@@ -76,7 +77,7 @@ def validate(wf, rp, oas_path, unstable_quotes=()):
     errs = []
     nodes = wf.get("nodes") or {}
     tools = oas_tools(oas_path)
-    oas = json.load(open(oas_path))
+    oas = load_oas(oas_path)
     # 1 targets
     if wf.get("initial_node") not in nodes:
         errs.append(f"1: initial node {wf.get('initial_node')!r} missing")
@@ -258,12 +259,19 @@ def validate(wf, rp, oas_path, unstable_quotes=()):
     from builder.oas_bindings import path_exists
     for tool, facts in (rp.get("tool_results") or {}).items():
         for fact, path in facts.items():
+            if fact in ("verified_value", "verified_quote", "amount_scale"):     # values, not paths
+                continue
             if not path_exists(oas_path, tool, path):
                 errs.append(f"13: tool_results.{tool}.{fact} = {path!r} is not in the OAS response schema")
     for tool, fact in (("verify_identity", "verified_all"), ("get_account", "products"), ("get_account", "id"),
                        ("get_account", "past_due"), ("get_account", "days_late")):
         if "t_" + tool in nodes and fact not in (rp.get("tool_results") or {}).get(tool, {}):
             errs.append(f"13: tool_results.{tool}.{fact} is missing")
+    for tool, facts in (rp.get("tool_results") or {}).items():
+        if "amount_scale" in facts and facts["amount_scale"] not in (0.01, 0.001):
+            errs.append(f"13: tool_results.{tool}.amount_scale {facts['amount_scale']!r} is not 0.01 or 0.001")
+        if "verified_value" in facts and not facts.get("verified_quote"):
+            errs.append(f"13: tool_results.{tool}.verified_value without its quote")
     # 14 every enum value the agent may send is an exact OAS member: slots, product types, identity fields (unless
     #    blocked), note reasons, outcomes/reasons of tables, events and who rules, queues
     enum = lambda tool, f: (tools.get(tool, {}).get("props", {}).get(f) or {}).get("enum")

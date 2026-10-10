@@ -13,6 +13,7 @@ import datetime, importlib, json, os, re, sys, time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from builder.engine import dates as D
+from builder.oas import load_oas
 
 def pick_now(policy):
     """A reproducible 'today' derived from the policy: the first business day two weeks before its earliest holiday,
@@ -40,7 +41,7 @@ def load_reducer():
 
 
 def _oas_enum(oas_path, tool, field):
-    d = json.load(open(oas_path))
+    d = load_oas(oas_path)
     for path, ops in d.get("paths", {}).items():
         if path.strip("/").split("/")[-1] == tool:
             for op in ops.values():
@@ -55,8 +56,9 @@ def _labels(d):
 
 class Bank:
     """Fake bank for the self-test: answers in the OAS response shapes; never enforces the brief."""
-    def __init__(self, products, right_answers, fail=None, max_wrong=3):
+    def __init__(self, products, right_answers, fail=None, max_wrong=3, results=None):
         self.products, self.right, self.fail = products, right_answers, dict(fail or {})
+        self.results = results or {}       # policy.tool_results: answer at the bound (possibly nested) paths
         self.wrong_left = max_wrong if isinstance(max_wrong, int) else 3
         self.verified = set()
         self.counts = {}
@@ -78,8 +80,57 @@ class Bank:
             data.update(verified=okv, all_verified=len(self.verified) >= len(self.right), wrong_answers_left=self.wrong_left)
         elif tool == "get_account":
             data["products"] = self.products
+        data = self._shape(tool, data)
         self.counts[node] = (s + 1, f)
         return dict(node=node, success=s + 1, failure=f, status_code=200, ok="true", data=data)
+
+    FACT_KEY = {"verify_identity": {"ok": "ok", "verified_this": "verified", "verified_all": "all_verified",
+                                    "wrong_left": "wrong_answers_left"},
+                "get_account": {"ok": "ok", "products": "products"}}
+    ITEM_KEY = {"id": "product_id", "type": "type", "past_due": "past_due", "days_late": "days_late"}
+
+    def _shape(self, tool, flat):
+        """The response in the OAS shape the bridge bound (tool_results paths); flat (today's keys) when unbound."""
+        paths = self.results.get(tool) or {}
+        if not paths:
+            return flat
+        out = {}
+        vv = paths.get("verified_value")
+        for fact, key in dict(self.FACT_KEY.get(tool) or {}, ok="ok").items():
+            if fact in paths and key in flat:
+                val = flat[key]
+                if fact == "products":
+                    val = [self._item(row, paths) for row in val]
+                if vv and fact in ("verified_this", "verified_all"):
+                    if fact == "verified_this" and paths.get("verified_all") == paths.get("verified_this"):
+                        continue        # one status field: it carries 'all verified'
+                    val = vv if val else "not_" + str(vv)
+                _set(out, paths[fact], val)
+        return out
+
+    def _item(self, row, paths):
+        sc = paths.get("amount_scale")
+        if sc:     # minor units: every amount of the row as an integer of the minor unit
+            row = {k: (int(round(v / sc)) if isinstance(v, float) else v) for k, v in row.items()}
+        it = {k: v for k, v in row.items() if k not in self.ITEM_KEY.values()}   # naming / floor fields stay by name
+        for fact, key in self.ITEM_KEY.items():
+            if fact in paths and key in row:
+                _set(it, paths[fact], row[key])
+        for fact, pth in paths.items():
+            if fact.startswith("floor.") and pth.startswith("item."):
+                name = pth.split(".")[-1]
+                if name in row:
+                    it.pop(name, None)
+                    _set(it, pth, row[name])
+        return it
+
+
+def _set(d, path, value):
+    """Set a 'data.a.b' / 'item.a.b' path (the root word dropped) in a nested dict."""
+    parts = path.split(".")[1:]
+    for p in parts[:-1]:
+        d = d.setdefault(p, {})
+    d[parts[-1]] = value
 
 
 def _products(policy, mix, today):
@@ -208,7 +259,7 @@ def run_scenario(R, policy, name, knobs, oas_path, idq):
     products = _products(policy, knobs["mix"], today)
     rights = {f: ("1980-01-01" if "date" in str(f) else "1234") for f in idq}
     wrongs = {f: ("1970-02-02" if "date" in str(f) else "9999") for f in idq}
-    bank = Bank(products, rights, knobs.get("fail"), (policy.get("identity") or {}).get("max_wrong"))
+    bank = Bank(products, rights, knobs.get("fail"), (policy.get("identity") or {}).get("max_wrong"), policy.get("tool_results"))
     cust = Customer(knobs, rights, wrongs)
     # call variables by the roles the policy declares (meta.call_vars), with neutral sample values
     roles = list(((policy.get("meta") or {}).get("call_vars") or {}).keys())
@@ -291,7 +342,7 @@ def run_scenario(R, policy, name, knobs, oas_path, idq):
             if tool == "verify_identity" and str(args.get("answer")) != rights.get(args.get("field")):
                 wrong_calls += 1
             tool_ev = bank.call(tool, args)
-            if tool == "verify_identity" and tool_ev["data"].get("all_verified"):
+            if tool == "verify_identity" and len(bank.verified) >= len(bank.right):   # the bank's truth, not a response key
                 verified_seen = True
             if tool in WRITE_TOOLS and tool_ev["ok"] == "true":
                 write_success += 1
