@@ -25,7 +25,7 @@ import freya
 from builder.engine import event_field as EF
 
 STATE = os.path.join(ROOT, "tests", ".eval-agents.json")
-VOCAB = {"topics": ["injection", "hardship", "dispute", "paid", "restructure", "human", "stop", "decline", "purpose", "scam",
+VOCAB = {"topics": ["injection", "hardship", "dispute", "paid", "restructure", "human", "stop", "decline", "purpose", "change_promise", "terms", "scam",
                     "robot", "unknown_info", "other"],
          "identity_fields": ["date_of_birth", "phone_last4"]}
 DATE_KEYS = ("rel", "d", "m", "wd", "wk", "vague")
@@ -83,49 +83,77 @@ def simulation_active():
     return any(str(s.get("status")).lower() in ("running", "pending", "queued", "in_progress") for s in sims)
 
 
+RETRIES = 0   # measurement rule: no re-send on 503/504; the case counts as unmeasured
+
+
 def send(wid, call, msg, cv, log):
+    """-> (call_id, response, ok). One attempt per message (RETRIES re-sends at most)."""
     body = {"workflowId": wid, "message": msg, "customerVariables": cv}
     if call:
         body["callId"] = call
-    for attempt in range(4):
+    for attempt in range(1 + RETRIES):
         try:
             r = freya.api("POST", "/api/v2/chat/message", body)
-            return r.get("callId", call), r.get("response")
+            return r.get("callId", call), r.get("response"), True
         except RuntimeError as e:
             log.append(str(e)[:80])
-            time.sleep(6)
-    return call, None
+            if attempt < RETRIES:
+                time.sleep(6)
+    return call, None, False
+
+
+PHASE_ASK = {"opening": "Hello?", "third_party": "When could I reach them?", "identity": "Could you give me the answer, please?",
+             "negotiation": "When can you pay?", "readback": "Do you confirm?"}
+
+
+def from_cursor(c):
+    """Adapter for tests/fixtures/reducer/extraction_cases.json (Cursor). Only the turn layout is assumed here: a piece
+    said before the measured message gets a neutral phase question before the first piece and 'Go on, please.'
+    between pieces. The labels are compared as given; a v2 `rel` key on a who-event is compared against `party`."""
+    ctx, exp = c["context"], c["expected"]
+    earlier = list(ctx.get("earlier_customer") or [])
+    payload = dict(exp.get("payload") or {})
+    if exp["kind"] == "who" and "rel" in payload:
+        payload["party"] = payload.pop("rel")
+    e = dict(kind=exp["kind"], also=exp.get("also", "none"), st=exp.get("st", "complete"), **payload)
+    if exp.get("prod"):
+        e["prod"] = exp["prod"]
+    agents = ([PHASE_ASK.get(ctx.get("phase"), "Yes?")] + ["Go on, please."] * (len(earlier) - 1) if earlier else []) + [ctx["agent"]]
+    return {"id": c["id"], "now": ctx.get("now", "2026-10-14T11:00"), "agents": agents, "customer": earlier + [c["customer"]],
+            "expected": e, "debatable": bool(c.get("debatable")), "tags": [c.get("covers", "")]}
 
 
 def run_case(wid, case):
     """Turn plan: an opener (chat does not route turn 1), then a 'ready' turn makes the hub speak the first scripted
     agent line; every customer line is followed by the next scripted agent line."""
-    agent_lines = [t["agent"] for t in case.get("context", [])] + ([case["agent"]] if case.get("agent") else [])
-    customer_lines = [t["customer"] for t in case.get("context", [])] + list(case["customer"])
-    # the split utterance: the agent says a short continuation between pieces
-    script = []
-    for i, line in enumerate(agent_lines):
-        script.append(line)
-    pieces = len(case["customer"])
-    script += ["Go on, please."] * max(pieces - 1, 0)
+    if "agents" in case:   # adapted (Cursor) layout: agents[i] is spoken right before customer[i]
+        script, customer_lines = list(case["agents"]), list(case["customer"])
+    else:
+        agent_lines = [t["agent"] for t in case.get("context", [])] + ([case["agent"]] if case.get("agent") else [])
+        customer_lines = [t["customer"] for t in case.get("context", [])] + list(case["customer"])
+        script = agent_lines + ["Go on, please."] * max(len(case["customer"]) - 1, 0)
     cv = {"customer_id": "c_eval", "now": case.get("now", "2026-10-14T11:00"), "script": json.dumps(script)}
     errs, call = [], None
-    call, _ = send(wid, None, "Hello?", cv, errs)
-    if agent_lines:
-        call, _ = send(wid, call, "Yes, go ahead.", cv, errs)     # makes the hub speak script[0]
-    ctx_customers = customer_lines[:len(customer_lines) - pieces]
-    for line in ctx_customers + list(case["customer"]):
-        call, _ = send(wid, call, line, cv, errs)
-    try:
-        freya.api("POST", "/api/v2/chat/end", {"callId": call})
-    except Exception:
-        pass
+    call, _, ok = send(wid, None, "Hello?", cv, errs)
+    if ok and script:
+        call, _, ok = send(wid, call, "Yes, go ahead.", cv, errs)     # makes the hub speak script[0]
+    for line in customer_lines:
+        if not ok:
+            break
+        call, _, ok = send(wid, call, line, cv, errs)
+    if call:
+        try:
+            freya.api("POST", "/api/v2/chat/end", {"callId": call})
+        except Exception:
+            pass
+    if not ok:
+        return {"id": case["id"], "call_id": call, "unmeasured": True, "http_errors": errs}
     time.sleep(2)
     got, raw = None, None
     try:
         msgs = freya.get_call(call)["messages"]
     except Exception as e:
-        return {"id": case["id"], "error": str(e)[:120], "http_errors": errs}
+        return {"id": case["id"], "unmeasured": True, "error": str(e)[:120], "http_errors": errs}
     last = case["customer"][-1]
     for m in msgs:
         t = str(m.get("message"))
@@ -168,8 +196,13 @@ def score(case, res):
 
 
 def report(cases, results):
-    rows = [(c, r, score(c, r)) for c, r in zip(cases, results)]
+    unmeasured = [r["id"] for r in results if r.get("unmeasured")]
+    rows = [(c, r, score(c, r)) for c, r in zip(cases, results) if not r.get("unmeasured")]
     n = len(rows)
+    print(f"\nmeasured {n} / {len(results)}; unmeasured (HTTP error, not re-sent): {unmeasured}")
+    deb = [c["id"] for c, r, s in rows if c.get("debatable") and not (s["kind_ok"] and s["st_ok"] and s["fields_ok"])]
+    if deb:
+        print("debatable cases that did not match (counted in the metrics; review separately):", deb)
     pct = lambda a, b: f"{a}/{b}" + (f" ({100 * a / b:.0f}%)" if b else "")
     da = [s for _, _, s in rows if s["date_amount_case"]]
     pn = [s for _, _, s in rows if s["partial_none_case"]]
@@ -206,6 +239,8 @@ if __name__ == "__main__":
     a = ap.parse_args()
     spec = json.load(open(a.cases))
     cases = [c for c in spec["cases"] if not a.only or c["id"] in a.only.split(",")]
+    if cases and isinstance(cases[0].get("context"), dict):   # Cursor's extraction_cases.json layout
+        cases = [from_cursor(c) for c in cases]
     if simulation_active():
         sys.exit("a simulation is running in this workspace; extraction eval is chat-only and waits for it to finish")
     TOPICS = (spec.get("vocab") or VOCAB)["topics"]
@@ -221,6 +256,8 @@ if __name__ == "__main__":
     out = a.out or os.path.join(ROOT, "results", "extract_eval_" + time.strftime("%H%M%S") + ".json")
     os.makedirs(os.path.dirname(out), exist_ok=True)
     json.dump({"cases_file": a.cases, "metrics": m, "gates": gates,
-               "rows": [dict(id=c["id"], expected=c["expected"], raw=r.get("raw"), call_id=r.get("call_id"), score=s) for c, r, s in rows]},
+               "unmeasured": [dict(id=r["id"], call_id=r.get("call_id"), http=r.get("http_errors")) for r in results if r.get("unmeasured")],
+               "rows": [dict(id=c["id"], expected=c["expected"], debatable=c.get("debatable", False), raw=r.get("raw"),
+                             call_id=r.get("call_id"), score=s) for c, r, s in rows]},
               open(out, "w"), indent=1)
     print("report:", out)
