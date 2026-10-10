@@ -404,3 +404,51 @@ def run_selftest(policy, oas_path, reducer=None):
 if __name__ == "__main__":
     pol = json.load(open(sys.argv[1]))
     print(json.dumps(run_selftest(pol, sys.argv[2] if len(sys.argv) > 2 else "tools/openapi.json"), indent=1))
+
+
+def walk_smoke(policy, wf, oas_path):
+    """One generic call through the COMPILED workflow with Fork 3's graph walker (builder/graph_walk.py): the name is
+    confirmed, every identity question answered right, the payment accepted and confirmed, then 'thanks'. The fake
+    bank answers in the policy's tool_results shapes. -> {run, errors, warnings, calls, ended}. Wiring bugs only
+    (unresolved placeholders, missing nodes, deadlocks, OAS body errors, no close_call); outcomes are not judged."""
+    try:
+        from builder.graph_walk import walk
+        from builder.oas import load_oas
+    except Exception as e:
+        return {"run": False, "note": f"walker not available: {e}"}
+    global NOW
+    NOW = pick_now(policy)
+    today = datetime.date.fromisoformat(NOW[:10])
+    qs = [q for q in (policy.get("identity") or {}).get("questions") or [] if not q.get("blocked")]
+
+    def answer(q):
+        f = str(q.get("format") or "")
+        m = re.match(r"digits\((\d+)\)", f)
+        return "1980-01-01" if f == "date" or "date" in str(q.get("field")) else ("1" * int(m.group(1)) if m else "AB12")
+    rights = {q["field"]: answer(q) for q in qs}
+    bank = Bank(_products(policy, [(0, 0, "min")], today), rights, None, (policy.get("identity") or {}).get("max_wrong"),
+                policy.get("tool_results"))
+    inv = {t: {f: c for c, f in roles.items()} for t, roles in (policy.get("tool_args") or {}).items()}
+
+    def fake(tool, body):
+        if tool == "close_call":
+            return 200, {"ok": True}
+        args = {inv.get(tool, {}).get(k, k): v for k, v in (body or {}).items()}
+        r = bank.call(tool, args)
+        return r["status_code"], r["data"]
+    ev = lambda body: "n=kstart;src=user;" + body
+    evs = [ev("kind=who;also=none;st=complete;prod=;who=self;party=")]
+    evs += [ev("kind=identity;also=none;st=complete;prod=;field=" + q["field"] + ";ans=" + rights[q["field"]]) for q in qs]
+    evs += [ev("kind=yes;also=none;st=complete;prod="), ev("kind=yes;also=none;st=complete;prod=")]
+    evs += [ev("kind=other;also=none;st=none;prod=")] * 6
+    cv = {r: ("c_self" if "id" in r else "Sample") for r in ((policy.get("meta") or {}).get("call_vars") or {})}
+    cv.setdefault("customer_id", "c_self")
+    cv[(policy.get("now") or {}).get("var", "now")] = NOW
+    try:
+        rep = walk(wf, load_oas(oas_path), cv, evs, fake)
+    except Exception as e:
+        return {"run": True, "errors": [f"walker raised {type(e).__name__}: {str(e)[:200]}"], "warnings": [], "calls": [], "ended": False}
+    errs = list(rep["errors"]) + ([] if rep["ended"] else ["the call did not reach an end_call node"])
+    errs += [] if any(c.get("tool") == "close_call" for c in rep["calls"]) else ["close_call was never sent"]
+    return {"run": True, "errors": errs, "warnings": rep["warnings"][:10], "calls": [c.get("tool") for c in rep["calls"]],
+            "ended": rep["ended"]}

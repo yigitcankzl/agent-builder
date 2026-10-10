@@ -228,6 +228,12 @@ def _call_var_placeholders(text, call_vars):
     return re.sub(r"\{(\w+)\}", lambda m: "{{" + str(call_vars.get(m.group(1), m.group(1))) + "}}", text or "")
 
 
+# drop an empty or unresolved close reason (a promise/paid outcome sends none); no double braces in this code
+DROP_EMPTY_REASON = ("try:\n    b = config.get('body')\n    if isinstance(b, dict):\n"
+                     "        r = str(b.get('reason') or '')\n        if r == '' or chr(123) in r:\n"
+                     "            b.pop('reason', None)\nexcept Exception:\n    pass\n")
+
+
 def hub_reset_code(tools):
     lines = ["try:", "    vars['route'] = 'stale'"]
     lines += [f"    if str(vars.get('w_go_{t}') or '') != 'go':\n        vars['w_go_{t}'] = 'done'" for t in tools]
@@ -306,6 +312,8 @@ def generate(rp, oas_path):
         nodes["t_" + t] = _api_node(t, tools[t], "hub")
     if "close_call" in tools:
         cc = _api_node("close_call", tools["close_call"], "end", args_prefix="close")
+        # the graph's close node too: a promise/paid close sends no reason ('' would break a reason enum)
+        cc["pre_actions"][0]["pre_process_code"] = DROP_EMPTY_REASON
         nodes["t_close_call"] = cc
     hub_edges = [{"target_node": "close_say", "description": "close", "condition": _cond(("route", "close"))}]
     if "transfer_to_agent" in used:
@@ -324,13 +332,12 @@ def generate(rp, oas_path):
     for t in used:
         if t in OPEN:
             hub_edges.append({"target_node": "t_" + t, "description": t, "condition": _cond(("route", "t_" + t), ("w_go_" + t, "go"))})
-    hub_edges.append({"target_node": "talk_post", "description": "free talk after verification",
-                      "condition": {"logic": "or", "conditions": [
-                          {"logic": "and", "conditions": [{"variable": "route", "operator": "equals", "operand": "talk_post"},
-                                                          {"variable": "route_ok", "operator": "equals", "operand": "yes"}]},
-                          {"logic": "and", "conditions": [{"variable": "route", "operator": "equals", "operand": "stale"},
-                                                          {"variable": "route_ok", "operator": "equals", "operand": "yes"}]}]}})
     hub_edges.append({"target_node": "exact_say", "description": "say", "condition": _cond(("route", "say"))})
+    # ONE talk_post edge after every specific route (same-target edges merge at the first position): after
+    # verification, free talk, a stale turn and any unmatched route (a gated tool whose w_go is not 'go', an unknown
+    # route) stay in the verified free talk; talk_pre (the unverified prompt) is reached only before verification
+    hub_edges.append({"target_node": "talk_post", "description": "free talk / stale / unmatched route after verification",
+                      "condition": _cond(("route_ok", "yes"))})
     hub_edges.append(_always("talk_pre"))
     hub = _code_action("hub", hub_src, "talk_pre")
     hub["transitions"] = hub_edges
@@ -347,9 +354,7 @@ def generate(rp, oas_path):
         lc = _api_node("close_call", tools["close_call"], "end", args_prefix="close")["pre_actions"][0]
         lc["config"] = {"timeoutMs": 12000, "maxRetries": 0, "alwaysRunsAt": ["end_of_call"]}
         # drop an empty or unresolved reason (a promise/paid outcome sends none); no double braces in this code
-        lc["pre_process_code"] = ("try:\n    b = config.get('body')\n    if isinstance(b, dict):\n"
-                                  "        r = str(b.get('reason') or '')\n        if r == '' or chr(123) in r:\n"
-                                  "            b.pop('reason', None)\nexcept Exception:\n    pass\n")
+        lc["pre_process_code"] = DROP_EMPTY_REASON
         wf["tools"] = [lc]
     return wf
 

@@ -42,7 +42,7 @@ from builder.ingest import ingest, s1
 from builder.integration import EngineNotLoaded, _load
 from builder.engine.date_policy import core_missing
 from builder.policy_extract import apply_reextraction, extract, read_files, reextract_core, reextract_fields
-from builder.selftest import run_selftest
+from builder.selftest import run_selftest, walk_smoke
 from builder.trace import BuildTrace
 from builder.validate_workflow import validate
 
@@ -283,6 +283,15 @@ def build(briefs, openapi, slot=None, freya_client=None, out_dir="submission", t
     if fb[0]:
         fb[0].cancel()      # before the save: one save per slot, the main candidate
     _save(freya_client, slot, wf, out_dir, trace, result, "main")
+    # a generic call through the compiled graph (Fork 3's walker): wiring bugs only; a warning signal, never blocking
+    try:
+        wk = walk_smoke(rp, wf, openapi)
+    except Exception as e:
+        wk = {"run": False, "errors": [f"walk_smoke raised {type(e).__name__}: {str(e)[:200]}"]}
+    trace.log("graph_walk", **wk)
+    result["graph_walk"] = {"run": wk.get("run"), "errors": (wk.get("errors") or [])[:5], "calls": wk.get("calls")}
+    if wk.get("errors"):
+        trace.log("signal", signal="WALK", level="warning", problems=wk["errors"][:10])
     st_res = run_selftest(rp, openapi)
     trace.log("self_test", **st_res)
     result["self_test"] = {k: st_res.get(k) for k in ("run", "scenarios", "passed", "failed", "note")}
