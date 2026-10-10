@@ -274,6 +274,11 @@ def init_state(policy, call_vars=None):
               _pd=[], _tc=dict(), _last_ask='', _queue=[], _cb_out=0, _ask_time=0, _xfer_pre='no',
               _wrapup_said=False, _what_change=0, _id_hint=0, _id_retry=0)
     st['counters']['confirm_name'] = 1          # the greet speaks the name question (§12 choice 2)
+    for h in policy.get('hooks') or []:
+        if isinstance(h, dict) and h.get('expects_answer'):
+            st.setdefault('_hook_skip', []).append(str(h.get('id')) + ':expects_answer')
+        elif isinstance(h, dict) and h.get('point') == 'opening':
+            st.setdefault('_hooks_said', []).append(h.get('id'))
     st['_last_ask'] = name_question(policy, call_vars or dict())
     return st
 
@@ -362,7 +367,7 @@ def load_products(policy, st, rows, today):
         dline = deadline_for(today, dl, policy)
         st['products'].append(dict(id=str(r.get('product_id')), status='open', attempts=0, floor_offered=False,
                                    write_failures=0, offer=None, note=None))
-        st['_pd'].append(dict(id=str(r.get('product_id')), name=_name(policy, r), past_due=float(r.get('past_due') or 0),
+        st['_pd'].append(dict(id=str(r.get('product_id')), type=str(r.get('type')), name=_name(policy, r), past_due=float(r.get('past_due') or 0),
                               days_late=dl, floor=_floor(policy, r), band=band.get('name'), deadline=iso(dline),
                               plan=_plan(policy, band), too_much=False, note_reason=None, refused_offers=[]))
 
@@ -586,6 +591,10 @@ def step(policy, st, event, tool_event, now, call_vars=None):
     if act.get('type') == '_loop':
         st['_said_n'], st['_said_last'], st['_resay_n'] = 0, None, 0
         act = loop_break(policy, st, today, cv)
+    if policy.get('hooks'):
+        act = attach_hooks(policy, st, act)
+    else:
+        st.pop('_hp', None)
     if act.get('type') == 'call_tool':   # canonical argument roles -> the brief's OAS body fields (bridge tool_args)
         ta = (policy.get('tool_args') or dict()).get(act['tool']) or dict()
         act = dict(act, args=dict((ta.get(k) or k, v) for k, v in (act.get('args') or dict()).items()))
@@ -711,6 +720,7 @@ def account_statement(policy, st, today):
         st['all_today_asked'] = True
         text = ' '.join(x for x in lines + [D_ALL_TODAY] if x)
     st['phase'] = 'negotiation'
+    hook_point(st, 'after_debt')
     return ask(st, text, 'pay_today')
 
 
@@ -742,6 +752,7 @@ def next_write(policy, st, cv):
             words = ((policy.get('honesty_words') or dict()).get('words') or []) + ['saved']
             rec = '' if any(w in sms.lower() for w in words) else D_RECORDED   # the SMS line may already say it
         text = (rec + ' ' + sms).strip()
+        hook_point(st, 'on_promise_recorded')
         st['_last_ask'] = text
         return dict(type='say_exact', text=text.strip())
     o, r = precedence(policy, st)
@@ -810,6 +821,8 @@ def start_attempt(policy, st, i, today, from_today_ask=True):
     st['cur'] = i
     if p['attempts'] >= len(pd['plan']):
         return refuse_product(policy, st, i, today)
+    if p['attempts'] >= 1:
+        hook_point(st, 'on_refusal')
     rule = pd['plan'][p['attempts']]
     date = plan_date(rule.get('date_rule'), today, pd, policy)
     amount, is_floor = plan_amount(rule.get('amount_rule'), pd)
@@ -825,6 +838,7 @@ def start_attempt(policy, st, i, today, from_today_ask=True):
 def refuse_product(policy, st, i, today, cv=None):
     p, pd = _p(st, i)
     p['status'] = 'refused'
+    hook_point(st, 'on_refusal')
     pd['note_reason'] = pd.get('note_reason') or V(policy)['note']['refused']
     st['offer'] = None
     if len(st['products']) == 1:
@@ -1086,6 +1100,82 @@ def no_restated_amount(st, act):
     if new:
         st['_offered'] = said + new
     return dict(act, **dict([(key, t.strip())]))
+
+
+HOOK_POINTS = ('opening', 'after_debt', 'on_refusal', 'on_no_promise', 'before_close', 'on_promise_recorded')
+HOOK_HONESTY = r'\b(recorded|scheduled|transferr?ed|saved|booked)\b'
+
+
+def hook_point(st, point):
+    st['_hp'] = (st.get('_hp') or []) + [point]
+
+
+def hook_ok(h, st, act, pd_cur):
+    """condition: a closed set of key=value terms joined by ';', ',' or '&': band=, product_type=, outcome=."""
+    for term in re.split(r'[;,&]', str(h.get('condition') or '')):
+        if not term.strip():
+            continue
+        k, _, v = term.strip().partition('=')
+        k, v = k.strip(), v.strip()
+        pds = [pd_cur] if pd_cur else st.get('_pd') or []
+        if k == 'band':
+            ok = any(str(pd.get('band')) == v for pd in pds)
+        elif k == 'product_type':
+            ok = any(str(pd.get('type')) == v for pd in pds)
+        elif k == 'outcome':
+            ok = act.get('type') == 'close' and str(act.get('outcome')) == v
+        else:
+            st['_hook_skip'] = (st.get('_hook_skip') or []) + [str(h.get('id')) + ':condition']
+            return False
+        if not ok:
+            return False
+    return True
+
+
+def attach_hooks(policy, st, act):
+    """Brief sentences at fixed points (policy.hooks), each once per call, added to the line said anyway: before the
+    closing question of a say_exact, or before the farewell of a close. A point reached on a tool call waits for the
+    next spoken line. expects_answer hooks are not supported (logged); a hook that claims a write is only allowed after
+    a recorded promise (honesty lint)."""
+    pts = list(st.get('_hp') or [])
+    if act.get('type') == 'close':
+        v = V(policy)
+        if act.get('outcome') in set(x[0] for x in (v['refused'], v['hardship'], v['dispute'], v['write_failed']) if x[0]):
+            pts.append('on_no_promise')
+        pts.append('before_close')
+    if not pts:
+        return act
+    if act.get('type') not in ('say_exact', 'close'):
+        st['_hp'] = pts
+        return act
+    st['_hp'] = []
+    said = st.get('_hooks_said') or []
+    pd_cur = st['_pd'][st['cur']] if st.get('cur') is not None and st.get('_pd') else None
+    lines = []
+    for point in pts:
+        for h in policy.get('hooks') or []:
+            if not isinstance(h, dict) or h.get('point') != point or h.get('id') in said or h.get('expects_answer'):
+                continue
+            text = str(h.get('text') or '').strip()
+            if not text or not hook_ok(h, st, act, pd_cur):
+                continue
+            if point != 'on_promise_recorded' and re.search(HOOK_HONESTY, text, re.I) and not re.search(r'\bcall\b', text, re.I):
+                st['_hook_skip'] = (st.get('_hook_skip') or []) + [str(h.get('id')) + ':honesty']
+                said = said + [h.get('id')]
+                continue
+            said = said + [h.get('id')]
+            lines.append(text)
+    st['_hooks_said'] = said
+    if not lines:
+        return act
+    add = ' '.join(lines)
+    if act['type'] == 'close':
+        return dict(act, farewell=(add + ' ' + (act.get('farewell') or '')).strip())
+    parts = re.split(r'(?<=[.?!])\s+', act['text'].strip())
+    qi = [i for i, x in enumerate(parts) if x.endswith('?')]
+    if qi:                       # before the last question: the customer answers the question, not the hook
+        return dict(act, text=' '.join(parts[:qi[-1]] + [add] + parts[qi[-1]:]))
+    return dict(act, text=act['text'].strip() + ' ' + add)
 
 
 def loop_break(policy, st, today, cv):
@@ -1553,6 +1643,8 @@ def hub_main(vars, policy):
     vars['close_outcome'], vars['close_reason'] = o or '', r or ''
     vars['route_ok'] = 'yes' if st2.get('verified') == 'yes' else 'no'
     vars['xfer_pre'] = st2.get('_xfer_pre') or 'no'
+    if st2.get('_hook_skip'):
+        vars['hook_skip'] = ','.join(st2['_hook_skip'])
     new = _token(st2.get('runs', 0))
     st2['tok'] = new
     vars['ev_tok'] = new
