@@ -316,13 +316,26 @@ def placeholders():
     check(any(e.startswith("22") for e in validate(wf2, rp2, OAS)), "validator 22 catches an undeclared spoken placeholder")
 
 
+def too_much():
+    print("== amounts.too_much_date (PUB-07 / clean-1)")
+    T = B.too_much_date
+    check(T({"too_much": "offer the floor once and say that the rest stays overdue"})[0] == "offer", "brief A: no day named -> offer")
+    check(T({"too_much": "offer the floor once, on the deadline; this offer uses no attempt"})[0] == "deadline", "clean-1 rule 15 -> deadline")
+    check(T({"too_much": "say you cannot record it today"})[0] == "offer", "'not today' is not a day for the floor offer")
+    check(T({"too_much_date": "today", "too_much_date_evidence": {"source": src("Offer the floor for today.")}})[0] == "today",
+          "a quoted extractor value wins")
+    check(T({"too_much_date": "deadline"})[0] == "offer", "an unquoted extractor value is not taken")
+    rp, _ = bridged()
+    check(rp["amounts"]["too_much_date"] == "offer", "brief A bridged -> offer (PUB-06 stays on the offer's day)")
+
+
 def gap2_exact():
     q = {"field": "postcode", "format": "postcode", "format_evidence": {"source": src("Send the postcode exactly as said, letters and digits.")}}
     check(B.answer_format(q)[0] == "free", "'exactly as said' wins over the postcode format -> free")
 
 
 if __name__ == "__main__":
-    for g in (gap1, gap2, gap2_exact, gap3, gap4, regressions, derive_fixes, integration_fixes, honesty, bank_names, placeholders):
+    for g in (gap1, gap2, gap2_exact, gap3, gap4, regressions, derive_fixes, integration_fixes, honesty, bank_names, placeholders, too_much):
         g()
     print("RESULT:", "PASS" if not fails else f"FAIL ({len(fails)})")
     sys.exit(1 if fails else 0)

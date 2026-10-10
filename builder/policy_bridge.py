@@ -537,6 +537,22 @@ def floor_spec(v, acct_fields):
     return out, None
 
 
+def too_much_date(am):
+    """amounts.too_much_date: the day of the 'too much' floor offer (deadline | today | offer). The extractor's value
+    when one of the three with a verified quote; else a fixed reading of the brief's own too-much rule (its text and
+    quotes): 'on/at the deadline' -> deadline, 'today' -> today, else offer (the refused offer's day). -> (value, note)"""
+    v = str(am.get("too_much_date") or "").strip().lower()
+    ev = [q.get("quote") for q in ((am.get("too_much_date_evidence") or {}).get("source") or []) if isinstance(q, dict) and q.get("quote")]
+    if v in ("deadline", "today", "offer") and ev:
+        return v, f"amounts.too_much_date {v} (extractor, quoted)"
+    text = " ".join([str(am.get("too_much") or "")] + ev)
+    if re.search(r"\b(on|at|for) the deadline\b", text, re.I):
+        return "deadline", "amounts.too_much_date deadline (from the too-much rule's words)"
+    if re.search(r"\btoday\b", text, re.I) and not re.search(r"\bnot today\b", text, re.I):
+        return "today", "amounts.too_much_date today (from the too-much rule's words)"
+    return "offer", "amounts.too_much_date offer (no day named for the too-much floor offer: the refused offer's day)"
+
+
 def acceptance_rule(a):
     """amounts.acceptance -> Fork 3's value ('floor_to_full' | 'full_only' | 'above_full_allowed' | {kind: min_x, min})
     and a note, or (None, problem)."""
@@ -844,6 +860,9 @@ def to_reducer(policy, oas_path, stable_unmapped=None, brief_text=None):
                          "action": f"block ({problem}; the floor is the full amount)"})
     prod["floor_by_type"] = floors
     am = p.setdefault("amounts", {})
+    tmd, tnote = too_much_date(am)
+    am["too_much_date"] = tmd
+    notes.append(tnote)
     acc, anote = acceptance_rule(am.get("acceptance"))
     am["acceptance"] = acc or "floor_to_full"
     if anote:
