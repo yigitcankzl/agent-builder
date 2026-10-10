@@ -415,13 +415,39 @@ def synthetic_fixes():
     check(any("empty ask" in e for e in validate(generate(rp, OAS), rp, OAS)), "validator 3 catches an empty identity ask")
 
 
+def close_enum():
+    print("== every close is an exact OAS enum value (a rejected close_call leaves the ledger empty)")
+    import tempfile
+    o = json.load(open(OAS))
+    for path, ops in o["paths"].items():
+        if path.strip("/").endswith("close_call"):
+            body = ops["post"]["requestBody"]["content"]["application/json"]["schema"]["properties"]
+            body["reason"]["enum"] = ["refused", "hardship", "dispute", "service_error", "callback", "no_callback",
+                                      "wrong_number", "deceased", "unclear", "failed", "declined", "restructuring", "human"]
+    oas = os.path.join(tempfile.mkdtemp(), "openapi.json")
+    json.dump(o, open(oas, "w"))
+    x = {"extra_topics": [{"id": "complaint", "effect": "close", "outcome": "no_promise", "reason": "complaint"}],
+         "events": [{"topic": "complaint", "outcome": "no_promise", "reason": "complaint"},
+                    {"topic": "dispute", "outcome": "no_promise", "reason": "dispute"}]}
+    notes = B.close_enum_guard(x, ["no_promise"], ["dispute"], lambda *a: None)
+    check(x["extra_topics"] == [], "an extra topic whose close reason is not in the enum is dropped")
+    check(x["events"][0]["outcome"] == "" and x["events"][0]["brief_reason"] == "complaint", "a non-enum event close falls back to the normal flow")
+    check(x["events"][1]["reason"] == "dispute", "an enum close is kept")
+    check(any("ASSUMPTION" in n for n in notes), "the dropped close is an ASSUMPTION note")
+    rp, _ = B.to_reducer(copy.deepcopy(BASE), oas, [])
+    check(not [e for e in validate(generate(rp, oas), rp, oas) if e.startswith("14")], "bridged policy passes check 14")
+    rp["extra_topics"] = [{"id": "complaint", "trigger": "make a complaint", "effect": "close", "outcome": "no_promise", "reason": "complaint"}]
+    check(any("extra_topics[0] reason 'complaint'" in e for e in validate(generate(rp, oas), rp, oas)),
+          "validator 14 catches a non-enum extra_topics reason")
+
+
 def gap2_exact():
     q = {"field": "postcode", "format": "postcode", "format_evidence": {"source": src("Send the postcode exactly as said, letters and digits.")}}
     check(B.answer_format(q)[0] == "free", "'exactly as said' wins over the postcode format -> free")
 
 
 if __name__ == "__main__":
-    for g in (gap1, gap2, gap2_exact, gap3, gap4, regressions, derive_fixes, integration_fixes, honesty, bank_names, placeholders, too_much, rehearsal, assistant_disclosure, synthetic_fixes):
+    for g in (gap1, gap2, gap2_exact, gap3, gap4, regressions, derive_fixes, integration_fixes, honesty, bank_names, placeholders, too_much, rehearsal, assistant_disclosure, synthetic_fixes, close_enum):
         g()
     print("RESULT:", "PASS" if not fails else f"FAIL ({len(fails)})")
     sys.exit(1 if fails else 0)

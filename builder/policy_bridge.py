@@ -801,6 +801,44 @@ def extra_topics(p, live):
     return out, notes
 
 
+CLOSE_SKIP = ("closing", "api_mismatch", "unmapped_topics", "tool_args", "tool_results")
+
+
+def close_enum_guard(p, e_out, e_rsn, resolve):
+    """Every close the agent may send (events, who rules, extra topics, identity closes ...) carries an exact OAS
+    outcome/reason, or a brief-mapped code that resolves to one; a rejected close_call leaves the ledger empty. A close
+    that does not resolve loses its close effect (the situation falls back to the normal flow; an extra topic is
+    dropped), noted as an ASSUMPTION. The closing table itself is handled above (blocked rows)."""
+    notes = []
+
+    def walk(x, path):
+        if isinstance(x, dict):
+            if not x.get("blocked") and isinstance(x.get("outcome"), str) and x["outcome"]:
+                o, r = x["outcome"], x.get("reason")
+                if e_out and o not in e_out:
+                    o = resolve(f"{path}.outcome", o, "close_call.outcome", e_out)
+                if o and e_rsn and isinstance(r, str) and r and r not in e_rsn:
+                    r = resolve(f"{path}.reason", r, "close_call.reason", e_rsn)
+                    o = o if r else None
+                if o:
+                    x["outcome"], x["reason"] = o, (r if isinstance(r, str) else x.get("reason"))
+                else:
+                    notes.append(f"ASSUMPTION {path}: close {x['outcome']}/{x.get('reason')} is not an OAS enum value; "
+                                 "its close effect is dropped (normal flow)")
+                    x["brief_outcome"], x["brief_reason"], x["outcome"], x["reason"] = x["outcome"], x.get("reason"), "", None
+                    x["close_dropped"] = True
+            for k, v in x.items():
+                if not k.startswith(("brief_", "_")):
+                    walk(v, f"{path}.{k}")
+        elif isinstance(x, list):
+            for i, v in enumerate(x):
+                walk(v, f"{path}[{i}]")
+    for k in [k for k in p if k not in CLOSE_SKIP]:
+        walk(p[k], k)
+    p["extra_topics"] = [t for t in p.get("extra_topics") or [] if not t.get("close_dropped")]
+    return notes
+
+
 def opening_checks(p):
     """Yes/no questions after the name is confirmed (extraction opening_checks), kept only when the ask is the brief's
     own words (verbatim in its quote) and on_no is third_party or close."""
@@ -1434,6 +1472,7 @@ def to_reducer(policy, oas_path, stable_unmapped=None, brief_text=None):
     p["api_mismatch"] = mism
     p["extra_topics"], xnotes = extra_topics(p, live)
     notes += xnotes
+    notes += close_enum_guard(p, e_out, e_rsn, resolve)
     p.pop("_events_raw", None)
     p["opening_checks"], onotes = opening_checks(p)
     notes += onotes
