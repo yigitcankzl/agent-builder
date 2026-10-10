@@ -58,6 +58,19 @@ def public_constants():
     return {c for c in consts if len(c) >= 4} - fixed
 
 
+def talk_prompts_forbid_restating():
+    """talk_pre and talk_post must not be able to re-propose an offer the reducer already said."""
+    from builder.generator import NO_RESTATE
+    _, _, wf, _ = build("brief-a")
+    for name in ("talk_pre", "talk_post"):
+        msg = wf["nodes"][name]["task_message"]
+        check = NO_RESTATE.strip() in msg and "Do not restate any amount, date, offer, or policy clause" in msg
+        print(f"   {name} no-restating rule: {'yes' if check else 'MISSING'}")
+        if not check:
+            return False
+    return True
+
+
 if __name__ == "__main__":
     os.makedirs(OUT, exist_ok=True)
     bad = 0
@@ -119,6 +132,8 @@ if __name__ == "__main__":
     print(f"   {len(consts)} constants checked; own files: {own or 'none'}")
     if theirs:
         print(f"   WARNING (Fork 3 files, reported, not edited): {theirs}")
-    ok = bad == 0 and all(caught) and not own
+    print("\n== free talk must not restate an offer")
+    talk_ok = talk_prompts_forbid_restating()
+    ok = bad == 0 and all(caught) and not own and talk_ok
     print("\nRESULT:", "PASS" if ok else "FAIL")
     sys.exit(0 if ok else 1)

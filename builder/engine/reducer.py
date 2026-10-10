@@ -192,6 +192,8 @@ def vocab(policy):
 
     table = (policy.get('closing') or dict()).get('table') or []
 
+    xfer_out = set(pair(r)[0] for r in rows('restructure') + rows('human') if pair(r)[0])
+
     def pick(label, value, key=None):
         if value and value[0]:
             return value
@@ -200,7 +202,8 @@ def vocab(policy):
             log.append(label + ' missing: closing row ' + key + ' used')
             return pair(row)
         rx = WHEN_RX.get(key)
-        row = next((r for r in table if rx and _none(r.get('reason')) and re.search(rx, str(r.get('when') or ''), re.I)), None)
+        row = next((r for r in table if rx and _none(r.get('reason')) and re.search(rx, str(r.get('when') or ''), re.I)
+                    and not (key == 'hardship' and _none(r.get('outcome')) in xfer_out)), None)
         if row:   # a renamed code (refused -> no_commitment): the closing row whose 'when' describes the situation
             log.append(label + ' missing: closing row by its when (' + str(row.get('reason')) + ') used')
             return pair(row)
@@ -209,7 +212,11 @@ def vocab(policy):
     hard = [r for r in rows('hardship') if _none(r.get('outcome'))]
     # accepted = the transfer to the hardship queue (its closing reason is the queue name); declined = any other row
     hq = queue_for(policy, 'hardship')
-    is_acc = lambda r: bool(hq) and _none(r.get('reason')) == hq
+    xfer_out = set(pair(r)[0] for r in rows('restructure') + rows('human') if pair(r)[0]) - set([pair(r)[0] for r in rows('paid')])
+    if tool_absent(policy, 'transfer_to_agent'):
+        xfer_out = set()
+    # accepted = the transfer to the hardship queue: its reason names the queue, or its outcome is the transfer outcome
+    is_acc = lambda r: bool(hq) and (_none(r.get('reason')) == hq or _none(r.get('outcome')) in xfer_out)
     acc_row = next((r for r in (policy.get('closing') or dict()).get('table') or [] if is_acc(r)), None)
     hard_accept = next((r for r in hard if is_acc(r)), acc_row)
     hard_decline = next((r for r in hard if not is_acc(r)), None)
@@ -305,7 +312,7 @@ def init_state(policy, call_vars=None):
 
 # ---------------------------------------------------------------- products
 def _round(v, how, to):
-    q = 1.0 if str(to or '').lower() in ('unit', 'units', 'whole', 'integer', '1') else 0.01
+    q = 1.0 if str(to or '').lower() in ('unit', 'units', 'whole', 'integer', '1') else (_num(to) or 0.01)
     x = v / q
     if abs(x - round(x)) <= 1e-6:
         x = round(x)                   # already whole (float noise)
@@ -336,7 +343,7 @@ def _floor(policy, row):
         return full
     kind = str(fb.get('kind') or ('account_field' if fb.get('field') else '')).lower()
     pct, fix = _num(fb.get('percent')), _num(fb.get('amount') if fb.get('amount') is not None else fb.get('fixed'))
-    how, to = str(fb.get('round') or fb.get('rounding') or 'nearest').lower(), fb.get('round_to') or fb.get('to')
+    how, to = str(fb.get('round') or fb.get('rounding') or 'nearest').lower(), fb.get('round_to') or fb.get('to') or fb.get('increment')
     if kind in ('field', 'account_field') and fb.get('field') and row.get(fb['field']) is not None:
         v = float(row.get(fb['field']))
     elif kind in ('percent', 'percent_of_past_due') and pct is not None:
@@ -542,6 +549,19 @@ def load_products(policy, st, rows, today):
         st['_pd'].append(dict(id=str(r.get('product_id')), type=str(r.get('type')), name=_name(policy, r), past_due=float(r.get('past_due') or 0),
                               days_late=dl, floor=_floor(policy, r), band=band.get('name'), deadline=iso(dline),
                               plan=_plan(policy, band), too_much=False, note_reason=None, refused_offers=[]))
+    distinct_names(st)
+
+
+def distinct_names(st):
+    """Products that share a spoken name ('loan', 'loan') are named by their type instead, then numbered."""
+    names = [pd['name'] for pd in st['_pd']]
+    for i, pd in enumerate(st['_pd']):
+        if names.count(pd['name']) > 1:
+            pd['name'] = str(pd.get('type') or pd['name']).replace('_', ' ')
+    names = [pd['name'] for pd in st['_pd']]
+    for i, pd in enumerate(st['_pd']):
+        if names.count(pd['name']) > 1:
+            pd['name'] = '%s %d' % (pd['name'], names[:i + 1].count(pd['name']))
 
 
 def _p(st, i):
@@ -589,7 +609,8 @@ def readback_line(policy, st, items, clamped):
         if it['product_id'] in clamped:
             s += ', the latest date I can record for it'
         parts.append(s)
-    conf = sentence(policy, 'confirm') or sentence(policy, 'readback_confirm') or sentence(policy, 'confirm_readback') or 'Do you confirm?'
+    conf = sentence(policy, 'confirm') or sentence(policy, 'readback_confirm') or sentence(policy, 'confirm_readback') or \
+        sentence(policy, 'confirm_arrangement') or 'Do you confirm?'
     return 'To confirm, ' + '; '.join(parts) + '. ' + conf
 
 
@@ -602,6 +623,24 @@ def ask(st, text, q):
 
 OUR_OFFERS = ('floor', 'attempt_n')   # offers the agent proposed (PUB-06); a read-back of the customer's own date is re-said
 RESAY_CAP = 3   # DEFAULT cap for every q: the same open question re-said this many times in a row, then loop_break()
+D_OFFER_NUDGE = "Sorry, I didn't catch that. Can you manage that?"   # contract default: no amount, date, or floor clause
+
+
+def offer_is_open(st):
+    return st.get('q') == 'offer' and (st.get('offer') or dict()).get('kind') in OUR_OFFERS
+
+
+def offer_chatter(st):
+    """Chatter (kind=other or a partial) while our offer is open: a short neutral line, never free talk.
+    The offer itself is spoken in full only once per attempt. After the cap, the open question's on-cap path."""
+    key = (st['offer'].get('amount'), st['offer'].get('date'), st['offer'].get('kind'))
+    if st.get('_offer_chat_key') != key:
+        st['_offer_chat'], st['_offer_chat_key'] = 0, key
+    st['_offer_chat'] = st.get('_offer_chat', 0) + 1
+    if st['_offer_chat'] > RESAY_CAP:
+        st['_offer_chat'] = 0
+        return dict(type='_loop')
+    return ask(st, D_OFFER_NUDGE, 'offer')
 
 
 def resay(st, prefix=''):
@@ -1135,6 +1174,15 @@ def date_event(policy, st, ev, today, cv):
         return resay(st)
     amt = ev.get('amt')
     multi = len(st['products']) > 1
+    if ev.get('also') == 'reject':
+        # 'No, I cannot pay that on the twenty-second' (raw-3 live): a date with a reject cue that is the day we
+        # offered, or a day already refused, is a refusal of that day, never a proposal of it
+        refused = set(x[1] for pd in st['_pd'] for x in pd.get('refused_offers') or [])
+        refused |= set(it['date'] for it in ((st.get('readback') or dict()).get('items') or []) if st['q'] in ('readback', 'what_to_change'))
+        if iso(named) == (st.get('offer') or dict()).get('date') or iso(named) in refused:
+            if st['q'] in ('readback', 'what_to_change'):
+                return no_event(policy, st, dict(kind='no'), today, cv)
+            return reject_event(policy, st, dict(why='flat'), today, cv)
     targets = list(range(len(st['products']))) if (ev.get('prod') == 'all' or (multi and st['cur'] is None and not ev.get('prod'))) else None
     if targets is None:
         idx = st['cur'] if st['cur'] is not None else 0
@@ -1143,17 +1191,32 @@ def date_event(policy, st, ev, today, cv):
         targets = [idx]
     if len(targets) > 1:   # one date for all: per-product decision, clamp without separate acceptance
         st['_clamped'] = []
+        said = ''
         for i in targets:
             p, pd = _p(st, i)
+            if p['status'] == 'refused' and not p.get('note'):
+                p['status'] = 'open'      # the customer's own date for every product revives one refused on our offers
+            if p['status'] == 'agreed' and st['q'] in ('readback', 'what_to_change'):
+                p['status'] = 'open'      # a new day for every product at the read-back replaces the agreed one
             if p['status'] not in ('open', 'proposed'):
                 continue
-            r = decide(today, pd['days_late'], 'exact', named, 0, policy)
+            r = date_verdict(policy, today, pd, named)
+            if r['reason'] == 'refuse':
+                continue                  # this product cannot take that day: left open, its offers follow
             d = r['accepted'] or _d(pd['deadline'])
             if r['reason'] == 'after_deadline':
                 st['_clamped'].append(p['id'])
-            p['status'], p['offer'] = 'agreed', dict(amount=float(amt) if amt else pd['past_due'], date=iso(d))
+            if r['reason'] == 'non_business_day' and not said:   # say why the day moved (raw-2 PUB-11), once
+                said = ' '.join(x for x in re.split(r'(?<=[.?!])\s+', fill_date(r['say'], r)) if x and not x.endswith('?'))
+            # one amount never goes to several products (raw-2 surface: 220 + 640 + 75 summed to 935): only a product
+            # whose own amount it is takes it, every other product its own full amount
+            own = _num(amt) if amt and _num(amt) is not None and abs(_num(amt) - pd['past_due']) < 0.005 else None
+            p['status'], p['offer'] = 'agreed', dict(amount=own if own is not None else (pd['floor'] if pd['too_much'] else pd['past_due']), date=iso(d))
         st['offer'] = None
-        return after_resolved(policy, st, today, cv)
+        out = after_resolved(policy, st, today, cv)
+        if said and out.get('type') == 'say_exact':
+            out = dict(out, text=said + ' ' + out['text'])
+        return out
     i = targets[0]
     p, pd = _p(st, i)
     r = date_verdict(policy, today, pd, named)
@@ -1323,6 +1386,9 @@ def amount_event(policy, st, ev, today, cv):
     except Exception:
         return resay(st)
     date = (st['offer'] or dict()).get('date') or iso(today)
+    o = st.get('offer') or dict()
+    if st['q'] in ('offer', 'pay_today') and o.get('amount') is not None and abs(amt - float(o['amount'])) < 0.005:
+        return yes_event(policy, st, today, cv)     # 'Yes, I can pay the full 540': the open offer's own amount (biz-1 PUB-07)
     kind, x = accept_rule(policy)
     full = pd['past_due']
     low = x if kind == 'min_x' and x is not None else pd['floor']
@@ -1427,7 +1493,16 @@ def queue_for(policy, key):
     return None
 
 
+def tool_absent(policy, tool):
+    return str(((policy.get('tool_status') or dict()).get(tool) or dict()).get('status') or '') == 'absent'
+
+
 def transfer(policy, st, key, cv):
+    if tool_absent(policy, 'transfer_to_agent'):     # the API has no transfer: the situation closes with its own codes
+        o, r = (V(policy)['xfer'].get(key) or V(policy)['refused'])
+        if st['verified'] != 'yes':
+            o, r = V(policy)['declined'] if st['who'] == 'self' else V(policy)['unclear']
+        return do_close(policy, st, o, r, D_FAREWELL)
     queue = queue_for(policy, key)
     pre = (policy.get('transfer') or dict()).get('pre_verification_queues') or []
     if not queue:                      # the brief gives no queue for this transfer: say so once, keep the call going
@@ -1458,11 +1533,15 @@ def no_restated_amount(st, act):
     said, spoken = list(st.get('_offered') or []), st.get('_spoken') or []
     key = 'text' if act['type'] == 'say_exact' else 'hint'
     t = act.get(key) or ''
+    repeated = False
     for a in re.findall(AMT, t):
         if a in said:
+            repeated = True
             t = re.sub(r'pay ' + re.escape(a) + r' for', 'make that payment for', t)
         if a in said or (a in spoken and (st.get('offer') or dict()).get('kind') == 'customer'):   # PUB-07 / PUB-04
             t = re.sub(r'\s*That is ' + re.escape(a) + r' for your [^.?]*\.', '', t)
+    if repeated:
+        t = t.replace(D_OVERDUE, '')   # the floor clause belongs to the one full statement of that offer
     new = [a for a in re.findall(r'(?:pay|That is) (' + AMT + r') for', t) if a not in said]
     if new:
         st['_offered'] = said + new
@@ -1621,7 +1700,9 @@ def loop_break(policy, st, today, cv):
         if st['who'] == 'other' or q == 'callback_time':
             o, r = v['callback_failed']
         elif st['who'] == 'self' and q.startswith('id_') and st['identity'].get('refusals', 0) >= 1:
-            o, r = v['declined']        # declined only after an explicit refusal; no answer at all is unclear
+            o, r = v['declined']        # an explicit refusal
+        elif st['who'] == 'self' and q.startswith('id_'):
+            o, r = id_unfinished(policy)  # no answer: the brief's 'not verified before the end' close
         else:
             o, r = v['unclear']
         return do_close(policy, st, o, r, D_FAREWELL)
@@ -1750,6 +1831,8 @@ def topic_event(policy, st, ev, today, cv):
 # ---------------------------------------------------------------- per-phase user handling
 def on_user(policy, st, ev, today, cv):
     if ev.get('st') == 'partial':
+        if offer_is_open(st) and ev.get('kind') in (None, '', 'other'):
+            return offer_chatter(st)     # a cut-off chat is not a second statement of the offer
         if st['phase'] == 'identity' and ev.get('kind') == 'identity' and str(st.get('q') or '').startswith('id_'):
             idt, qs = st['identity'], (policy.get('identity') or dict()).get('questions') or []
             fmt = str(qs[idt['idx']].get('format') or '') if idt['idx'] < len(qs) else ''
@@ -1802,6 +1885,8 @@ def on_user(policy, st, ev, today, cv):
         return date_event(policy, st, ev, today, cv)
     if k == 'amount':
         return amount_event(policy, st, ev, today, cv)
+    if k == 'other' and offer_is_open(st):
+        return offer_chatter(st)         # do not hand the open offer to free talk
     if st['q'] == 'offer' and (st.get('offer') or dict()).get('kind') in OUR_OFFERS:
         st['q'], st['_last_ask'] = 'exact_day', D_WHICH_DAY    # the free reply never re-proposes the heard offer
     return dict(type='speak_free', node=_talk_node(st), hint=reask_line(st) if st.get('_last_ask') else '')
@@ -1898,7 +1983,12 @@ def reask_name(policy, st, cv, prefix=''):
     out = ask(st, q, 'confirm_name')
     if prefix:
         out['text'] = (prefix + ' ' + out['text']).strip()
+    elif out['text'] == q:                   # worded differently from the greet's question
+        out['text'] = (D_JUST_CHECK + ' ' + q).strip()
     return out
+
+
+D_JUST_CHECK = 'Just to be sure:'
 
 
 def _callback_ok(policy, st, d, tm, today, now_time):
@@ -2082,6 +2172,15 @@ def identity(policy, st, ev, today, cv):
     return resay(st)
 
 
+def id_unfinished(policy):
+    """A customer who confirmed the name but never finished the security questions (biz-1 surface PUB-10): the brief's
+    hangup_default.before_verified close, else the declined slot (the not-verified family, never a callback code)."""
+    h = (policy.get('hangup_default') or dict()).get('before_verified') or dict()
+    if isinstance(h, dict) and _none(h.get('outcome')):
+        return _none(h.get('outcome')), _none(h.get('reason'))
+    return tuple(V(policy)['declined'])
+
+
 ID_OTHER_CAP = 6     # DEFAULT hard cap: this many turns with no answer to a security question, then the unclear slot
 
 
@@ -2090,7 +2189,7 @@ def id_reask(policy, st):
     unclear slot (no refusal was said)."""
     st['_id_other'] = st.get('_id_other', 0) + 1
     if st['_id_other'] > ID_OTHER_CAP:
-        o, r = V(policy)['unclear']
+        o, r = id_unfinished(policy) if st.get('who') == 'self' else V(policy)['unclear']
         return do_close(policy, st, o, r, D_FAREWELL)
     idt, qs = st['identity'], (policy.get('identity') or dict()).get('questions') or []
     q = (qs[idt['idx']].get('ask') if idt['idx'] < len(qs) else '') or D_SAFE
@@ -2225,6 +2324,54 @@ def _dump(st, sep=None):
     return s
 
 
+CLOSE_PREF = dict(refused=('refused', 'dispute', 'hardship', 'write'), dispute=('dispute', 'refused', 'hardship', 'write'),
+                  hardship=('hardship', 'refused', 'dispute', 'write'), write_failed=('write', 'refused', 'dispute', 'hardship'))
+
+
+def close_retry(policy, st, data):
+    """close_call came back rejected (ok false or an error): the same outcome once more, with the reason the error
+    allows (contract-closest by the close's family: refused, dispute, hardship, write failure), else the outcome's
+    first reason in the closing table. -> (outcome, reason) or None when already retried."""
+    if st.get('_close_retried'):
+        return None
+    st['_close_retried'] = True
+    v, o, r = V(policy), st.get('outcome'), st.get('reason')
+    text = json.dumps(data) if not isinstance(data, str) else data
+    m = re.search(r'reasons?[^:]*:\s*([a-z_ ,]+)', text, re.I)
+    allowed = [x.strip() for x in re.split(r'[ ,]+', m.group(1)) if x.strip() and x.strip() not in ('and', 'or')] if m else []
+    fam = next((k for k in ('dispute', 'hardship', 'write_failed') if tuple(v[k]) == (o, r)), 'refused')
+    names = dict(refused=v['refused'][1], dispute=v['dispute'][1], hardship=v['hardship'][1], write=v['write_failed'][1])
+    for key in CLOSE_PREF[fam]:
+        for cand in (names.get(key), key if key != 'write' else None):
+            if cand and cand in allowed:
+                return o, cand
+    if allowed:
+        return o, allowed[0]
+    row = next((x for x in (policy.get('closing') or dict()).get('table') or [] if _none(x.get('outcome')) == o
+                and _none(x.get('reason')) and _none(x.get('reason')) != r), None)
+    return o, (_none(row.get('reason')) if row else None)
+
+
+def close_hub(vars, policy, st):
+    """The hub run after close_call: accepted -> end; rejected -> one retry (route close_retry, no second farewell);
+    rejected again -> end, never a loop."""
+    s0, f0 = st['_close_snap']
+    s, f = _int(vars.get('t_close_call_success_count')), _int(vars.get('t_close_call_failure_count'))
+    data = _jsonish(vars.get('close_call_data'))
+    if not isinstance(data, dict):
+        data = _flat_data(vars, 't_close_call_response.data.')
+    ok = str((data or dict()).get('ok')).lower()
+    rejected = f > f0 or (s > s0 and ok == 'false') or (s == s0 and f == f0 and ok == 'false')
+    st['_close_snap'] = [s, f]
+    nxt = close_retry(policy, st, data) if rejected else None
+    if nxt:
+        st['outcome'], st['reason'] = nxt
+        vars['route'], vars['close_outcome'], vars['close_reason'] = 'close_retry', nxt[0] or '', nxt[1] or ''
+    else:
+        vars['route'] = 'end'
+    vars['st'] = _dump(st)
+
+
 def hub_main(vars, policy):
     cvmap = (policy.get('meta') or dict()).get('call_vars') or dict()
     cv = dict((role, vars.get(name)) for role, name in cvmap.items())
@@ -2233,6 +2380,8 @@ def hub_main(vars, policy):
     if not isinstance(st, dict):
         st = init_state(policy, cv)
     st['tok'] = str(vars.get('ev_tok') or st.get('tok') or 'kstart')
+    if st.get('phase') == 'closed' and st.get('_close_snap') is not None:
+        return close_hub(vars, policy, st)        # back from t_close_call: a rejected close is retried once
     try:
         te = read_tool(vars, st)
         extra = [x.get('id') for x in policy.get('extra_topics') or [] if isinstance(x, dict) and x.get('id')]
@@ -2263,6 +2412,8 @@ def hub_main(vars, policy):
         if not o:
             o, r = slot(policy, 'unclear')
     vars['close_outcome'], vars['close_reason'] = o or '', r or ''
+    if t == 'close':     # the counters before close_call: a later hub run can see whether it was accepted
+        st2['_close_snap'] = [_int(vars.get('t_close_call_success_count')), _int(vars.get('t_close_call_failure_count'))]
     vars['route_ok'] = 'yes' if st2.get('verified') == 'yes' else 'no'
     vars['xfer_pre'] = st2.get('_xfer_pre') or 'no'
     if st2.get('_hook_skip'):

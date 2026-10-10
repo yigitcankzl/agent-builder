@@ -395,10 +395,22 @@ def synthetic_fixes():
           "a 'Can I note ...?' question does not enable notes")
     check(not B.notes_asked("Do not use add_note. Any transfer suppresses all notes."), "'Do not use add_note' disables notes")
     check(B.notes_asked("For paid or dispute on one product, add the matching note and continue."), "'add the matching note' enables notes")
+    check(B.notes_asked("Then create_promise once per product. For each product with no promise, add a note: refused, hardship.\n"
+                        "Everything else still applies, including notes on products with no promise, and no notes after a transfer."),
+          "raw-2: 'For each product with no promise, add a note' enables notes ('no notes after a transfer' is no ban)")
+    check(not B.notes_asked("Do not add a note for a paid product. Can I note that you are not paying?"), "'do not add a note' is no instruction")
     check(B.note_reasons(["refused", "dispute_x"], "note_reason,dispute,DISPUTE_NOTE,dispute_x\n") == {"refused": "refused", "dispute": "dispute_x"},
           "note reasons: the same OAS value or the codes row, else left out")
     check(B.default_ask({"field": "phone_last4"}) == "Could you confirm the last four digits of your phone number, please?",
           "an empty ask gets the contract default")
+    Q = [{"file": "b.md", "quote": "The floor is 33.33% of past_due, rounded nearest to 0.05."}]
+    check(B.floor_spec({"kind": "percent", "percent": 33.33, "round": "nearest", "to": "0.05"}, [], Q)[0].get("to") == 0.05,
+          "floor rounding increment 0.05 kept (quote on the products block)")
+    check(B.floor_spec({"kind": "percent", "percent": 33.33, "round": "nearest"}, [], Q)[0].get("to") == 0.05,
+          "a missing increment is read from the floor quote")
+    check("to" not in B.floor_spec({"kind": "percent", "percent": 33.33, "round": "nearest", "to": 0.25}, [], Q)[0],
+          "an increment no quote states is dropped")
+    check(B.round_step(None, [{"quote": "rounded up to the nearest 5 cents"}]) == 0.05, "'nearest 5 cents' -> 0.05")
     p = copy.deepcopy(BASE)
     p["identity"]["questions"][0]["ask"] = ""
     rp, _ = B.to_reducer(p, OAS, [])
@@ -407,13 +419,54 @@ def synthetic_fixes():
     check(any("empty ask" in e for e in validate(generate(rp, OAS), rp, OAS)), "validator 3 catches an empty identity ask")
 
 
+def close_enum():
+    print("== every close is an exact OAS enum value (a rejected close_call leaves the ledger empty)")
+    import tempfile
+    o = json.load(open(OAS))
+    for path, ops in o["paths"].items():
+        if path.strip("/").endswith("close_call"):
+            body = ops["post"]["requestBody"]["content"]["application/json"]["schema"]["properties"]
+            body["reason"]["enum"] = ["refused", "hardship", "dispute", "service_error", "callback", "no_callback",
+                                      "wrong_number", "deceased", "unclear", "failed", "declined", "restructuring", "human"]
+    oas = os.path.join(tempfile.mkdtemp(), "openapi.json")
+    json.dump(o, open(oas, "w"))
+    x = {"extra_topics": [{"id": "complaint", "effect": "close", "outcome": "no_promise", "reason": "complaint"}],
+         "events": [{"topic": "complaint", "outcome": "no_promise", "reason": "complaint"},
+                    {"topic": "dispute", "outcome": "no_promise", "reason": "dispute"}]}
+    notes = B.close_enum_guard(x, ["no_promise"], ["dispute"], lambda *a: None)
+    check(x["extra_topics"] == [], "an extra topic whose close reason is not in the enum is dropped")
+    check(x["events"][0]["outcome"] == "" and x["events"][0]["brief_reason"] == "complaint", "a non-enum event close falls back to the normal flow")
+    check(x["events"][1]["reason"] == "dispute", "an enum close is kept")
+    check(any("ASSUMPTION" in n for n in notes), "the dropped close is an ASSUMPTION note")
+    rp, _ = B.to_reducer(copy.deepcopy(BASE), oas, [])
+    check(not [e for e in validate(generate(rp, oas), rp, oas) if e.startswith("14")], "bridged policy passes check 14")
+    rp["extra_topics"] = [{"id": "complaint", "trigger": "make a complaint", "effect": "close", "outcome": "no_promise", "reason": "complaint"}]
+    check(any("extra_topics[0] reason 'complaint'" in e for e in validate(generate(rp, oas), rp, oas)),
+          "validator 14 catches a non-enum extra_topics reason")
+
+
+def sentence_keys():
+    print("== the brief's sentences land on keys the agent reads; only real call variables are spoken")
+    p = copy.deepcopy(BASE)
+    p["sentences"] = dict(p.get("sentences") or {},
+                          confirm_arrangement={"text": "Do you confirm this arrangement?", "source": src("x")},
+                          odd_line={"text": "Our offices close at noon on Fridays.", "source": src("y")},
+                          confirm_who={"text": "Am I speaking with {first_name} {last_name}, the contact for {company}?", "source": src("z")})
+    rp, rep = B.to_reducer(p, OAS, [], "Say: Am I speaking with {first_name} {last_name}, the contact for {company}?")
+    check(rp["sentences"]["confirm_readback"]["text"] == "Do you confirm this arrangement?", "confirm_arrangement -> confirm_readback (alias)")
+    check(any("NOT SPOKEN" in n and "odd_line" in n for n in rep["notes"]), "a quoted sentence no key reads is a loud NOT SPOKEN note")
+    g = generate(rp, OAS)["nodes"]["greet"]["on_enter"]["text"]
+    check("company" not in g and "{{first_name}}" in g, f"an undeclared placeholder is not bound by convention: {g!r}")
+    check("company_name" not in str((rp.get("meta") or {}).get("call_vars")), "call_vars stay the brief's own")
+
+
 def gap2_exact():
     q = {"field": "postcode", "format": "postcode", "format_evidence": {"source": src("Send the postcode exactly as said, letters and digits.")}}
     check(B.answer_format(q)[0] == "free", "'exactly as said' wins over the postcode format -> free")
 
 
 if __name__ == "__main__":
-    for g in (gap1, gap2, gap2_exact, gap3, gap4, regressions, derive_fixes, integration_fixes, honesty, bank_names, placeholders, too_much, rehearsal, assistant_disclosure, synthetic_fixes):
+    for g in (gap1, gap2, gap2_exact, gap3, gap4, regressions, derive_fixes, integration_fixes, honesty, bank_names, placeholders, too_much, rehearsal, assistant_disclosure, synthetic_fixes, close_enum, sentence_keys):
         g()
     print("RESULT:", "PASS" if not fails else f"FAIL ({len(fails)})")
     sys.exit(1 if fails else 0)

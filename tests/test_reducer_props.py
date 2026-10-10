@@ -225,8 +225,8 @@ def loop_caps():
         "opening/confirm_name": ([], "unclear"),
         "opening/help_first": (["kind=topic;also=none;st=complete;prod=;t=human"], None),
         "third_party/callback_time": ([EVENTS[1]], "callback_failed"),
-        "identity/id_": ([WHO], "unclear"),            # no answer at all is not a refusal
-        "identity/id_2": ([WHO, DOB, OK], "unclear"),
+        "identity/id_": ([WHO], "unfinished"),          # no answer at all is not a refusal: not verified (unfinished)
+        "identity/id_2": ([WHO, DOB, OK], "unfinished"),
         "identity/id_ after a refusal": ([WHO, "kind=topic;also=none;st=complete;prod=;t=decline"], "declined"),
         "negotiation/pay_today": ([WHO, DOB, OK, PH, ALL, dict(products=A)], None),
         "negotiation/offer": ([WHO, DOB, OK, PH, ALL, dict(products=A), EVENTS[7]], None),
@@ -279,7 +279,7 @@ def loop_caps():
                     break
             check(st["phase"] == "closed" or (st.get("pending") or dict()).get("op") == "transfer", f"{name} {label}: never ended")
             if slot and st["phase"] == "closed":
-                check((st["outcome"], st["reason"]) == tuple(v[slot]), f"{name} {label}: closed {st['outcome']}/{st['reason']} != {slot} {v[slot]}")
+                check((st["outcome"], st["reason"]) == (tuple(R.id_unfinished(pol)) if slot == "unfinished" else tuple(v[slot])), f"{name} {label}: closed {st['outcome']}/{st['reason']} != {slot} {v.get(slot)}")
             n += 1
     return n
 

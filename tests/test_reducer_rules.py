@@ -89,6 +89,34 @@ def floor_once():
     return True
 
 
+def offer_chatter_live():
+    """Brief A PUB-06 live (talkative, call aebcf2a9): the floor offer, then a partial chat, then kind=other.
+    Neither turn is free talk, and neither restates 637.50 or 'The rest stays overdue.'"""
+    c = [c for c in FIX["cases"] if c["id"] == "PUB-06"][0]
+    pol, cv = POL[c["policy"]], c["call_variables"]
+    st = R.init_state(pol, cv)
+    for s in c["steps"][:7]:
+        if s["source"] == "user":
+            st["tok"] = s["event_fields"]["n"]
+            st, a = R.step(pol, st, R.parse_event(s["event"], st, TOPICS), None, c["now"], cv)
+            st["last_tok"] = st["tok"]
+        else:
+            st, a = R.step(pol, st, None, s["tool_event"], c["now"], cv)
+    check("637.50" in a["text"] and "overdue" in a["text"], f"the floor offer is said once: {a}")
+    check(st["q"] == "offer", f"the offer stays open: {st['q']}")
+    for i, body in enumerate(("kind=other;also=none;st=partial;prod=", "kind=other;also=none;st=none;prod=")):
+        st["tok"] = "kc" + "abcdefghjk"[i] * 4
+        st, a = R.step(pol, st, R.parse_event("n=" + st["tok"] + ";src=user;" + body, st, TOPICS), None, c["now"], cv)
+        st["last_tok"] = st["tok"]
+        said = a.get("text") or a.get("hint") or ""
+        check(a["type"] == "say_exact", f"chatter must not go to free talk: {a}")
+        check("637.50" not in said and "overdue" not in said.lower() and "Could you pay" not in said,
+              f"the offer was stated again after {body}: {said}")
+        check(said == R.D_OFFER_NUDGE, f"neutral re-ask: {said}")
+        check(st["q"] == "offer", f"the offer stays the open question: {st['q']}")
+    return True
+
+
 def blocked_identity():
     """mut-04 (policy-extract f8a2aca, copied read-only): identity.blocked -> after the name is confirmed, close on the
     blocked/on_fail slot; no blocked question is ever asked, no account fact, no get_account."""
@@ -382,7 +410,7 @@ def identity_chatter():
         st, a = say(pol, st, "kind=who;also=none;st=complete;prod=;who=self;party=")
         for _ in range(R.ID_OTHER_CAP + 1):
             st, a = say(pol, st, "kind=other;also=none;st=none;prod=")
-        check(a["type"] == "close" and (a["outcome"], a["reason"]) == tuple(v["unclear"]), f"{name}: hard cap -> unclear: {a}")
+        check(a["type"] == "close" and (a["outcome"], a["reason"]) == tuple(R.id_unfinished(pol)), f"{name}: hard cap -> not verified (unfinished): {a}")
         st = R.init_state(pol, CV)
         st, a = say(pol, st, "kind=who;also=none;st=complete;prod=;who=self;party=")
         for _ in range(2):
@@ -438,7 +466,153 @@ def ev_bank_shapes():
     return True
 
 
+def close_rejected():
+    """Live nightmare-1 PUB-09: the mock rejected close_call ('this outcome needs one of these reasons: ...') and the
+    ledger was left empty. A rejected close is retried once with an allowed reason (contract-closest by family), then
+    the call ends; an accepted close ends at once; never a loop. Through the hub string."""
+    pol = POL["A"]
+    st = to_readback(pol)
+    st["q"], st["phase"] = "pay_today", "negotiation"
+    st, a = say(pol, st, "kind=topic;also=none;st=complete;prod=;t=stop")
+    st, a = say(pol, st, "kind=topic;also=none;st=complete;prod=;t=stop")
+    while a["type"] == "call_tool":
+        st, a = tool(pol, st, dict(ok=True))
+    check(a["type"] == "close", f"a close to reject: {a}")
+    code = compile(R.hub_source(pol), "hub", "exec")
+    base = dict(CV, st=R._dump(dict(st, _close_snap=[0, 0])))
+    v = dict(base, t_close_call_success_count=1, t_close_call_failure_count=0,
+             close_call_data=R.json.dumps(dict(ok=False, error="this outcome needs one of these reasons: dispute, hardship, service_error")))
+    exec(code, dict(vars=v))
+    check(v["route"] == "close_retry" and v["close_outcome"] == a["outcome"] and v["close_reason"] in ("dispute", "hardship", "service_error"),
+          f"one retry with an allowed reason: {v.get('route')} {v.get('close_outcome')} {v.get('close_reason')}")
+    v2 = dict(v, t_close_call_success_count=2)
+    exec(code, dict(vars=v2))
+    check(v2["route"] == "end", f"rejected again -> end, no loop: {v2.get('route')}")
+    v3 = dict(base, t_close_call_success_count=1, t_close_call_failure_count=0, close_call_data=R.json.dumps(dict(ok=True)))
+    exec(code, dict(vars=v3))
+    check(v3["route"] == "end", f"accepted -> end: {v3.get('route')}")
+    v4 = dict(base, t_close_call_success_count=0, t_close_call_failure_count=1, close_call_data="")
+    exec(code, dict(vars=v4))
+    check(v4["route"] == "close_retry" and v4["close_outcome"] == a["outcome"], f"an HTTP failure: one retry: {v4.get('route')}")
+    return True
+
+
+def hedged_denial():
+    """Fork 5 retest: 'I don't think so' to the name question came as wrong_number. The prompt now reserves
+    party=wrong_number for a clear statement; a hedged denial is who=unclear: the name is re-asked once, worded
+    differently, and the call is not closed."""
+    for name, pol in POL.items():
+        st = R.init_state(pol, CV)
+        st, a = say(pol, st, "kind=who;also=none;st=complete;prod=;who=unclear;party=")
+        check(a["type"] == "say_exact" and a["text"].startswith(R.D_JUST_CHECK) and st["phase"] == "opening", f"{name}: hedged -> re-ask: {a}")
+        st, a = say(pol, st, "kind=who;also=none;st=complete;prod=;who=other;party=wrong_number")
+        check(a["type"] == "close", f"{name}: a clear wrong number closes: {a}")
+    return True
+
+
+def offer_echo_accepts():
+    """biz-1 live PUB-07 (a6c54fef): offered 540 on Tuesday 20 October, 'Yes, I can pay the full 540' came as
+    kind=amount;amt=540 and the offer was re-proposed. The open offer's own amount, date, or date and amount is an
+    acceptance -> read-back. A different amount is still a proposal."""
+    for name, pol in POL.items():
+        st0 = to_readback(pol)
+        st0["q"], st0["phase"] = "pay_today", "negotiation"
+        st0["products"][0]["status"], st0["products"][0]["offer"] = "open", None
+        st0, a = say(pol, st0, "kind=no;also=none;st=complete;prod=")
+        o = st0["offer"]
+        check(st0["q"] == "offer" and o, f"{name}: an open offer: {a}")
+        y, m, d = o["date"].split("-")
+        for body in ("kind=amount;also=none;st=complete;prod=;amt=%s" % o["amount"],
+                     "kind=date;also=accept;st=complete;prod=;rel=;d=%d;m=%d;wd=;wk=none;vague=no" % (int(d), int(m)),
+                     "kind=date;also=amount;st=complete;prod=;rel=;d=%d;m=%d;wd=;wk=none;vague=no;amt=%s" % (int(d), int(m), o["amount"])):
+            x, a = say(pol, R.json.loads(R.json.dumps(st0)), body)
+            check(x["q"] == "readback" and "Do you confirm" in a["text"], f"{name}: {body} accepts: {a}")
+        x, a = say(pol, R.json.loads(R.json.dumps(st0)), "kind=amount;also=none;st=complete;prod=;amt=%s" % (float(o["amount"]) - 10))
+        check(x["q"] != "readback", f"{name}: a different amount is a proposal: {a}")
+    return True
+
+
+def multi_date_rules():
+    """raw-2 live: (surface PUB-11 6d842b96) one summed amt (935) for three products went to every product -> each
+    product keeps its own amount, a product refused on our offers revives on the customer's all-products date, names
+    are distinct; (PUB-11) a holiday named for all products is said before the read-back. A write answered 200 with
+    ok:false is a failure, never 'recorded'."""
+    import json
+    pol = json.load(open(os.path.join(ROOT, "tests/generated/rehearsal/raw-2.reducer_policy.json")))
+    cv = dict(customer_id="c_r11", first_name="Sofia", last_name="Almeida", title="Ms", now=NOW)
+    acc = [dict(product_id="p1", type="credit_card", past_due=220.0, days_late=9, minimum_payment=66.0),
+           dict(product_id="p2", type="personal_loan", past_due=640.0, days_late=9, instalment_amount=213.0),
+           dict(product_id="p3", type="car_loan", past_due=75.0, days_late=3, instalment_amount=25.0)]
+    st = R.init_state(pol, cv)
+    st, a = say(pol, st, "kind=who;also=none;st=complete;prod=;who=self;party=")
+    st, a = say(pol, st, "kind=identity;also=none;st=complete;prod=;field=date_of_birth;ans=1987-06-03;y=1987")
+    st, a = tool(pol, st, dict(verified=True, all_verified=False, wrong_answers_left=3))
+    st, a = say(pol, st, "kind=identity;also=none;st=complete;prod=;field=phone_last4;ans=2288")
+    st, a = tool(pol, st, dict(verified=True, all_verified=True, wrong_answers_left=3))
+    st, a = tool(pol, st, dict(products=acc))
+    names = [pd["name"] for pd in st["_pd"]]
+    check(len(set(names)) == 3, f"distinct product names: {names}")
+    s0 = R.json.loads(R.json.dumps(st))
+    st, a = say(pol, st, "kind=reject;also=none;st=complete;prod=all;why=flat")
+    st, a = say(pol, st, "kind=reject;also=none;st=complete;prod=;why=flat;rel=;d=;m=;wd=wed;wk=none;vague=no")
+    st, a = say(pol, st, "kind=date;also=amount;st=complete;prod=all;rel=;d=20;m=10;wd=tue;wk=none;vague=no;amt=935;y=2026")
+    check(st["q"] == "readback" and all(x in a["text"] for x in ("220.00", "640.00", "75.00")) and "935" not in a["text"], f"own amounts: {a}")
+    st, a = say(pol, s0, "kind=date;also=reject;st=complete;prod=all;rel=;d=19;m=10;wd=mon;wk=none;vague=no")
+    check(st["q"] == "readback" and "not a business day" in a["text"] and "20 October" in a["text"], f"the holiday said before the read-back: {a}")
+    # a write answered 200 with ok:false is a failure: retried, never 'recorded'
+    st, a = say(pol, st, "kind=yes;also=none;st=complete;prod=")
+    check(a["type"] == "call_tool" and a["tool"] == "create_promise", f"the first write: {a}")
+    p = st["pending"]
+    st, a = R.step(pol, st, None, dict(node=p["node"], success=p["snap_success"] + 1, failure=p["snap_failure"], status_code=200,
+                                       ok="false", data=dict(ok=False, error="rejected")), NOW, cv)
+    check(a["type"] == "call_tool" and a["tool"] == "create_promise" and "recorded" not in json.dumps(a), f"ok:false -> retry: {a}")
+    return True
+
+
+def date_reject_cues():
+    """raw-3-single live (3e3e65e0): 'No, I cannot pay that on the twenty-second' (kind=date;also=reject;d=22, the day we
+    offered) was read back as a promise on the 22nd; at what_to_change 'Tuesday works for all three' (prod=all) was
+    ignored. A reject-cued date equal to the offer (or a refused day) is a refusal; a prod=all day at the read-back
+    moves every product (refused ones revived). 'Not Friday, Tuesday works' still proposes Tuesday."""
+    import json
+    pol = json.load(open(os.path.join(ROOT, "tests/generated/rehearsal/raw-2.reducer_policy.json")))
+    cv = dict(customer_id="c_r3", first_name="Sofia", last_name="Almeida", title="Ms", now=NOW)
+    acc = [dict(product_id="p1", type="credit_card", past_due=220.0, days_late=9, minimum_payment=66.0),
+           dict(product_id="p2", type="personal_loan", past_due=640.0, days_late=9, instalment_amount=213.0),
+           dict(product_id="p3", type="car_loan", past_due=75.0, days_late=3, instalment_amount=25.0)]
+    st = R.init_state(pol, cv)
+    st, a = say(pol, st, "kind=who;also=none;st=complete;prod=;who=self;party=")
+    st, a = say(pol, st, "kind=identity;also=none;st=complete;prod=;field=date_of_birth;ans=1987-06-03;y=1987")
+    st, a = tool(pol, st, dict(verified=True, all_verified=False, wrong_answers_left=3))
+    st, a = say(pol, st, "kind=identity;also=none;st=complete;prod=;field=phone_last4;ans=2288")
+    st, a = tool(pol, st, dict(verified=True, all_verified=True, wrong_answers_left=3))
+    st, a = tool(pol, st, dict(products=acc))
+    st, a = say(pol, st, "kind=reject;also=none;st=complete;prod=all;why=flat")
+    st, a = say(pol, st, "kind=reject;also=none;st=complete;prod=;why=flat")
+    st, a = say(pol, st, "kind=reject;also=none;st=complete;prod=;why=flat")
+    o = st["offer"]
+    check(o and st["cur"] == 2, f"the car loan offer: {a}")
+    y, m, d = o["date"].split("-")
+    s_car = R.json.loads(R.json.dumps(st))
+    x, a = say(pol, R.json.loads(R.json.dumps(st)), "kind=date;also=reject;st=complete;prod=3;rel=;d=%d;m=%d;wd=;wk=none;vague=no" % (int(d), int(m)))
+    check(x["q"] != "readback" and x["products"][2]["status"] != "agreed", f"a refused offered day is no promise: {a}")
+    # 'not Friday, Tuesday works': a different day with a reject cue proposes it
+    x, a = say(pol, R.json.loads(R.json.dumps(s_car)), "kind=date;also=reject;st=complete;prod=3;rel=;d=20;m=10;wd=tue;wk=none;vague=no")
+    check(x["q"] == "readback" and "20 October" in a["text"], f"another day proposes: {a}")
+    # at what_to_change, a prod=all day moves every product, refused ones revived
+    x, a = say(pol, x, "kind=no;also=none;st=complete;prod=")
+    check(x["q"] == "what_to_change", f"what to change: {a}")
+    x, a = say(pol, x, "kind=date;also=none;st=complete;prod=all;rel=;d=;m=;wd=tue;wk=none;vague=no")
+    check(x["q"] == "readback" and all(v_ in a["text"] for v_ in ("220.00", "640.00", "75.00")), f"all three moved: {a}")
+    return True
+
+
 if __name__ == "__main__":
+    print("reject-cued dates and the all-products change (raw-3 live):", date_reject_cues())
+    print("multi-product dates: own amounts, revive, holiday said, ok:false fails (raw-2 live):", multi_date_rules())
+    print("the open offer's own amount/date accepts (biz-1 PUB-07):", offer_echo_accepts())
+    print("hedged denial re-asks the name:", hedged_denial())
+    print("close_call rejected -> one retry:", close_rejected())
     print("ev bank shapes (date+amount, no, call time, quoted amount):", ev_bank_shapes())
     print("opening: account topics imply the customer (nightmare PUB-09 live):", opening_self_topics())
     print("identity chatter is not a refusal (clean-1 surface PUB-07):", identity_chatter())
@@ -453,6 +627,7 @@ if __name__ == "__main__":
         print("live fixes (PUB-05 precedence, stale, terms once, robot+date):", name, live_fixes(pol, name))
     print("blocked identity (mut-04):", blocked_identity())
     print("floor once (PUB-06):", floor_once())
+    print("offer chatter does not restate the floor (PUB-06 live):", offer_chatter_live())
     for name, pol in POL.items():
         v = R.V(pol)
         # 1. an event that does not answer the name question: counted re-ask, never a bare safe_repeat; cap -> unclear

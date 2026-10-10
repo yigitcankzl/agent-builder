@@ -186,7 +186,11 @@ def validate(wf, rp, oas_path, unstable_quotes=()):
     if "t_create_promise" in nodes and not any(re.search(r"confirm", k + " " + t, re.I) for k, t in sent.items()):
         errs.append("5: no confirmation sentence in the policy before writes")
     # 6 closes
-    if [k for k, n in nodes.items() if "end" in _targets(n)] != ["t_close_call"]:
+    # the hub may also end, but only on route == end (after a close_call came back rejected: the close-retry path)
+    hub_end = [t for t in (nodes.get("hub") or {}).get("transitions") or [] if t.get("target_node") == "end"]
+    hub_end_ok = all([(c.get("variable"), c.get("operator"), c.get("operand")) for c in _flat_conds(t.get("condition"))]
+                     == [("route", "equals", "end")] for t in hub_end)
+    if [k for k, n in nodes.items() if "end" in _targets(n) and not (k == "hub" and hub_end_ok)] != ["t_close_call"]:
         errs.append(f"6: end is entered from {[k for k, n in nodes.items() if 'end' in _targets(n)]}, must be only t_close_call")
     if _targets(nodes.get("close_say", {})) and set(_targets(nodes["close_say"])) != {"t_close_call"}:
         errs.append("6: close_say must lead only to t_close_call")
@@ -311,6 +315,23 @@ def validate(wf, rp, oas_path, unstable_quotes=()):
                 errs.append(f"14: {coll} outcome {e['outcome']!r} not in the OAS enum")
             if e.get("note_reason") and e_n and e["note_reason"] not in e_n:
                 errs.append(f"14: {coll} note_reason {e['note_reason']!r} not in the OAS enum")
+    def closes(x, path):       # every {outcome, reason} the agent may send, wherever it sits (events, extra topics, gate...)
+        if isinstance(x, dict):
+            if x.get("blocked") or x.get("action") == "end_without_close":
+                return
+            if isinstance(x.get("outcome"), str) and x["outcome"]:
+                yield path, x.get("outcome"), x.get("reason")
+            for k, v in x.items():
+                if not k.startswith(("brief_", "_")):
+                    yield from closes(v, f"{path}.{k}")
+        elif isinstance(x, list):
+            for i, v in enumerate(x):
+                yield from closes(v, f"{path}[{i}]")
+    for path, o, r in closes({k: v for k, v in rp.items() if k not in ("closing", "api_mismatch", "unmapped_topics", "tool_args", "tool_results")}, "$"):
+        if e_out and o not in e_out:
+            errs.append(f"14: {path} outcome {o!r} not in the OAS enum (a rejected close_call leaves the ledger empty)")
+        if e_rsn and isinstance(r, str) and r and r not in e_rsn:
+            errs.append(f"14: {path} reason {r!r} not in the OAS enum (a rejected close_call leaves the ledger empty)")
     for k, q in ((rp.get("transfer") or {}).get("queue_map") or {}).items():
         if e_q and q not in e_q:
             errs.append(f"14: transfer.queue_map.{k} {q!r} not in the OAS enum")

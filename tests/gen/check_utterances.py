@@ -10,12 +10,14 @@ from collections import Counter, defaultdict
 from pathlib import Path
 
 
-PRIORITY = ["topic", "identity", "who", "callback", "date_amount", "date", "amount", "accept", "yes", "reject", "no", "other"]
+PRIORITY = ["topic", "identity", "callback", "who", "date_amount", "date", "amount", "accept", "yes", "reject", "no", "other"]
 RANK = {kind: index for index, kind in enumerate(PRIORITY)}
 TOP_KEYS = {"id", "agent_said", "customer_said", "expect", "trap"}
-EXPECT_KEYS = {"kind", "also", "why", "t", "field", "ans", "who", "rel", "d", "m", "wd", "wk", "vague", "tm", "amt"}
+EXPECT_KEYS = {"kind", "also", "why", "t", "field", "ans", "y", "st", "who", "rel", "d", "m", "wd", "wk", "vague", "tm", "amt"}
 DATE_KEYS = {"rel", "d", "m", "wd", "wk", "vague"}
-TOPICS = {"dispute", "hardship", "paid", "complaint", "terms", "robot", "stop", "restructure", "human", "wrong_number", "deceased"}
+TOPICS = {"dispute", "hardship", "paid", "complaint", "terms", "robot", "stop", "purpose", "restructure", "human", "wrong_number", "deceased"}
+IDENTITY_FIELDS = {"date_of_birth", "phone_last4"}
+WHO_VALUES = {"self", "other", "voicemail", "unclear"}
 REQUIRED_TRAPS = {
     "flat_vs_too_much",
     "refusal_counteroffer",
@@ -59,6 +61,8 @@ def validate_payload(line: int, expect: dict) -> None:
     kind, also = expect["kind"], expect["also"]
     if kind not in RANK or (also is not None and also not in RANK):
         fail(line, "unknown kind or also")
+    if also in {"yes", "no", "other"}:
+        fail(line, f"also={also} is not a meaningful secondary event")
     if also is not None and RANK[kind] >= RANK[also]:
         fail(line, f"also={also} does not follow kind={kind} in priority order")
 
@@ -67,14 +71,19 @@ def validate_payload(line: int, expect: dict) -> None:
         fail(line, "topic needs a supported t")
     if "t" in expect and "topic" not in labels:
         fail(line, "t is present without a topic label")
-    if "identity" in labels and not isinstance(expect.get("field"), str):
-        fail(line, "identity needs field and ans")
-    if "identity" in labels and not isinstance(expect.get("ans"), str):
-        fail(line, "identity needs field and ans")
-    if ({"field", "ans"} & set(expect)) and "identity" not in labels:
+    if "identity" in labels and expect.get("field") not in IDENTITY_FIELDS:
+        fail(line, f"identity field must be one of {sorted(IDENTITY_FIELDS)}")
+    if "identity" in labels:
+        partial_year = expect.get("st") == "partial"
+        if partial_year:
+            if expect.get("field") != "date_of_birth" or not isinstance(expect.get("y"), int) or not 1000 <= expect["y"] <= 9999 or "ans" in expect:
+                fail(line, "partial birth year needs field=date_of_birth, y=YYYY, st=partial, and no ans")
+        elif not isinstance(expect.get("ans"), str) or {"y", "st"} & set(expect):
+            fail(line, "identity needs ans, except for a partial birth year")
+    if ({"field", "ans", "y", "st"} & set(expect)) and "identity" not in labels:
         fail(line, "identity payload is present without an identity label")
-    if "who" in labels and expect.get("who") not in {"customer", "someone_else", "voicemail"}:
-        fail(line, "who needs customer, someone_else, or voicemail")
+    if "who" in labels and expect.get("who") not in WHO_VALUES:
+        fail(line, f"who needs one of {sorted(WHO_VALUES)}")
     if "who" in expect and "who" not in labels:
         fail(line, "who payload is present without a who label")
 
@@ -143,6 +152,19 @@ def validate_too_much(line: int, row: dict) -> None:
         fail(line, "why=too_much requires an amount objection")
 
 
+def validate_phrases(line: int, row: dict) -> None:
+    words = row["customer_said"].casefold()
+    bare = re.sub(r"^(?:(?:well|er|honestly|sorry)[,\s]+)+", "", words).strip()
+    expect = row["expect"]
+    purpose_question = "who is this" in words or re.fullmatch(r"why are you asking(?: me)?(?: that)?\?", bare)
+    if purpose_question:
+        if (expect.get("kind"), expect.get("also"), expect.get("t")) != ("topic", None, "purpose"):
+            fail(line, "a purpose question must be topic/purpose with no secondary event")
+    if "stop calling" in words:
+        if (expect.get("kind"), expect.get("also"), expect.get("t")) != ("topic", None, "stop"):
+            fail(line, "stop calling must be topic/stop with no secondary event")
+
+
 def validate(path: Path) -> tuple[Counter, Counter, Counter]:
     rows = []
     for line_number, raw in enumerate(path.read_text().splitlines(), 1):
@@ -158,6 +180,7 @@ def validate(path: Path) -> tuple[Counter, Counter, Counter]:
             fail(line_number, "expect must be an object")
         validate_payload(line_number, row["expect"])
         validate_too_much(line_number, row)
+        validate_phrases(line_number, row)
         rows.append(row)
 
     if len(rows) < 400:
