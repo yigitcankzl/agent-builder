@@ -1,6 +1,8 @@
 # OpenAPI mutations
 
-Eight local variants of `tools/openapi.json`. The seven tool names stay. Nothing here is called: the files are schemas and the bindings a correct bridge must produce.
+Ten local variants of `tools/openapi.json`. The seven tool names stay. Nothing here is called: the files are schemas and the bindings a correct bridge must produce.
+
+Role names are the contract's at `72b59a4` (`design/REDUCER-CONTRACT.md`, §14.3).
 
 Policy for every variant is `briefs/brief-a.md`. `sourced-alias` and `no-alias` also have `sources/codes.csv`. `customer_id` is a call variable. It stays a required body field and is not a canonical role.
 
@@ -22,6 +24,8 @@ A tool is `blocked` when the brief cannot call it: a required identity field is 
 | paths-and-required | `verified` is `check.passed`. Attempts left are `check.attempts_remaining`. Products are `account.covers`. `ok` is `success`. `create_promise` has no `date`. | Result paths follow those keys. Role `date` is null. `create_promise` is blocked. No other property fills the date. |
 | sourced-alias | Outcome enum contains `arrangement` and `arranged`, not `promise`. `sources/codes.csv` maps `promise` to `arranged`. | The alias is accepted. `promise` binds to `arranged`. `arrangement` is rejected. `close_call` stays enabled. |
 | no-alias | `not_reached` is absent and `unreached` is present. The code list maps `not_reached` to `missing_value`, which is not in the enum. | The alias is not valid. `unreached` is not a substitute. That one outcome is a block. The other outcomes still bind, so `close_call` stays enabled. |
+| wire-shapes | `verified` is the string `status` (`verified` or `failed`). Products have no `type`. Amounts are integer pence. `schedule_callback` has one `when` datetime. Every body and result schema is a `$ref` into `#/components/schemas`. | `status` binds to the verified fact. `type` is a missing fact and is not invented. 540.00 is sent as 54000. Roles `date` and `time` both bind to `when`. All seven tools stay enabled. |
+| queue-untyped | `transfer_to_agent.queue` is a string with no enum. | `restructuring`, `general`, and `support` are sent as those words. The tool stays enabled. A missing enum is not a mismatch. |
 
 ## Negative cases
 
@@ -32,3 +36,8 @@ A tool is `blocked` when the brief cannot call it: a required identity field is 
 | A missing required write parameter blocks the write | `paths-and-required`: `create_promise` is blocked because `date` is absent |
 | An unknown outcome is not converted | `close-enum` (every brief outcome) and `no-alias` (`not_reached`) |
 | A sourced alias is accepted | `sourced-alias`: `promise` → `arranged` |
+| A string status is not a boolean | `wire-shapes`: verified fact path is `status`, values `verified` and `failed` |
+| No product type is not inferred | `wire-shapes`: `missing_facts` for `type` |
+| Minor units | `wire-shapes`: `amount_encoding.factor` is 100 |
+| One datetime keeps both roles | `wire-shapes`: `date` and `time` bind to `when` |
+| No queue enum is not a block | `queue-untyped` |
