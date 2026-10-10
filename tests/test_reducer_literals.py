@@ -97,6 +97,8 @@ def replay_renamed():
                 exp = s["action"]["args"]["amount"]
                 if abs(float(act["args"]["amount"]) - float(exp)) > 0.005:
                     problems.append(f"{c['id']} step {s['step']}: floor not read from the renamed field ({act['args']['amount']} != {exp})")
+            if act["type"] == "call_tool" and act["tool"] == "add_note" and act["args"].get("reason") == "refused":
+                sent = [x for x in sent if x != "refused"]   # the contract default note reason (add_note enum), not a brief value
             for v in sent:
                 if v is None:
                     continue

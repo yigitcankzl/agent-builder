@@ -360,7 +360,88 @@ def split_answers():
     return True
 
 
+def identity_chatter():
+    """clean-1 surface PUB-07 live (d34d93ed): four kind=other turns after the phone question re-said one line to the
+    loop cap and closed not_verified/declined. Chatter is never a refusal: the question is worded two ways in turn,
+    the answer still goes through, a hard cap closes on the unclear slot; two explicit refusals still decline."""
+    for name, pol in POL.items():
+        v = R.V(pol)
+        st = R.init_state(pol, CV)
+        st, a = say(pol, st, "kind=who;also=none;st=complete;prod=;who=self;party=")
+        st, a = say(pol, st, "kind=identity;also=none;st=complete;prod=;field=date_of_birth;ans=1990-01-01;y=1990")
+        st, a = tool(pol, st, dict(verified=True, all_verified=False, wrong_answers_left=3))
+        texts = []
+        for _ in range(4):
+            st, a = say(pol, st, "kind=other;also=none;st=none;prod=")
+            texts.append(a["text"])
+        check(st["phase"] == "identity" and st["identity"]["refusals"] == 0 and all("last four" in t for t in texts)
+              and texts[0] != texts[1], f"{name}: chatter re-asks, two wordings: {texts}")
+        st, a = say(pol, st, "kind=identity;also=none;st=complete;prod=;field=phone_last4;ans=1234")
+        check(a["type"] == "call_tool" and a["args"]["answer"] == "1234", f"{name}: the answer after chatter: {a}")
+        st = R.init_state(pol, CV)
+        st, a = say(pol, st, "kind=who;also=none;st=complete;prod=;who=self;party=")
+        for _ in range(R.ID_OTHER_CAP + 1):
+            st, a = say(pol, st, "kind=other;also=none;st=none;prod=")
+        check(a["type"] == "close" and (a["outcome"], a["reason"]) == tuple(v["unclear"]), f"{name}: hard cap -> unclear: {a}")
+        st = R.init_state(pol, CV)
+        st, a = say(pol, st, "kind=who;also=none;st=complete;prod=;who=self;party=")
+        for _ in range(2):
+            st, a = say(pol, st, "kind=topic;also=none;st=complete;prod=;t=decline")
+        check(a["type"] == "close" and (a["outcome"], a["reason"]) == tuple(v["declined"]), f"{name}: two refusals -> declined: {a}")
+    return True
+
+
+def opening_self_topics():
+    """nightmare-1 PUB-09 live (55e7838b): 'Yes, this is Victor Ionescu. I want to make a complaint.' came as t=dispute
+    with the who lost; the name was re-asked to the cap. An account topic in the opening implies the customer: the
+    security questions follow, nothing is disclosed. A who=self kept in the payload with a callback books it (PUB-07)."""
+    for name, pol in POL.items():
+        st = R.init_state(pol, CV)
+        st, a = say(pol, st, "kind=topic;also=none;st=complete;prod=;t=dispute")
+        check(st["phase"] == "identity" and st["q"].startswith("id_") and "540" not in a["text"], f"{name}: dispute in the opening -> identity: {a}")
+        st = R.init_state(pol, CV)
+        st, a = say(pol, st, "kind=topic;also=none;st=complete;prod=;t=robot")
+        check(st["phase"] == "opening", f"{name}: a question topic does not imply the customer: {a}")
+        st = R.init_state(pol, CV)
+        st, a = say(pol, st, "kind=callback;also=none;st=complete;prod=;rel=tomorrow;d=;m=;wd=;wk=none;vague=no;tm=15:00;who=self;party=")
+        check(a["type"] == "call_tool" and a["tool"] == "schedule_callback", f"{name}: callback with who=self: {a}")
+    return True
+
+
+def ev_bank_shapes():
+    """Fork 5's real-extractor bank (fallback c1123cd): date+amount always comes as kind=date;also=amount;amt=n (same
+    result as date_amount); 'no' to the pay-today ask and to an offer is a flat refusal; a day with a time in the
+    opening is a callback; t=paid with a quoted amt is not a proposal."""
+    for name, pol in POL.items():
+        st0 = to_readback(pol) if False else None
+        st0 = R.init_state(pol, CV)
+        for b in ("kind=who;also=none;st=complete;prod=;who=self;party=",):
+            st0, a = say(pol, st0, b)
+        st0, a = say(pol, st0, "kind=identity;also=none;st=complete;prod=;field=date_of_birth;ans=1990-01-01")
+        st0, a = tool(pol, st0, dict(verified=True, all_verified=False, wrong_answers_left=3))
+        st0, a = say(pol, st0, "kind=identity;also=none;st=complete;prod=;field=phone_last4;ans=1234")
+        st0, a = tool(pol, st0, dict(verified=True, all_verified=True, wrong_answers_left=3))
+        st0, a = tool(pol, st0, dict(products=ACC))
+        cp = lambda: R.json.loads(R.json.dumps(st0))
+        x1, a1 = say(pol, cp(), "kind=date_amount;also=none;st=complete;prod=;rel=;d=16;m=10;wd=;wk=none;vague=no;amt=300")
+        x2, a2 = say(pol, cp(), "kind=date;also=amount;st=complete;prod=;rel=;d=16;m=10;wd=;wk=none;vague=no;amt=300")
+        check(a1 == a2 and x1["products"] == x2["products"] and x1["q"] == x2["q"] == "readback", f"{name}: date;also=amount == date_amount: {a1} / {a2}")
+        x, a = say(pol, cp(), "kind=no;also=none;st=complete;prod=")
+        check(x["products"][0]["attempts"] == 1 and x["q"] == "offer", f"{name}: no to pay today -> attempt 1: {a}")
+        x, a = say(pol, x, "kind=no;also=none;st=complete;prod=")
+        check(x["products"][0]["attempts"] >= 1 and (x["phase"] == "closed" or x["products"][0]["status"] in ("refused", "proposed")), f"{name}: no to an offer is a flat refusal: {a}")
+        x, a = say(pol, cp(), "kind=topic;also=amount;st=complete;prod=;t=paid;amt=420")
+        check(a["type"] in ("close", "call_tool") and (x.get("offer") or {}).get("amount") != 420.0, f"{name}: paid with a quoted amount: {a}")
+        st = R.init_state(pol, CV)
+        st, a = say(pol, st, "kind=date;also=none;st=complete;prod=;rel=today;d=;m=;wd=;wk=none;vague=no;tm=16:30")
+        check(a["type"] == "call_tool" and a["tool"] == "schedule_callback" and a["args"]["time"] == "16:30", f"{name}: a time in the opening is a callback: {a}")
+    return True
+
+
 if __name__ == "__main__":
+    print("ev bank shapes (date+amount, no, call time, quoted amount):", ev_bank_shapes())
+    print("opening: account topics imply the customer (nightmare PUB-09 live):", opening_self_topics())
+    print("identity chatter is not a refusal (clean-1 surface PUB-07):", identity_chatter())
     print("split identity answers (clean-1 surface PUB-06):", split_answers())
     print("rehearsal clean-1 PUB-07:", clean1_pub07())
     print("PUB-06 rep 3: no second floor offer:", pub06_rep3())
@@ -407,5 +488,7 @@ if __name__ == "__main__":
         st = to_readback(pol)
         st["q"], st["phase"] = "pay_today", "negotiation"
         st, a = say(pol, st, "kind=topic;also=none;st=complete;prod=;t=dispute")
+        while a["type"] == "call_tool" and a["tool"] == "add_note":        # notes enabled (A+B): the note, then the close
+            st, a = tool(pol, st, dict(ok=True))
         check(a["type"] == "close" and (a["outcome"], a["reason"]) == v["dispute"], f"{name}: dispute closes outside read-back: {a}")
         print(name, "rules ok; vocab log:", v["log"])

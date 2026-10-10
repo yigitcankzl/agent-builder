@@ -64,8 +64,13 @@ DOB_SPLIT = lambda c: ["kind=identity;also=none;st=complete;prod=;field=date_of_
 SCRIPTS["clean-1"] = {}      # the main clean-1 cases run on the platform; the surface live failures are replayed here
 SURFACE = {   # the surface siblings: the same events, with the turn the style changes
     ("clean-1", "PUB-06"): lambda c: [W] + DOB_SPLIT(c) + [PH(c), TOO, YES, YES],      # live e6d1cc28: DOB over two turns
+    ("clean-1", "PUB-07"): lambda c: [W, DOB(c)] + [OTHER] * 4 + [PH(c), NO, YES, YES],  # live d34d93ed: chatter at the phone question
     ("raw-2", "PUB-11"): lambda c: V(c) + [WD("mon", "all", "reject"), YES, YES],
     ("raw-2", "PUB-06"): lambda c: V(c) + [TOO, AMT("", "partial"), AMT("637.53"), YES, YES],
+}
+LIVE = {     # live shapes from the platform runs, replayed on the cases.json case (reported as <id>L)
+    ("nightmare-1", "PUB-07"): lambda c: ["kind=callback;also=none;st=complete;prod=;rel=tomorrow;d=;m=;wd=;wk=none;vague=no;tm=15:00"],
+    ("nightmare-1", "PUB-09"): lambda c: ["kind=topic;also=none;st=complete;prod=;t=complaint;who=self;party="],
 }
 SKIP = {("biz-1", "PUB-03")}     # debatable (coordinator)
 PFILE = (("clean-1", "rh-clean-1"),)
@@ -167,19 +172,22 @@ if __name__ == "__main__":
             print("== %s: no policy yet (tests/generated/rehearsal/%s...)" % (b, b))
             continue
         print("== %s   vocab log: %s" % (b, R.vocab(pol)["log"]))
-        for fname, scripts in (("cases.json", SCRIPTS[b]), ("cases-surface.json", None)):
-            d = json.load(open(os.path.join(ROOT, "tests/fixtures/rehearsal/%s/%s" % (b, fname))))
+        for fname, scripts in (("cases.json", SCRIPTS[b]), ("cases-surface.json", None), ("live", None)):
+            d = json.load(open(os.path.join(ROOT, "tests/fixtures/rehearsal/%s/%s" % (b, "cases.json" if fname == "live" else fname))))
             for c in (d if isinstance(d, list) else d["cases"]):
                 if (b, c["id"]) in SKIP:
                     continue
-                fn = (SURFACE.get((b, c["id"])) if fname == "cases-surface.json" else None) or SCRIPTS[b].get(c["id"])
+                if fname == "live" and (b, c["id"]) not in LIVE:
+                    continue
+                fn = LIVE[(b, c["id"])] if fname == "live" else \
+                    (SURFACE.get((b, c["id"])) if fname == "cases-surface.json" else None) or SCRIPTS[b].get(c["id"])
                 if fn is None:
                     continue
                 ledger, said, st = run_case(pol, c, fn(c) + [OTHER, OTHER])   # 'Thank you' after the last line
                 probs = diff(c["expected"], ledger)
                 total += 1
                 ok += not probs
-                tag = c["id"] + ("s" if fname == "cases-surface.json" else "")
+                tag = c["id"] + dict([("cases-surface.json", "s"), ("live", "L")]).get(fname, "")
                 print(("PASS " if not probs else "FAIL ") + "%-7s %s" % (tag, c["title"][:60]))
                 for p in probs:
                     print("        " + p[:240])

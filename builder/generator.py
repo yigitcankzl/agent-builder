@@ -275,6 +275,13 @@ def generate(rp, oas_path):
         else:
             extra.append(t)
     opening = " ".join([intro.rstrip()] + extra)
+    # the agent says it is an automated assistant unless the brief forbids it: a brief opening line that names only
+    # the bank ('This is <bank>. ...') gets 'I am the digital assistant of <bank>.' after its first sentence
+    if not re.search(r"\b(assistant|automated|virtual agent|an ai|a bot|robot)\b", opening, re.I) and not meta.get("assistant_disclosure_forbidden"):
+        bank = (meta.get("bank_name") or "").strip()
+        line = f"I am the digital assistant of {bank}." if bank and bank.lower() not in opening.lower() else "I am a digital assistant."
+        opening = opening.rstrip() + " " + line       # after the brief's own opening (its first sentence stays first)
+        GENERATED_FROM["greet_assistant_disclosure"] = line
     from builder.policy_bridge import CALL_ROLES, drop_unknown_placeholders, honest_line
     cvm = meta.get("call_vars") or {}
     opening, dropped = drop_unknown_placeholders(opening, set(cvm) | set(cvm.values()) | set(CALL_ROLES))

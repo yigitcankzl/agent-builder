@@ -14,6 +14,12 @@ workflow stays invalid after the repair pass, or the guard fires before saving, 
 `fallback_required` with the reason, the exit code is 2, and the previously exported workflow for that slot (if any)
 stays the submission.
 
+Smoke (S7, builder/smoke.py, Fork 5; only with BUILDER_SMOKE=1 and a real Freya client): after the save, two chat
+turns check the agent answers. Only workflow-side evidence is S7; a platform failure (5xx, 429, timeout, no call) is
+skipped and the main workflow kept. With the smoke on, L3 stays alive until the smoke passes; an S7 smoke replaces the
+slot with a valid L3 workflow (smoked again; if L3 fails too it stays, exit 0 with a warning), else exit 2 with S7.
+With the smoke off nothing changes.
+
 L3 fallback (builder/fallback_llm.py, Fork 5): the direct LLM workflow writer starts in its own thread as soon as the
 sources are readable (not on S0, not when nothing is readable; --no-l3 turns it off). The main path is capped at
 MAIN_CAP_S (15 min + 90 s) or --budget-min - 90 s, whichever is earlier. If the main path passes, L3 is cancelled
@@ -109,6 +115,28 @@ MAIN_CAP_S = 15 * 60 + 90       # the main path's own cap; the rest of --budget-
 L3_SIGNALS = {"EXTRACT", "S2", "S3", "S5"}     # main-path failures the L3 writer may cover (never S0, S1 abort or GUARD: a late main build is never replaced)
 
 
+def _smoke(freya_client, wf, trace, result, candidate, rp):
+    """FINAL-PLAN S7: the post-save chat smoke test (builder/smoke.py, Fork 5), only with BUILDER_SMOKE=1 and a real
+    Freya client. call_vars: the brief's call variables, the same list the placeholder lint allows (static greet check).
+    -> True when it passed or was skipped (or is off)."""
+    from builder import smoke
+    from builder.policy_bridge import CALL_ROLES
+    cv = ((rp or {}).get("meta") or {}).get("call_vars") or {}
+    call_vars = sorted(set(cv) | set(cv.values()) | set(CALL_ROLES))
+    if not smoke.enabled() or freya_client is None or not hasattr(freya_client, "api") or not result.get("workflow_id"):
+        trace.log("smoke", candidate=candidate, run=False, reason="BUILDER_SMOKE is not 1" if not smoke.enabled() else
+                  "no real Freya client (--no-save / --mock-freya)" if freya_client is None or not hasattr(freya_client, "api") else "no saved workflow")
+        return True
+    try:
+        s = smoke.run(lambda m, path, body: freya_client.api(m, path, body), freya_client.get_call, result["workflow_id"], wf,
+                      sims_running=smoke.running_sims(freya_client), call_vars=call_vars)
+    except Exception as e:
+        s = {"ok": False, "skipped": False, "signal": "S7", "reason": f"smoke raised {type(e).__name__}: {str(e)[:200]}"}
+    trace.log("smoke", candidate=candidate, **{k: v for k, v in s.items() if k != "turns"})
+    result.setdefault("smoke", []).append({"candidate": candidate, "ok": s.get("ok"), "skipped": s.get("skipped"), "reason": s.get("reason")})
+    return bool(s.get("ok") or s.get("skipped"))
+
+
 def _repro():
     """What a re-run needs to reproduce this build: the code commit, the pinned model, the runtime."""
     import platform, subprocess
@@ -119,9 +147,11 @@ def _repro():
             return subprocess.run(["git", "-C", ROOT, *a], capture_output=True, text=True, timeout=10).stdout.strip()
         except Exception:
             return ""
+    dirty = [ln.split(None, 1)[-1] for ln in git("status", "--porcelain", "--untracked-files=no").splitlines() if ln.strip()]
     return {"commit": git("rev-parse", "HEAD") or "unknown", "branch": git("rev-parse", "--abbrev-ref", "HEAD"),
-            "dirty": bool(git("status", "--porcelain", "--untracked-files=no")), "model": MODEL,
-            "python": platform.python_version(), "argv": sys.argv[1:]}
+            "dirty": bool(dirty), "dirty_files": dirty[:20], "model": MODEL,
+            "python": platform.python_version(), "argv": [os.path.relpath(a, ROOT) if os.path.isabs(a) and a.startswith(ROOT + os.sep) else a for a in sys.argv[1:]],
+            "smoke": os.environ.get("BUILDER_SMOKE") == "1"}
 
 
 def _assumptions(rp, brep, result):
@@ -142,7 +172,9 @@ def _assumptions(rp, brep, result):
 def _save(freya_client, slot, wf, out_dir, trace, result, candidate):
     """The ONE save of a build (main or L3 candidate): save_workflow + export, traced."""
     if freya_client is None:
-        trace.log("save", skipped=True, candidate=candidate, note="no Freya client (--no-save)")
+        os.makedirs(out_dir, exist_ok=True)       # the validated workflow is still written locally
+        json.dump(wf, open(os.path.join(out_dir, f"{slot}.workflow.json"), "w"), indent=1)
+        trace.log("save", skipped=True, candidate=candidate, note="no Freya client (--no-save); workflow written locally")
         return
     ids = freya_client.save_workflow(slot, wf)
     path = freya_client.export_workflow(ids["workflow_id"], os.path.join(out_dir, f"{slot}.workflow.json"))
@@ -360,9 +392,28 @@ def build(briefs, openapi, slot=None, freya_client=None, out_dir="submission", t
     # 3. save and export
     if time.time() > t0 + budget_s - 30:
         return finish("time guard fired before saving", 2, "GUARD")
-    if fb[0]:
+    from builder import smoke as _sm
+    if fb[0] and not _sm.enabled():
         fb[0].cancel()      # before the save: one save per slot, the main candidate
     _save(freya_client, slot, wf, out_dir, trace, result, "main")
+    if not _smoke(freya_client, wf, trace, result, "main", rp):
+        # S7: the saved main workflow cannot hold a chat. L3 (kept alive while the smoke runs) replaces it in the same
+        # slot and is smoked again; without a valid L3 the build fails loudly.
+        r3 = fb[0].wait(max(0, t_end - 150 - time.time())) if fb[0] else {}
+        if r3.get("workflow") is not None and not r3.get("errors"):
+            json.dump(r3["workflow"], open(os.path.join(out_dir, f"{slot}.l3.workflow.json"), "w"), indent=1)
+            _save(freya_client, slot, r3["workflow"], out_dir, trace, result, "llm")
+            trace.log("fallback_selection", candidate="llm", main_signal="S7", main_reason="smoke failed after the main save")
+            result.update(fallback_used="L3", main_signal="S7")
+            if not _smoke(freya_client, r3["workflow"], trace, result, "llm", rp):
+                # both failed on workflow evidence: L3 stays in the slot (nothing better exists now), exit 0 + a warning
+                trace.log("signal", signal="S7", level="warning", problems=["smoke failed for the main and the L3 workflow; L3 kept"])
+                result["warning"] = "S7: smoke failed for the main and the L3 workflow; L3 kept in the slot"
+            fb[0] = None
+            return finish()
+        fb[0] and fb[0].cancel()
+        fb[0] = None
+        return finish("smoke failed after the save and no valid L3 workflow", 2, "S7", next="a human checks the slot")
     # a generic call through the compiled graph (Fork 3's walker): wiring bugs only; a warning signal, never blocking
     try:
         wk = walk_smoke(rp, wf, openapi)
