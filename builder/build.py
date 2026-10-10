@@ -14,6 +14,13 @@ workflow stays invalid after the repair pass, or the guard fires before saving, 
 `fallback_required` with the reason, the exit code is 2, and the previously exported workflow for that slot (if any)
 stays the submission.
 
+L3 fallback (builder/fallback_llm.py, Fork 5): the direct LLM workflow writer starts in its own thread as soon as the
+sources are readable (not on S0, not when nothing is readable; --no-l3 turns it off). The main path is capped at
+MAIN_CAP_S (15 min + 90 s) or --budget-min - 90 s, whichever is earlier. If the main path passes, L3 is cancelled
+before the save. If it ends on EXTRACT, S2, S5 or GUARD, build waits for L3 until budget - 150 s and, when L3's static
+check passed, saves THAT workflow once and exports it (exit 0, fallback_used=L3, a fallback_selection trace event).
+There is exactly one save per slot per build.
+
 Exit codes (also `exit_code` in the JSON result; the trace has a `signal` event with the code):
   0  built, validated and saved (or --no-save)
   2  fallback_required: nothing saved, the previous export for the slot stays; `signal` names why and `next` the
@@ -96,16 +103,55 @@ def _rules_summary(policy):
     return out
 
 
+MAIN_CAP_S = 15 * 60 + 90       # the main path's own cap; the rest of --budget-min is for the L3 candidate + one save
+L3_SIGNALS = {"EXTRACT", "S2", "S5", "GUARD"}     # main-path failures the L3 writer may cover (never S0, never S1 abort)
+
+
+def _save(freya_client, slot, wf, out_dir, trace, result, candidate):
+    """The ONE save of a build (main or L3 candidate): save_workflow + export, traced."""
+    if freya_client is None:
+        trace.log("save", skipped=True, candidate=candidate, note="no Freya client (--no-save)")
+        return
+    ids = freya_client.save_workflow(slot, wf)
+    path = freya_client.export_workflow(ids["workflow_id"], os.path.join(out_dir, f"{slot}.workflow.json"))
+    result.update(workflow_id=ids["workflow_id"], agent_id=ids["agent_id"], export=path)
+    trace.log("save", candidate=candidate, workflow_id=ids["workflow_id"], agent_id=ids["agent_id"],
+              export=os.path.relpath(path, ROOT) if path.startswith(ROOT) else path)
+
+
 def build(briefs, openapi, slot=None, freya_client=None, out_dir="submission", trace_dir="traces", runs=2,
-          budget_s=25 * 60, extractor=extract):
+          budget_s=25 * 60, extractor=extract, fallback=None):
+    """fallback: None, or a factory (briefs, openapi, log) -> an object with start/cancel/wait (fallback_llm.Fallback).
+    It starts as soon as the sources are readable and is used only when the main path ends on an L3 signal."""
     t0 = time.time()
     slot = slot or default_slot(briefs)
     stamp = time.strftime("%Y%m%d-%H%M%S")
     trace = BuildTrace(os.path.join(trace_dir, f"{slot}-{stamp}.jsonl"))
-    deadline = t0 + budget_s - 90          # keep 90 s for save and export
+    t_end = t0 + budget_s
+    deadline = min(t_end - 90, t0 + MAIN_CAP_S)     # the main path: keep 90 s for save and export, and the cap
     result = {"slot": slot, "trace": trace.path, "fallback_required": False}
+    fb = [None]
 
     def finish(reason=None, code=0, signal=None, **extra):
+        if not reason and fb[0]:
+            fb[0].cancel()
+            trace.log("fallback_selection", candidate="main", l3="cancelled")
+        if reason and fb[0] and signal in L3_SIGNALS:
+            wait = max(0, t_end - 150 - time.time())
+            r = fb[0].wait(wait)
+            ok = r.get("workflow") is not None and not r.get("errors")
+            trace.log("fallback_selection", candidate="llm" if ok else "none", main_signal=signal, main_reason=reason,
+                      waited_s=round(wait, 1), l3_seconds=r.get("seconds"), l3_errors=(r.get("errors") or [])[:5])
+            if ok and time.time() < t_end - 30:
+                os.makedirs(out_dir, exist_ok=True)
+                json.dump(r["workflow"], open(os.path.join(out_dir, f"{slot}.l3.workflow.json"), "w"), indent=1)
+                _save(freya_client, slot, r["workflow"], out_dir, trace, result, "llm")
+                result.update(fallback_used="L3", main_signal=signal, main_reason=reason)
+                reason, code = None, 0
+            else:
+                fb[0].cancel()
+        elif reason and fb[0]:
+            fb[0].cancel()
         if reason:
             code = code or 2
             result.update(fallback_required=True, fallback_reason=reason, signal=signal, **extra)
@@ -136,6 +182,9 @@ def build(briefs, openapi, slot=None, freya_client=None, out_dir="submission", t
         result["s1"] = probs
     if not any(t.strip() for t in files.values()):
         return finish("no readable brief source: " + "; ".join(probs), 2, "S1", next="a human converts the source")
+    if fallback is not None:          # the L3 writer runs from here, in its own thread, local only
+        fb[0] = fallback(briefs, openapi, trace.model_call).start()
+        trace.log("fallback_started", candidate="llm")
     # 1. extraction runs, in parallel
     policies = []
     with cf.ThreadPoolExecutor(runs) as ex:
@@ -231,13 +280,9 @@ def build(briefs, openapi, slot=None, freya_client=None, out_dir="submission", t
     # 3. save and export
     if time.time() > t0 + budget_s - 30:
         return finish("time guard fired before saving", 2, "GUARD")
-    if freya_client is None:
-        trace.log("save", skipped=True, note="no Freya client (--no-save)")
-    else:
-        ids = freya_client.save_workflow(slot, wf)
-        path = freya_client.export_workflow(ids["workflow_id"], os.path.join(out_dir, f"{slot}.workflow.json"))
-        result.update(workflow_id=ids["workflow_id"], agent_id=ids["agent_id"], export=path)
-        trace.log("save", workflow_id=ids["workflow_id"], agent_id=ids["agent_id"], export=os.path.relpath(path, ROOT) if path.startswith(ROOT) else path)
+    if fb[0]:
+        fb[0].cancel()      # before the save: one save per slot, the main candidate
+    _save(freya_client, slot, wf, out_dir, trace, result, "main")
     st_res = run_selftest(rp, openapi)
     trace.log("self_test", **st_res)
     result["self_test"] = {k: st_res.get(k) for k in ("run", "scenarios", "passed", "failed", "note")}
@@ -254,6 +299,7 @@ def main():
     ap.add_argument("--no-save", action="store_true")
     ap.add_argument("--out-dir", default=os.path.join(ROOT, "submission"))
     ap.add_argument("--trace-dir", default=os.path.join(ROOT, "traces"))
+    ap.add_argument("--no-l3", action="store_true", help="do not start the L3 fallback writer (local tests)")
     a = ap.parse_args()
     *briefs, openapi = a.inputs
     if not briefs or not openapi.endswith(".json") or "paths" not in json.load(open(openapi)):
@@ -263,7 +309,11 @@ def main():
         client = MockFreya()
     elif not a.no_save:
         import freya as client  # noqa: the real client; needs FREYA_API_KEY in the environment
-    r = build(briefs, openapi, a.slot, client, a.out_dir, a.trace_dir, a.runs, int(a.budget_min * 60))
+    fallback = None
+    if not a.no_l3:
+        from builder import fallback_llm
+        fallback = lambda b, o, log: fallback_llm.Fallback(b, o, log=log)
+    r = build(briefs, openapi, a.slot, client, a.out_dir, a.trace_dir, a.runs, int(a.budget_min * 60), fallback=fallback)
     print(json.dumps({k: v for k, v in r.items()}, default=str))
     sys.exit(r["exit_code"])
 

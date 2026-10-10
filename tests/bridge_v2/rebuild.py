@@ -18,7 +18,7 @@ OUT = sys.argv[1] if len(sys.argv) > 1 else os.path.join(ROOT, "tests", "e2e8")
 def run(slot):
     briefs, oas = RUNS[slot]
     t0 = time.time()
-    r = subprocess.run([sys.executable, os.path.join(ROOT, "builder", "build.py"), *briefs, oas, "--slot", slot, "--mock-freya",
+    r = subprocess.run([sys.executable, os.path.join(ROOT, "builder", "build.py"), *briefs, oas, "--slot", slot, "--mock-freya", "--no-l3",
                         "--out-dir", os.path.join(OUT, "submission"), "--trace-dir", os.path.join(OUT, "traces")],
                        capture_output=True, text=True, timeout=1900)
     try:

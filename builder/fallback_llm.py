@@ -19,6 +19,7 @@ import json, os, re, subprocess, sys, threading, time
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 from builder.policy_extract import MODEL, parse_json, read_files
+from builder.oas import load_oas
 
 CODE_LIMIT = 131072                      # code_exec: code + data
 CAP_S = 600                              # the L3 thread's own cap (plan: 10 min)
@@ -82,7 +83,7 @@ def _deref(doc, s, seen=0):
 
 def oas_ops(path):
     """{tool name: {url, method, fields: {name: enum list or None}, required}} from an OpenAPI file."""
-    doc = json.load(open(path))
+    doc = load_oas(path)      # Fork 4's shared loader ($ref resolved, cached); _deref below is then a no-op
     server = ((doc.get("servers") or [{}])[0].get("url") or "").rstrip("/")
     ops = {}
     for p, items in (doc.get("paths") or {}).items():
@@ -255,7 +256,7 @@ class Fallback:
 
     def _run(self):
         try:
-            # ponytail: same brief sources as the main path (read_files); switch to Fork 4's manifest when it lands
+            # the same sources as the main path: read_files is builder.ingest (pdf, docx, zip, ...; binaries refused)
             files = read_files(self.briefs)
             ops = oas_ops(self.openapi)
             material = "\n\n".join(f"=== BRIEF FILE: {k} ===\n{v}" for k, v in files.items())
