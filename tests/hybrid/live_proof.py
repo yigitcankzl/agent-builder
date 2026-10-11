@@ -79,6 +79,8 @@ def run(name, wf_id):
 
 if __name__ == "__main__":
     sims = smoke.running_sims(freya)
+    if sims and "--ignore-sim" in sys.argv:      # a frozen sim (no update for an hour), by the coordinator's go only
+        sims = [s for s in sims if s != sys.argv[sys.argv.index("--ignore-sim") + 1]]
     if sims is None or sims:
         sys.exit(f"STOP: simulation running or unknown ({sims}); nothing sent")
     try:        # one turn on the tiny probe2 workflow first: a chat outage (503 in 0.2 s) stops here, nothing else sent
