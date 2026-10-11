@@ -52,6 +52,8 @@ def run(name, wf_id):
         out["turns"].append({"user": m, "agent": r.get("response"), "s": round(time.time() - t, 1)}); print(name, out["turns"][-1])
     if call:
         c = freya.get_call(call)
+        out["call_id"] = call
+        out["raw"] = [{"role": x.get("role"), "node": x.get("nodeId"), "message": x.get("message")} for x in c.get("messages") or []]
         ev = []
         for x in c.get("messages") or []:
             if x.get("role") == "system":

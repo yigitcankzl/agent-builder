@@ -79,7 +79,7 @@ DESC = {
                "gate_action=next before each create_promise. gate_action=change when the customer changes the terms.",
 }
 PARAMS = {
-    "gate_product": {"type": "string", "description": "product_id copied from get_account"},
+    "gate_product": {"type": "string", "description": "the product_id exactly as get_account returned it (for example p1), or the product's position 1, 2, ..."},
     "gate_date": {"type": "string", "description": "the date as YYYY-MM-DD, or empty"},
     "gate_amount": {"type": "string", "description": "the amount, digits only, or empty"},
     "gate_event": {"type": "string", "enum": ["first", "flat", "too_much"], "description": "first | flat | too_much"},
@@ -92,7 +92,7 @@ REQUIRED = {"check_terms": ["gate_product", "gate_date", "gate_amount"], "next_o
 PROMPT = """
 
 GATES (code decides these; never compute them yourself):
-- Dates and amounts: before you propose, accept or read back a date or an amount, call check_terms. If it is not recordable, the system says the right sentence to the customer for you; then go on from the customer's answer.
+- Dates and amounts: EVERY time the customer names a date or an amount, call check_terms with it BEFORE you answer, even when you think it is fine or not allowed; also before you propose, accept or read back one. If it is not recordable, the system says the right sentence to the customer for you; then go on from the customer's answer.
 - Offers: before every persuasion offer call next_offer (first, flat, too_much). The system says the offer. When no offer is left it says nothing: close as refused.
 - Read-back: call confirm with gate_action=readback and the exact terms; the system says the read-back and the confirm question. After the customer says yes, call confirm with gate_action=yes, then confirm with gate_action=next, then create_promise (it takes the granted terms itself). Repeat next + create_promise until nothing is left. If the customer changes anything, call confirm with gate_action=change and start again with check_terms.
 - A route status means this product goes to a person: transfer with the queue {{gate_queue}}, no offer, no read-back.
