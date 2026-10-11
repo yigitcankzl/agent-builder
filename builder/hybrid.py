@@ -105,7 +105,9 @@ Latest gate result: status {{gate_status}}, ok {{gate_ok}}, date {{gate_out_date
 MODEL-OWNED RULES: everything else in this prompt (opening, identity, third parties, callbacks, hardship, disputes, transfers, the closing outcome and reason) is yours to follow exactly as written; the gates cover only dates, amounts, offers and the read-back."""
 
 RB = {"name": "rb_answer", "type": "string", "enum_values": ["yes", "no", "other"], "min_confidence": 0.6,
-      "description": "The customer's answer to the agent's last read-back question (Do you confirm?): yes, no, or other."}
+      "description": "The customer's answer to the agent's last read-back question (Do you confirm?). yes ONLY for an explicit "
+                     "yes, I confirm, or correct to that read-back. no for a no. other for everything else, including OK, fine, "
+                     "bye, a question, or an answer to anything that is not the read-back."}
 
 CP_PRE = """try:
     if vars.get('gate_ok') != 'yes' or vars.get('gate_status') != 'write' or not vars.get('gate_write_date'):
