@@ -88,15 +88,57 @@ call("confirm", gate_action="readback", gate_terms="p1:2125.10:2026-10-15|p2:420
 V["rb_answer"] = "yes"
 cfg = pre("credit_card")
 ok("two products in the read-back + an unknown product_id -> wrong_product with the ids", "wrong-product-use-p1-or-p2.invalid" in cfg["url"], cfg)
-res = {"status": "error", "message": "DNS resolution failed for '" + cfg["url"] + "'"}
-exec(CP["post_process_code"], {"result": res, "vars": V})
-ok("... told as NOT a failure, with the ids", res["status"] == "wrong_product" and "p1, p2" in res["what_to_do_next"], res)
-res = {"status": "error", "error": "URL validation failed", "message": "DNS resolution failed for 'not-confirmed-read-back-and-ask-again.invalid'", "status_code": 400}
-exec(CP["post_process_code"], {"result": res, "vars": V})
-ok("a blocked write reads as not_confirmed, never a service error", res["status"] == "not_confirmed" and "NOT a failure" in res["what_to_do_next"] and "service_error" in res["what_to_do_next"], res)
-res = {"status": "success", "data": {"ok": False, "error": "temporary failure"}}
-exec(CP["post_process_code"], {"result": res, "vars": V})
-ok("a bank failure still says NOT saved by the bank, retry once", "NOT saved by the bank" in res["what_to_do_next"], res)
+# v8 write outcomes. post(vars, ok) runs the post hook; the platform's auto vars after a call are set by auto().
+def post(vs, data_ok=None, code=200):
+    res = {"status": "success", "status_code": code, "data": {"ok": data_ok}} if data_ok is not None else {"status": "error", "status_code": code}
+    exec(CP["post_process_code"], {"result": res, "vars": vs})
+    return res
+
+
+def auto(vs, pid, data_ok=None, err=""):          # what the platform writes after the call (persisted by the platform)
+    vs["create_promise_args.product_id"] = pid
+    vs.pop("create_promise_response.data.ok", None)
+    if data_ok is not None:
+        vs["create_promise_response.data.ok"] = data_ok
+        vs["create_promise_success_count"] = int(vs.get("create_promise_success_count") or 0) + 1
+    vs["create_promise_response.error"] = err
+
+
+def pre_on(vs, pid):
+    cfg = {"url": "https://freya-bank-mock.freyavoice.workers.dev/v1/create_promise", "body": {"customer_id": "c", "product_id": pid, "amount": 1, "date": "2026-01-01"}}
+    exec(CP["pre_process_code"], {"vars": vs, "config": cfg})
+    return cfg
+
+
+import copy as _copy
+call("confirm", gate_action="readback", gate_terms="p2:420:2026-10-19")
+V["rb_answer"] = "yes"
+base = _copy.deepcopy(V)
+for persist in (True, False):          # False: hook writes are lost; only the platform's auto vars carry the state
+    tag = "hooks persist" if persist else "hooks do NOT persist"
+    on = (lambda vs: vs) if persist else (lambda vs: _copy.deepcopy(vs))     # where a hook's writes land
+    vs = _copy.deepcopy(base)
+    ok(f"[{tag}] confirmed write passes", "invalid" not in pre_on(on(vs), "p2")["url"], None)
+    post(on(vs), True); auto(vs, "p2", True)
+    ok(f"[{tag}] success -> a second create_promise for p2 is blocked as already-recorded (not a failure)",
+       "already-recorded" in pre_on(on(vs), "p2")["url"], vs.get("gate_written"))
+    vs = _copy.deepcopy(base)
+    pre_on(on(vs), "p2"); r1 = post(on(vs), False); auto(vs, "p2", False)
+    ok(f"[{tag}] bank ok:false -> the bank's answer says retry once, and the retry passes",
+       "once more" in r1.get("what_to_do_next", "") and "invalid" not in pre_on(on(vs), "p2")["url"], (r1, vs.get("gate_failed")))
+    post(on(vs), False); auto(vs, "p2", False)
+    ok(f"[{tag}] bank ok:false again -> the next call is blocked: bank-failed-again (service_error)",
+       "bank-failed-again" in pre_on(on(vs), "p2")["url"], (vs.get("gate_failed"), vs.get("create_promise_success_count")))
+    vs = _copy.deepcopy(base)
+    pre_on(on(vs), "p2"); auto(vs, "p2", None, "Sandbox did not return a parseable result (returncode=0)")
+    cfg = pre_on(on(vs), "p2")
+    ok(f"[{tag}] uncertain (no parseable answer) -> never retried, treated as recorded",
+       "outcome-unknown-treat-as-recorded" in cfg["url"] and any(x in pre_on(on(vs), "p2")["url"] for x in ("outcome-unknown", "already-recorded")), cfg["url"])
+vs = _copy.deepcopy(base)
+auto(vs, "p2", None, "DNS resolution failed for 'not-confirmed-read-back-and-ask-again.invalid'")
+ok("our own block (a .invalid host) is not an uncertain write", "invalid" not in pre_on(vs, "p2")["url"], vs.get("gate_written"))
+r = post(_copy.deepcopy(base), None, 503)
+ok("a 5xx answered by the bank counts as a definite failure (retry message)", "once more" in r.get("what_to_do_next", ""), r)
 # invented product ids (live proof 1): mapped to the real one, or rejected with the valid ids named
 r = call("check_terms", gate_product="credit_card_4821", gate_date="2026-10-16", gate_amount="420")
 ok("credit_card_4821 -> p2 (card_last4)", V["gate_product"] == "p2" and r["gate_status"] == "non_business", r)

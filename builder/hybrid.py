@@ -163,6 +163,7 @@ GATES (code decides these; never compute them yourself):
 - Never say recorded, scheduled, booked or transferred before the tool returned ok true.
 - One tool call at a time: wait for each result before the next call.
 - A missing confirmation is never a failure: if create_promise says the terms were not confirmed, or returns an error naming not-confirmed-read-back-and-ask-again, read the terms back with confirm (gate_action=readback) and ask again. An error naming wrong-product-use-... means call create_promise again with one of those product ids. Neither is a failure: do not close the call and do not say it could not be saved. service_error only when the bank itself answered ok false twice.
+- An error naming already-recorded-... means that promise IS recorded: do not call create_promise for it again; continue as after a recorded promise. An error naming outcome-unknown-treat-as-recorded-... means the same: treat the promise as recorded, never say it failed. An error naming bank-failed-again-... means the bank refused it twice: say you could not record the promise; the outcome is no_promise / service_error.
 - If the customer changes the terms and then goes back to the earlier ones, call confirm with gate_action=readback and those terms; the system reads them back and the customer confirms again.
 Latest gate result: status {{gate_status}}, ok {{gate_ok}}, date {{gate_out_date}}, amount {{gate_out_amount}}, sentence: {{gate_say}}, error: {{gate_error}}
 
@@ -175,9 +176,61 @@ RB = {"name": "rb_answer", "type": "string", "enum_values": ["yes", "no", "other
                      "yes, I confirm, or correct to that read-back. no for a no. other for everything else, including OK, fine, "
                      "bye, a question, or an answer to anything that is not the read-back."}
 
-# The write permission, checked at the moment of the write: a standing (not voided) read-back from confirm, and a yes
-# the extraction heard after it (rb_answer, which every read-back resets). The body takes the read-back's terms for
-# the product the model names (or the only one); nothing else the model sends is used.
+# PAYLOAD BUDGET. Every code_exec and every api_call hook prints __CODE_EXEC_RESULT__ + the whole var table (+ the
+# hook's config / result); the platform cuts that near 10,000 chars, the cut JSON is unparseable and from then on every
+# hook of the call fails (live v6 PUB-06 8c4f0608: the table was 7.1k at the write; the bank recorded the promise, the
+# hook failed, the model said it could not be saved). HYB_budget keeps the print <= 9,000 in reducer.enforce_budget's
+# order: headers / old messages and errors / clock strings, then spent tool data and args, then the largest others.
+# Never trimmed: gate_* (but gate_account), rb_answer, np_topic, *_count, *_status_code, the write-state auto vars of
+# create_promise, the account data until gate_st holds the products, and every {{var}} the workflow reads (keep).
+BUDGET = """
+def HYB_budget(vars, keep, extra=0, limit=9000):
+    import json as J
+    def size():
+        return 21 + len(J.dumps(dict(vars=vars), default=str)) + extra
+    loaded = '"products":[{' in str(vars.get('gate_st') or '').replace(' ', '')
+    def prot(k):
+        return (k in keep or (k.startswith('gate_') and k != 'gate_account') or k in ('rb_answer', 'np_topic')
+                or k.endswith('_count') or k.endswith('_status_code') or k.startswith('create_promise_args.')
+                or k in ('create_promise_response.data.ok', 'create_promise_response.status', 'create_promise_response.error')
+                or (not loaded and (k.startswith('get_account_response.data') or k.startswith('t_get_account_response.') or k == 'gate_account')))
+    for k in list(vars):
+        sk = str(k)
+        if not prot(sk) and ('.header.' in sk or sk.endswith('_response.message') or sk.endswith('_response.error') or sk.startswith('system.')):
+            vars.pop(k, None)
+    if size() <= limit:
+        return
+    for k in list(vars):
+        sk = str(k)
+        if not prot(sk) and ('_response.' in sk or '_args.' in sk or sk.startswith('t_get_account_response.') or sk == 'gate_account'):
+            vars.pop(k, None)
+    for k in sorted([k for k in vars if not prot(str(k))], key=lambda k: -len(J.dumps(vars.get(k), default=str))):
+        if size() <= limit:
+            return
+        vars.pop(k, None)
+"""
+
+
+def budget_call(keep, what=None):
+    """The budget snippet + its call; what: 'config' (pre hook) or 'result' (post hook) is printed with the vars."""
+    extra = f"len(__import__('json').dumps({what}, default=str)) + 20" if what else "0"
+    return (BUDGET + "try:\n"
+            f"    HYB_budget(vars, set({json.dumps(sorted(keep))}), {extra})\n"
+            "except Exception:\n"
+            "    pass\n")
+
+
+# THE WRITE. Permission at the moment of the write: a standing (not voided) read-back from confirm and a yes the
+# extraction heard after it (rb_answer, which every read-back resets; the last utterance as a fallback). The body takes
+# the read-back's terms. Three outcomes of a write:
+#   ok:true          -> the product is written: gate_written (post hook) and, independent of hook persistence, the
+#                       platform's own auto vars (create_promise_args.product_id + create_promise_response.data.ok).
+#                       A further create_promise for it is blocked: already-recorded (not a failure).
+#   ok:false (bank)  -> a definite failure: retried with the same terms up to the brief's retries; then
+#                       bank-failed-twice (service_error).
+#   transport error  -> uncertain (no parseable answer): never retried blindly, never "could not be saved": blocked as
+#                       outcome-unknown-treat-as-recorded. The tools have no ledger read.
+# A blocked write is a transport error, so post_process never runs on it: the url host carries the instruction.
 CP_PRE = """try:
     import json as _json
     import re as _re2
@@ -188,42 +241,59 @@ CP_PRE = """try:
     b = config.get('body')
     pid = str(b.get('product_id') or '').strip()
     pick = [t for t in terms if str(t[0]) == pid] or (terms if len(terms) == 1 else [])
+    target = str(pick[0][0]) if pick else pid
+    written = [x for x in str(vars.get('gate_written') or '').split(',') if x]
+    failed = dict(x.split(':', 1) for x in str(vars.get('gate_failed') or '').split(',') if x.count(':') == 1)
+    last = str(vars.get('create_promise_args.product_id') or '')
+    lok = str(vars.get('create_promise_response.data.ok')).lower()
+    lerr = str(vars.get('create_promise_response.error') or '')
+    if last and lok == 'true' and last not in written:
+        written.append(last)
+    uncertain = bool(last) and lok not in ('true', 'false') and bool(lerr) and '.invalid' not in lerr
+    if len(terms) == 1 and last == target and lok == 'false':      # without hook persistence: the platform's own count
+        derived = int(vars.get('create_promise_success_count') or 0) - (1 if target in written else 0)
+        failed[target] = str(max(1, derived, int(failed.get(target) or 0)))
     heard = vars.get('rb_answer') == 'yes'
     if not heard and vars.get('rb_answer') in (None, '', 'other'):
-        import re as _re
         sp = str(vars.get('extractor.speech') or '').lower()
-        heard = bool(_re.search(r"\\b(yes|yeah|yep|i confirm|confirmed|correct|that's right|that is right)\\b", sp)) and not _re.search(r"\\b(no|not|change|wait)\\b", sp)
-    if not terms or rb.get('voided') or not heard:
+        heard = bool(_re2.search(r"\\b(yes|yeah|yep|i confirm|confirmed|correct|that's right|that is right)\\b", sp)) and not _re2.search(r"\\b(no|not|change|wait)\\b", sp)
+    if target and target in written:
+        config['url'] = 'https://already-recorded-not-a-failure-do-not-call-again.invalid/'
+    elif target and uncertain and target == last:
+        written.append(target)
+        config['url'] = 'https://outcome-unknown-treat-as-recorded-never-say-failed.invalid/'
+    elif target and int(failed.get(target) or 0) > HYB_RETRIES:
+        config['url'] = 'https://bank-failed-again-say-not-recorded-close-service-error.invalid/'
+    elif not terms or rb.get('voided') or not heard:
         config['url'] = 'https://not-confirmed-read-back-and-ask-again.invalid/'
     elif not pick:
         config['url'] = 'https://wrong-product-use-' + '-or-'.join(_re2.sub('[^a-z0-9]', '', str(t[0]).lower()) for t in terms) + '.invalid/'
     else:
         b['product_id'], b['amount'], b['date'] = str(pick[0][0]), float(pick[0][1]), str(pick[0][2])
+        vars['gate_writing'] = target
+    vars['gate_written'] = ','.join(written)
+    vars['gate_failed'] = ','.join(k + ':' + v for k, v in failed.items())
 except Exception:
     config['url'] = 'https://not-confirmed-read-back-and-ask-again.invalid/'
 """
 CP_POST = """
 try:
-    if isinstance(result, dict):
-        d = result.get('data')
-        # a blocked write is a transport error on the platform: post_process does NOT run then (live v6), the model sees
-        # only the error text, so the url host itself says what to do; this branch covers a platform that does run it
-        if 'wrong-product-use-' in str(result):
-            ids = str(result).split('wrong-product-use-')[1].split('.invalid')[0].replace('-or-', ', ')
-            result.pop('error', None)
-            result['status'] = 'wrong_product'
-            result['what_to_do_next'] = 'NOT saved, NOT a failure: call create_promise again with product_id one of: ' + ids
-        elif 'not-confirmed-read-back' in str(result):
-            result.pop('error', None)
-            result['status'] = 'not_confirmed'
-            result['message'] = 'Not sent to the bank: these terms have no confirmed read-back. This is NOT a service error.'
-            if isinstance(d, dict):
-                d.pop('what_to_do_next', None)
-            result['what_to_do_next'] = ('NOT saved, and NOT a failure: call confirm with gate_action=readback and the current '
-                                         'terms, and ask the customer to confirm. Do not close the call and do not use service_error.')
-        elif not (isinstance(d, dict) and d.get('ok') is True):
-            result['what_to_do_next'] = ('NOT saved by the bank. Do not say it is recorded. Call create_promise once more; if '
-                                         'the bank fails again, the outcome is service_error.')
+    d = result.get('data') if isinstance(result, dict) else None
+    w = str(vars.get('gate_writing') or '')
+    written = [x for x in str(vars.get('gate_written') or '').split(',') if x]
+    failed = dict(x.split(':', 1) for x in str(vars.get('gate_failed') or '').split(',') if x.count(':') == 1)
+    code = int((result or dict()).get('status_code') or 0) if isinstance(result, dict) else 0
+    if isinstance(d, dict) and d.get('ok') is True:
+        if w and w not in written:
+            written.append(w)
+    elif (isinstance(d, dict) and d.get('ok') is False) or code >= 500:
+        n = int(failed.get(w) or 0) + 1
+        failed[w] = str(n)
+        result['what_to_do_next'] = ('NOT saved by the bank. Call create_promise once more for the same product.' if n <= HYB_RETRIES
+                                     else 'The bank failed again: say you could not record the promise; the outcome is no_promise / service_error.')
+    vars['gate_written'] = ','.join(written)
+    vars['gate_failed'] = ','.join(k + ':' + v for k, v in failed.items())
+    vars['gate_writing'] = ''
 except Exception:
     pass
 """
@@ -245,7 +315,7 @@ def once_lines(rp):
     return out
 
 
-def once_tool(lines):
+def once_tool(lines, keep=()):
     """say_once(line): the first call allows the line (the model says it); a repeat is refused, with what to do instead
     in gate_error (shown in the prompt). A no-persuasion line also sets gate_np, which blocks next_offer."""
     cat = {k: {"after": v["after"], "np": v["np"]} for k, v in lines.items()}
@@ -268,7 +338,7 @@ def once_tool(lines):
             "    if _line in _L and _L[_line]['np']:\n"
             "        vars['gate_np'] = _line\n"
             "except Exception as _e:\n"
-            "    vars['gate_status'], vars['gate_error'] = 'error', str(_e)[:150]\n")
+            "    vars['gate_status'], vars['gate_error'] = 'error', str(_e)[:150]\n") + budget_call(keep)
     return {"type": "function", "config": {"timeoutMs": 10000},
             "function": {"name": "say_once", "handler": "__function__:code_exec",
                          "description": ("Lines the brief allows ONCE per call: " + "; ".join(f"{k}: {v['after']}" for k, v in lines.items()) +
@@ -320,10 +390,11 @@ def offer_guard(lines):
     return pre, post
 
 
-def gate_tool(tool, rp, lines=None):
+def gate_tool(tool, rp, lines=None, keep=()):
     from builder.engine.gates import gate_source
     pre, post = offer_guard(lines or {}) if tool == "next_offer" else ("", "")
-    code = prefix(tool) + (HEARD if tool == "confirm" else "") + pre + gate_source(rp, GATE_NAME[tool]) + post + suffix()
+    code = (budget_call(keep) + prefix(tool) + (HEARD if tool == "confirm" else "") + pre + gate_source(rp, GATE_NAME[tool])
+            + post + suffix() + "try:\n    HYB_budget(vars, set(" + json.dumps(sorted(keep)) + "))\nexcept Exception:\n    pass\n")
     props = {"code": {"type": "string", "default": code}, "timeout_ms": {"type": "number", "default": 15000}}
     props.update({k: PARAMS[k] for k in GATE_IN[tool]})
     return {"type": "function", "config": {"timeoutMs": 20000},
@@ -331,7 +402,7 @@ def gate_tool(tool, rp, lines=None):
                          "parameters": {"type": "object", "properties": props, "required": REQUIRED[tool]}}}
 
 
-def gate_create_promise(t):
+def gate_create_promise(t, keep=(), retries=1):
     t = copy.deepcopy(t)
     body = t["function"]["parameters"]["properties"]["body"]["properties"]
     for f in ("amount", "date"):
@@ -342,8 +413,18 @@ def gate_create_promise(t):
     t["function"]["description"] = ("Records the promise the customer confirmed. Call it right after the customer said yes to the "
                                     "read-back from confirm, once per product, one call at a time; amount and date are taken from "
                                     "the confirmed read-back. If the bank fails, call it once more with the same product.")
-    t["pre_process_code"] = CP_PRE
-    t["post_process_code"] = (t.get("post_process_code") or "") + CP_POST
+    r = f"HYB_RETRIES = {int(retries)}\n"
+    t["pre_process_code"] = r + CP_PRE + budget_call(keep, "config")
+    t["post_process_code"] = r + (t.get("post_process_code") or "") + CP_POST + budget_call(keep, "result")
+    return t
+
+
+def budget_hooks(t, keep):
+    """Every other api_call tool: the budget in its pre and post hooks (an L3 close_call / get_account hook prints the
+    same var table and failed the same way in 8c4f0608)."""
+    t = copy.deepcopy(t)
+    t["pre_process_code"] = budget_call(keep, "config") + (t.get("pre_process_code") or "")
+    t["post_process_code"] = (t.get("post_process_code") or "") + budget_call(keep, "result")
     return t
 
 
@@ -376,7 +457,16 @@ def wire(wf, rp):
     if not hosts:
         raise ValueError("no node with create_promise")
     lines = once_lines(rp)
-    gates = [gate_tool(t, rp, lines) for t in GATE_IN] + ([once_tool(lines)] if lines else [])
+    # every {{var}} the workflow or the gate prompts read, and the call variables: never trimmed by the budget
+    keep = set(_re.findall(r"\{\{\s*([\w.]+)\s*\}\}", json.dumps(wf) + PROMPT + ONCE_PROMPT))
+    keep |= set(((rp.get("meta") or {}).get("call_vars") or {}).values()) | {"customer_id", "now"}
+    retries = int(((rp.get("writes") or {}).get("promise") or {}).get("retries", 1) or 0)
+    gates = [gate_tool(t, rp, lines, keep) for t in GATE_IN] + ([once_tool(lines, keep)] if lines else [])
+    for n in nodes.values():
+        n["tools"] = [budget_hooks(t, keep) if (t.get("function") or {}).get("handler") == "__function__:api_call"
+                      and (t.get("function") or {}).get("name") != "create_promise" else t for t in n.get("tools") or []]
+    wf["tools"] = [budget_hooks(t, keep) if (t.get("function") or {}).get("handler") == "__function__:api_call" else t
+                   for t in wf.get("tools") or []]
     extra = [RB]
     np_quotes = [v["quote"] for v in lines.values() if v["np"] and v["quote"]]
     if np_quotes:      # sticky in code: the first gate run after a yes sets gate_np, which blocks every later offer
@@ -392,7 +482,7 @@ def wire(wf, rp):
             oe["text"] = RECORDED.sub("we keep a recording of this call", oe["text"])
     for h in hosts:
         n = nodes[h]
-        n["tools"] = [gate_create_promise(t) if (t.get("function") or {}).get("name") == "create_promise" else t
+        n["tools"] = [gate_create_promise(t, keep, retries) if (t.get("function") or {}).get("name") == "create_promise" else t
                       for t in n["tools"]] + gates
         n["task_message"] = (n.get("task_message") or "") + PROMPT + (ONCE_PROMPT if lines else "")
         n["extraction_schema"] = (n.get("extraction_schema") or []) + extra
@@ -409,7 +499,7 @@ def wire(wf, rp):
             nodes[ack] = {
                 "name": ack, "node_type": "code", "passthrough": True, "passthrough_default_transition": to, "on_enter": {"type": "silent"},
                 "pre_actions": [{"type": "function", "function": {"name": "code_exec", "handler": "__function__:code_exec", "parameters": {
-                    "type": "object", "properties": {"code": {"type": "string", "default": "vars['gate_new'] = 'no'\n"},
+                    "type": "object", "properties": {"code": {"type": "string", "default": "vars['gate_new'] = 'no'\n" + budget_call(keep)},
                                                      "timeout_ms": {"type": "number", "default": 5000}}}}}],
                 "transitions": [{"target_node": to, "description": "always", "condition": {"operator": "always"}}]}
     return wf
