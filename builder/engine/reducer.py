@@ -774,6 +774,7 @@ def step(policy, st, event, tool_event, now, call_vars=None):
     st['runs'] = st.get('runs', 0) + 1
     today = _d(now)
     cv = dict(call_vars or dict())
+    partial_answer = False
     if tool_event and st.get('pending'):
         node = tool_event.get('node') or st['pending']['node']
         st['_tc'][node] = [int(tool_event.get('success') or 0), int(tool_event.get('failure') or 0)]
@@ -786,6 +787,12 @@ def step(policy, st, event, tool_event, now, call_vars=None):
     else:
         ev = normalise(event, st)
         info = ev.get('also_t') if ev and ev.get('kind') != 'topic' and ev.get('also_t') in TOPIC_INFO else None
+        if ev and ev.get('st') == 'partial':
+            question = ev.get('t') if ev.get('kind') == 'topic' and ev.get('t') in TOPIC_INFO + ('purpose',) else ev.get('also_t')
+            if question in TOPIC_INFO + ('purpose',):
+                info, partial_answer = question, True
+                if ev.get('kind') in (None, '', 'other'):
+                    ev = dict(ev, kind='topic')   # a question is not cut-off offer chatter
         if info:       # PUB-04: a date (or any event) plus "are you a robot?": the event once, the answer line first
             ev = dict(ev, also='none', also_t='')
         act = on_user(policy, st, ev, today, cv) if ev else resay(st)
@@ -799,7 +806,7 @@ def step(policy, st, event, tool_event, now, call_vars=None):
     if act.get('type') == 'say_exact' and not str(act.get('text') or '').strip():
         act = dict(type='say_exact', text=sentence(policy, 'safe_repeat', D_SAFE))
     # never loop on one tts line: the same words more than RESAY_CAP + 1 times in a row break the loop by stage
-    if act.get('type') == 'say_exact' and act['text'] != sentence(policy, 'continue_line', D_CONTINUE):
+    if act.get('type') == 'say_exact' and act['text'] != sentence(policy, 'continue_line', D_CONTINUE) and not partial_answer:
         st['_said_n'] = st.get('_said_n', 0) + 1 if act['text'] == st.get('_said_last') else 1
         st['_said_last'] = act['text']
         if st['_said_n'] > RESAY_CAP + 1:
@@ -1658,7 +1665,7 @@ def info_line(policy, st, t):
     if t == 'terms':
         st['_terms_n'] = st.get('_terms_n', 0) + 1
         return brief_sentence(policy, 'no_other_terms', D_NO_TERMS) if st['_terms_n'] == 1 else ''
-    return (event_row(policy, t) or dict()).get('say') or ''
+    return (event_row(policy, t) or dict()).get('say') or (D_PROTECT if t == 'purpose' else '')
 
 
 def compose(spec, vals):
