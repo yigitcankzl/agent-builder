@@ -27,8 +27,8 @@ def call(tool, **args):
     return {k: V.get(k) for k in ("gate_status", "gate_ok", "gate_say", "gate_out_date", "gate_out_amount", "gate_new", "gate_error")}
 
 
-def pre():
-    cfg = {"url": "https://freya-bank-mock.freyavoice.workers.dev/v1/create_promise", "body": {"customer_id": "c", "product_id": "x", "amount": 1, "date": "2026-01-01"}}
+def pre(pid="x"):
+    cfg = {"url": "https://freya-bank-mock.freyavoice.workers.dev/v1/create_promise", "body": {"customer_id": "c", "product_id": pid, "amount": 1, "date": "2026-01-01"}}
     exec(CP["pre_process_code"], {"vars": V, "config": cfg})
     return cfg
 
@@ -52,33 +52,35 @@ ok("late band: two offers, then exhausted, no extra offer", [o["gate_status"] fo
 ok("create_promise with no read-back is blocked", "blocked.invalid" in pre()["url"], V.get("gate_status"))
 r = call("confirm", gate_action="readback", gate_terms="p1:2125.10:2026-10-15")
 ok("read-back spoken with the confirm question", r["gate_status"] == "readback" and r["gate_new"] == "yes" and V["rb_answer"] == "other", r)
+ok("create_promise with no yes heard after the read-back is blocked", "blocked.invalid" in pre()["url"], V.get("rb_answer"))
 r = call("confirm", gate_action="yes")
-ok("confirm yes with no yes heard -> the read-back is said again, no grant", r["gate_status"] == "repeat" and r["gate_ok"] == "no" and r["gate_new"] == "yes" and "Do you confirm" in r["gate_say"], r)
-r = call("confirm", gate_action="next")
-ok("confirm next with nothing granted -> the read-back again, never a silent 'done'", r["gate_status"] in ("readback", "repeat") and r["gate_ok"] == "no", r)
-ok("then create_promise is still blocked", "blocked.invalid" in pre()["url"], V.get("gate_status"))
+ok("a stray confirm yes/next is a no-op (live pieces: parallel yes+next raced)", r["gate_status"] == "noop" and not r["gate_say"], r)
+call("confirm", gate_action="next")
+ok("and grants nothing", "blocked.invalid" in pre()["url"], V.get("gate_status"))
 V["rb_answer"] = "yes"          # the extraction heard the customer's yes
-r = call("confirm", gate_action="yes")
-ok("yes after the read-back is granted", r["gate_status"] == "granted" and r["gate_ok"] == "yes", r)
-r = call("confirm", gate_action="next")
-cfg = pre()
-ok("next -> create_promise passes with the granted terms", "blocked" not in cfg["url"] and cfg["body"]["amount"] == 2125.10 and cfg["body"]["date"] == "2026-10-15" and cfg["body"]["product_id"] == "p1", cfg)
-r = call("confirm", gate_action="yes")
-ok("a second yes is stale (granted once)", r["gate_status"] == "stale", r)
-call("check_terms", gate_product="p1", gate_date="2026-10-15", gate_amount="2125.10")
-ok("any later gate run closes the write permission", "blocked.invalid" in pre()["url"], V.get("gate_status"))
-# live PUB-01 47b66117: read-back -> "a day later?" (change) -> "keep it as it was, yes I confirm" -> must re-read, then write
+cfg = pre("p1")
+ok("yes heard -> create_promise passes with the read-back's terms (model's amount/date ignored)", "blocked" not in cfg["url"] and cfg["body"]["amount"] == 2125.10 and cfg["body"]["date"] == "2026-10-15" and cfg["body"]["product_id"] == "p1", cfg)
+cfg = pre("p1")
+ok("the bank-failure retry passes again with the same terms", "blocked" not in cfg["url"] and cfg["body"]["date"] == "2026-10-15", cfg)
+call("check_terms", gate_product="p1", gate_date="2026-10-14", gate_amount="2125.10")
+ok("different terms for that product void the read-back -> blocked", "blocked.invalid" in pre("p1")["url"], V.get("gate_status"))
+# live PUB-01 47b66117: read-back -> "a day later?" (change) -> "keep it as it was, yes I confirm" -> blocked -> read back again
 r = call("confirm", gate_action="readback", gate_terms="p2:420:2026-10-19")
 call("confirm", gate_action="change")
 V["rb_answer"] = "yes"          # the extraction heard "yes, I confirm" right after the change
-r = call("confirm", gate_action="yes")
-ok("yes on a voided read-back -> the same terms read back again (new read-back), no grant yet", r["gate_status"] == "readback" and r["gate_ok"] == "no" and "19 October" in r["gate_say"] and V["rb_answer"] == "other", r)
+ok("a yes after a change (voided read-back) cannot write", "blocked.invalid" in pre("p2")["url"], V.get("gate_status"))
+r = call("confirm", gate_action="readback", gate_terms="p2:420:2026-10-19")
+ok("read back again (as not_confirmed tells the model)", r["gate_status"] == "readback" and "19 October" in r["gate_say"] and V["rb_answer"] == "other", r)
 V["rb_answer"] = "yes"
-r = call("confirm", gate_action="yes")
-ok("then the yes is granted", r["gate_status"] == "granted", r)
-r = call("confirm", gate_action="next")
-cfg = pre()
+cfg = pre("p2")
 ok("and the write goes through with p2 420 on 19 Oct", "blocked" not in cfg["url"] and cfg["body"]["product_id"] == "p2" and cfg["body"]["date"] == "2026-10-19", cfg)
+call("confirm", gate_action="readback", gate_terms="p1:2125.10:2026-10-15|p2:420:2026-10-19")
+V["rb_answer"] = "yes"
+cfg = pre("credit_card")
+ok("two products in the read-back + an unknown product_id -> wrong_product with the ids", "blocked.invalid/product/p1,p2" in cfg["url"], cfg)
+res = {"status": "error", "message": "DNS resolution failed for '" + cfg["url"] + "'"}
+exec(CP["post_process_code"], {"result": res, "vars": V})
+ok("... told as NOT a failure, with the ids", res["status"] == "wrong_product" and "p1,p2" in res["what_to_do_next"], res)
 res = {"status": "error", "error": "URL validation failed", "message": "DNS resolution failed for 'blocked.invalid'", "status_code": 400}
 exec(CP["post_process_code"], {"result": res, "vars": V})
 ok("a blocked write reads as not_confirmed, never a service error", res["status"] == "not_confirmed" and "NOT a failure" in res["what_to_do_next"] and "service_error" in res["what_to_do_next"], res)

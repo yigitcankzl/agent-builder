@@ -103,28 +103,14 @@ PRODUCT_FIX = (
     "        vars['gate_terms'] = '|'.join(_t)\n")
 
 
-# confirm(yes) counts only when the extraction model heard a yes after a read-back that still stands (rb_answer, reset
-# by the read-back). Otherwise, when a read-back exists (voided by a change, or not answered with a yes), the yes
-# becomes a fresh read-back of those terms: the customer hears them again and answers again (live PUB-01 47b66117: a
-# change, then "keep it as it was, yes I confirm" hit a voided read-back and the model closed as service_error).
-# A customer who really changed the terms gets them checked and read back by the model's own check_terms/readback.
+# confirm takes only readback | change. The permission to write is checked by create_promise's own pre hook at the
+# moment of the write (CP_PRE: a standing read-back + a yes heard after it). The earlier confirm(yes) + confirm(next)
+# were called IN PARALLEL by the model (live brief-a pieces PUB-04 efb148d6, PUB-07 c0f77eb4, PUB-10 eb3138d7): both gate
+# runs raced on gate_st, nothing was granted, create_promise was never called, the call closed as service_error.
+# A stray yes / next is a no-op.
 HEARD = ("try:\n"
-         "    if str(vars.get('gate_action') or '').strip().lower() == 'yes':\n"
-         "        _st = vars.get('gate_st')\n"
-         "        _st = _json.loads(_st) if isinstance(_st, str) and _st else (_st if isinstance(_st, dict) else dict())\n"
-         "        _rb = _st.get('_rb') or dict()\n"
-         "        _tm = '|'.join(str(_x[0]) + ':' + str(_x[1]) + ':' + str(_x[2]) for _x in _rb.get('terms') or [])\n"
-         "        if _tm and not _rb.get('granted') and (_rb.get('voided') or vars.get('rb_answer') != 'yes'):\n"
-         "            vars['gate_action'], vars['gate_terms'] = 'readback', _tm\n"
-         "        elif vars.get('rb_answer') != 'yes':\n"
-         "            vars['gate_action'], vars['gate_unheard'] = 'unheard', 'yes'\n"
-         "    elif str(vars.get('gate_action') or '').strip().lower() == 'next':\n"
-         "        _st = vars.get('gate_st')\n"
-         "        _st = _json.loads(_st) if isinstance(_st, str) and _st else (_st if isinstance(_st, dict) else dict())\n"
-         "        _rb = _st.get('_rb') or dict()\n"
-         "        _tm = '|'.join(str(_x[0]) + ':' + str(_x[1]) + ':' + str(_x[2]) for _x in _rb.get('terms') or [])\n"
-         "        if _tm and not _st.get('_granted') and not _rb.get('granted'):\n"
-         "            vars['gate_action'], vars['gate_terms'] = 'readback', _tm\n"
+         "    if str(vars.get('gate_action') or '').strip().lower() in ('yes', 'next'):\n"
+         "        vars['gate_action'], vars['gate_noop'] = 'noop', 'yes'\n"
          "except Exception:\n"
          "    pass\n")
 
@@ -133,8 +119,8 @@ def suffix():
     """After the gate: gate_new=yes when there is a sentence to speak (the host routes to its say node); a fresh
     read-back resets rb_answer so only a yes said AFTER it counts."""
     return ("\ntry:\n"
-            "    if vars.get('gate_unheard') == 'yes':\n"
-            "        vars['gate_status'], vars['gate_error'], vars['gate_unheard'] = 'stale', 'no yes heard after the read-back', 'no'\n"
+            "    if vars.get('gate_noop') == 'yes':\n"
+            "        vars['gate_status'], vars['gate_error'], vars['gate_noop'] = 'noop', '', 'no'\n"
             "    if vars.get('gate_bad_product'):\n"
             "        vars['gate_error'] = vars.get('gate_bad_product')\n"
             "    vars['gate_new'] = 'yes' if vars.get('gate_say') else 'no'\n"
@@ -152,15 +138,15 @@ DESC = {
                   "to the open offer, too_much when the customer says the amount is too much. The system speaks the offer itself; "
                   "when no offer is left it speaks nothing and you close as refused.",
     "confirm": "Read-back gate. gate_action=readback with gate_terms=<product_id>:<amount>:<YYYY-MM-DD> (several joined with |): "
-               "the system speaks the read-back with the confirm question. gate_action=yes right after the customer said yes to it. "
-               "gate_action=next before each create_promise. gate_action=change when the customer changes the terms.",
+               "the system speaks the read-back with the confirm question. gate_action=change when the customer changes the terms. "
+               "After the customer's yes, call create_promise directly (no confirm call).",
 }
 PARAMS = {
     "gate_product": {"type": "string", "description": "the product_id exactly as get_account returned it (for example p1), or the product's position 1, 2, ..."},
     "gate_date": {"type": "string", "description": "the date as YYYY-MM-DD, or empty"},
     "gate_amount": {"type": "string", "description": "the amount, digits only, or empty"},
     "gate_event": {"type": "string", "enum": ["first", "flat", "too_much"], "description": "first | flat | too_much"},
-    "gate_action": {"type": "string", "enum": ["readback", "yes", "next", "change"], "description": "readback | yes | next | change"},
+    "gate_action": {"type": "string", "enum": ["readback", "change"], "description": "readback | change"},
     "gate_terms": {"type": "string", "description": "for readback: <product_id>:<amount>:<YYYY-MM-DD>, several joined with |"},
 }
 REQUIRED = {"check_terms": ["gate_product", "gate_date", "gate_amount"], "next_offer": ["gate_product", "gate_event"],
@@ -171,11 +157,12 @@ PROMPT = """
 GATES (code decides these; never compute them yourself):
 - Dates and amounts: EVERY time the customer names a date or an amount, call check_terms with it BEFORE you answer, even when you think it is fine or not allowed; also before you propose, accept or read back one. If it is not recordable, the system says the right sentence to the customer for you; then go on from the customer's answer.
 - Offers: before every persuasion offer call next_offer (first, flat, too_much). The system says the offer. When no offer is left it says nothing: close as refused.
-- Read-back: call confirm with gate_action=readback and the exact terms; the system says the read-back and the confirm question. After the customer says yes, call confirm with gate_action=yes, then confirm with gate_action=next, then create_promise (it takes the granted terms itself). Repeat next + create_promise until nothing is left. If the customer changes anything, call confirm with gate_action=change and start again with check_terms.
+- Read-back: call confirm with gate_action=readback and the exact terms; the system says the read-back and the confirm question. After the customer says yes, call create_promise with the product_id, once per product in the read-back, one call at a time (it takes the confirmed amount and date itself). If the customer changes anything, call confirm with gate_action=change and start again with check_terms.
 - Products: gate_product and the product in gate_terms are the product_id EXACTLY as get_account returned it (for example p1), never a name, type or card number. If the gate error names the valid ids, call the gate again with one of them.
 - A route status means this product goes to a person: transfer with the queue {{gate_queue}}, no offer, no read-back.
 - Never say recorded, scheduled, booked or transferred before the tool returned ok true.
-- A missing confirmation is never a failure: if confirm next has nothing to write, or create_promise says the terms were not confirmed, read the terms back with confirm (gate_action=readback) and ask again. Do not close the call and do not say it could not be saved. service_error only when the bank itself failed twice.
+- One tool call at a time: wait for each result before the next call.
+- A missing confirmation is never a failure: if create_promise says the terms were not confirmed, read the terms back with confirm (gate_action=readback) and ask again. Do not close the call and do not say it could not be saved. service_error only when the bank itself failed twice.
 - If the customer changes the terms and then goes back to the earlier ones, call confirm with gate_action=readback and those terms; the system reads them back and the customer confirms again.
 Latest gate result: status {{gate_status}}, ok {{gate_ok}}, date {{gate_out_date}}, amount {{gate_out_amount}}, sentence: {{gate_say}}, error: {{gate_error}}
 
@@ -186,14 +173,24 @@ RB = {"name": "rb_answer", "type": "string", "enum_values": ["yes", "no", "other
                      "yes, I confirm, or correct to that read-back. no for a no. other for everything else, including OK, fine, "
                      "bye, a question, or an answer to anything that is not the read-back."}
 
+# The write permission, checked at the moment of the write: a standing (not voided) read-back from confirm, and a yes
+# the extraction heard after it (rb_answer, which every read-back resets). The body takes the read-back's terms for
+# the product the model names (or the only one); nothing else the model sends is used.
 CP_PRE = """try:
-    if vars.get('gate_ok') != 'yes' or vars.get('gate_status') != 'write' or not vars.get('gate_write_date'):
+    import json as _json
+    st = vars.get('gate_st')
+    st = _json.loads(st) if isinstance(st, str) and st else (st if isinstance(st, dict) else dict())
+    rb = st.get('_rb') or dict()
+    terms = rb.get('terms') or []
+    b = config.get('body')
+    pid = str(b.get('product_id') or '').strip()
+    pick = [t for t in terms if str(t[0]) == pid] or (terms if len(terms) == 1 else [])
+    if not terms or rb.get('voided') or vars.get('rb_answer') != 'yes':
         config['url'] = 'https://blocked.invalid/create_promise'
+    elif not pick:
+        config['url'] = 'https://blocked.invalid/product/' + ','.join(str(t[0]) for t in terms)
     else:
-        b = config.get('body')
-        b['product_id'] = vars.get('gate_write_product_id')
-        b['amount'] = float(vars.get('gate_write_amount'))
-        b['date'] = vars.get('gate_write_date')
+        b['product_id'], b['amount'], b['date'] = str(pick[0][0]), float(pick[0][1]), str(pick[0][2])
 except Exception:
     config['url'] = 'https://blocked.invalid/create_promise'
 """
@@ -201,7 +198,12 @@ CP_POST = """
 try:
     if isinstance(result, dict):
         d = result.get('data')
-        if 'blocked.invalid' in str(result):
+        if 'blocked.invalid/product/' in str(result):
+            ids = str(result).split('blocked.invalid/product/')[1].split("'")[0].split('"')[0]
+            result.pop('error', None)
+            result['status'] = 'wrong_product'
+            result['what_to_do_next'] = 'NOT saved, NOT a failure: call create_promise again with product_id one of: ' + ids
+        elif 'blocked.invalid' in str(result):
             result.pop('error', None)
             result['status'] = 'not_confirmed'
             result['message'] = 'Not sent to the bank: these terms have no confirmed read-back. This is NOT a service error.'
@@ -319,12 +321,14 @@ def gate_tool(tool, rp, lines=None):
 def gate_create_promise(t):
     t = copy.deepcopy(t)
     body = t["function"]["parameters"]["properties"]["body"]["properties"]
-    for f, v in (("product_id", "gate_write_product_id"), ("amount", "gate_write_amount"), ("date", "gate_write_date")):
+    for f in ("amount", "date"):
         if f in body:
-            body[f]["default"] = "{{" + v + "}}"
-            body[f]["description"] = "filled by the gate (confirm next); do not change"
-    t["function"]["description"] = ("Records the promise that confirm granted. Call confirm with gate_action=next first; the terms "
-                                    "are filled in for you. If it fails, call it once more.")
+            body[f]["description"] = "taken from the confirmed read-back; any value"
+    if "product_id" in body:
+        body["product_id"]["description"] = "the product_id exactly as get_account returned it (for example p1)"
+    t["function"]["description"] = ("Records the promise the customer confirmed. Call it right after the customer said yes to the "
+                                    "read-back from confirm, once per product, one call at a time; amount and date are taken from "
+                                    "the confirmed read-back. If the bank fails, call it once more with the same product.")
     t["pre_process_code"] = CP_PRE
     t["post_process_code"] = (t.get("post_process_code") or "") + CP_POST
     return t
