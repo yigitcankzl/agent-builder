@@ -1,0 +1,622 @@
+{
+ "initial_node": "identity",
+ "system_prompt": "You are the digital assistant of Rowan Mutual, calling a customer. Speak English, one or two short sentences per turn. Call one tool per message. After every tool result, speak to the customer or call the next tool, and never end a turn with nothing. If a tool result has what_to_do_next, do what it says. Never say something is saved, scheduled, recorded or transferred unless that tool returned ok true. To end the call, say goodbye and end with the exact words \"Have a good day.\"",
+ "test_variables": {
+  "customer_id": "c_test",
+  "title": "Mr",
+  "last_name": "Reyes",
+  "now": "2026-10-14T11:00"
+ },
+ "global_nodes": {},
+ "nodes": {
+  "identity": {
+   "name": "identity",
+   "node_type": "conversation",
+   "on_enter": {
+    "type": "tts",
+    "text": "This is Rowan Mutual. This call is recorded. Am I speaking with {{title}} {{last_name}}?"
+   },
+   "on_enter_first_entry_only": true,
+   "max_node_turns": 80,
+   "task_message": "Your only job here is to confirm the person and verify their identity. Now: {{now}}.\n\nWho counts as the customer: only an answer of yes, that's me, speaking, or the customer's own name. Before identity is verified, do not say collections, debt, payment, an amount, a balance or a product. If asked why you are calling, say you can explain after the security check.\n\nIdentity check, only when the customer is on the line:\n1. Ask for the date of birth. Convert what they say to YYYY-MM-DD and call verify_identity with field date_of_birth.\n2. Then ask for the last four digits of the phone number on file and call verify_identity with field phone_last4.\nCall verify_identity once for each answer. One wrong answer does not end the check: ask that question again. If the result has ok false with no verdict, the value could not be read and does not count, so ask for it again. If the result has hint day_month_swapped, ask the customer to say the date of birth again. Do not swap it yourself.\nThree wrong answers in total (wrong_answers_left 0): do not state anything about the account. Say \"Please use the app or visit a branch.\" Then say goodbye. The outcome is not_verified with reason failed.\nIf they refuse to answer the security questions, explain once that the questions are needed. A second refusal ends the call: say goodbye. The outcome is not_verified with reason declined.\n\nSomeone who is not the customer (including a husband, wife or other relative): never call verify_identity, ask them no security questions, and tell them nothing about a balance, product or amount. Ask when the customer can be reached. A callback must be today or the next business day (Monday to Friday, not a holiday. The holidays are 16 October 2026, 25 and 26 December 2026 and 1 January 2027, so the next business day after Thursday 15 October is Monday 19 October), between 10:00 and 18:00 with both ends included, and later than now. When they give a time inside that window, call schedule_callback with the date (YYYY-MM-DD) and the time (HH:MM). After it returns ok true, say the callback is booked and say goodbye. The outcome is not_reached with reason callback. If they give no time, or only times outside the window, do not schedule. Say goodbye. The outcome is not_reached with reason no_callback.\nIf it is a wrong number, say goodbye. The outcome is not_reached.",
+   "tools": [
+    {
+     "type": "function",
+     "config": {
+      "timeoutMs": 12000,
+      "maxRetries": 0
+     },
+     "function": {
+      "name": "verify_identity",
+      "handler": "__function__:api_call",
+      "description": "Check one security answer. CALL it once for every answer the confirmed customer gives: date_of_birth first, then phone_last4. Never call it for someone who is not the customer.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "url": {
+         "type": "string",
+         "default": "https://freya-bank-mock.freyavoice.workers.dev/v1/verify_identity"
+        },
+        "method": {
+         "type": "string",
+         "default": "POST"
+        },
+        "headers": {
+         "type": "object",
+         "properties": {
+          "Content-Type": {
+           "type": "string",
+           "default": "application/json"
+          }
+         }
+        },
+        "body": {
+         "type": "object",
+         "properties": {
+          "customer_id": {
+           "type": "string",
+           "default": "{{customer_id}}"
+          },
+          "field": {
+           "type": "string",
+           "enum": [
+            "date_of_birth",
+            "phone_last4"
+           ],
+           "default": "{{field}}",
+           "description": "Which answer this is. One of: date_of_birth, phone_last4."
+          },
+          "answer": {
+           "type": "string",
+           "default": "{{answer}}",
+           "description": "date_of_birth as YYYY-MM-DD (convert the spoken date). phone_last4 as four digits."
+          }
+         },
+         "required": [
+          "customer_id",
+          "field",
+          "answer"
+         ]
+        }
+       }
+      }
+     },
+     "post_process_code": "try:\n    if isinstance(result, dict):\n        result.pop('header', None)\n        d = result.get('data')\n        if isinstance(d, dict):\n            left = d.get('wrong_answers_left')\n            if d.get('all_verified') is True:\n                d['what_to_do_next'] = 'Identity verified.'\n            elif d.get('hint') == 'day_month_swapped':\n                d['what_to_do_next'] = 'Ask the customer to say the date of birth again. Do not swap it yourself.'\n            elif d.get('verified') is True:\n                d['what_to_do_next'] = 'Correct. Ask the next security question.'\n            elif d.get('verified') is False and left == 0:\n                d['what_to_do_next'] = 'Three wrong answers. Say: Please use the app or visit a branch. Then say goodbye, ending with Have a good day.'\n            elif d.get('verified') is False:\n                d['what_to_do_next'] = 'Wrong answer. Ask the same question again.'\n            elif d.get('ok') is False:\n                d['what_to_do_next'] = 'The answer could not be read and was not counted. Ask for it again.'\nexcept Exception:\n    pass\n"
+    },
+    {
+     "type": "function",
+     "config": {
+      "timeoutMs": 12000,
+      "maxRetries": 0
+     },
+     "function": {
+      "name": "schedule_callback",
+      "handler": "__function__:api_call",
+      "description": "Book a callback for when the customer can be reached. CALL it only when someone who is not the customer gives a time today or the next business day, 10:00 to 18:00, later than now.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "url": {
+         "type": "string",
+         "default": "https://freya-bank-mock.freyavoice.workers.dev/v1/schedule_callback"
+        },
+        "method": {
+         "type": "string",
+         "default": "POST"
+        },
+        "headers": {
+         "type": "object",
+         "properties": {
+          "Content-Type": {
+           "type": "string",
+           "default": "application/json"
+          }
+         }
+        },
+        "body": {
+         "type": "object",
+         "properties": {
+          "customer_id": {
+           "type": "string",
+           "default": "{{customer_id}}"
+          },
+          "date": {
+           "type": "string",
+           "default": "{{date}}",
+           "description": "Callback date as YYYY-MM-DD."
+          },
+          "time": {
+           "type": "string",
+           "default": "{{time}}",
+           "description": "Callback time as HH:MM, 24 hour, 10:00 to 18:00."
+          }
+         },
+         "required": [
+          "customer_id",
+          "date",
+          "time"
+         ]
+        }
+       }
+      }
+     }
+    },
+    {
+     "type": "function",
+     "config": {
+      "timeoutMs": 10000
+     },
+     "function": {
+      "name": "end_call",
+      "handler": "__function__:end_call",
+      "description": "Ends the call. You normally do NOT call this: the phrase \"Have a good day.\" ends the call by itself. Call it without any text only if the customer answers after your goodbye.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "message_mode": {
+         "type": "string",
+         "default": "none"
+        },
+        "interruptible": {
+         "type": "boolean",
+         "default": true
+        },
+        "trigger_pattern": {
+         "type": "string",
+         "default": "Have a good day|have a good day"
+        },
+        "trigger_timeout": {
+         "type": "number",
+         "default": 3
+        },
+        "trigger_pattern_both": {
+         "type": "string",
+         "default": "goodbye|bye|have a good day|you too|thank you|thanks|take care"
+        }
+       }
+      }
+     }
+    }
+   ],
+   "transitions": [
+    {
+     "target_node": "account",
+     "description": "Both security answers verified",
+     "condition": {
+      "logic": "or",
+      "conditions": [
+       {
+        "variable": "verify_identity_response.data.all_verified",
+        "operator": "equals",
+        "operand": "true"
+       },
+       {
+        "variable": "verify_identity_response.data.all_verified",
+        "operator": "equals",
+        "operand": "True"
+       }
+      ]
+     }
+    }
+   ]
+  },
+  "account": {
+   "name": "account",
+   "node_type": "conversation",
+   "on_enter": {
+    "type": "tts",
+    "text": "Thank you, that's verified. I'm calling about your Rowan Mutual account, do you have a minute?"
+   },
+   "on_enter_first_entry_only": true,
+   "max_node_turns": 80,
+   "task_message": "The customer is verified. Now: {{now}}. When a rule says to use a tool, call the tool.\n\nFirst call get_account, before you say anything about the account. If it fails, call it once more. If it fails again, apologise and say goodbye. The outcome is no_promise with reason service_error. Each customer is late on one product. Tell them the product and the full past_due, and ask when they can pay that full amount.\n\nDeadlines (get_account gives each product's band, attempts, latest_promise_date and floor_30_percent): business days are Monday to Friday. The holidays are Friday 16 October 2026, 25 December 2026, 26 December 2026 and 1 January 2027. Monday 26 October 2026 is not a holiday. Early (1 to 10 days late): one attempt, latest promise date Wednesday 21 October 2026. Late (11 to 40 days late): two attempts, latest promise date Thursday 15 October 2026.\nA promise date must be today or later, a business day, and not after the product's deadline.\n- If they name a business day on or before the deadline, accept it. This does not use an attempt.\n- If they name a weekend or a holiday that is not after the deadline, move it to the next business day and tell them so.\n- If they name a date after the deadline, offer the full past_due on the deadline.\n- Never offer the 5th, and do not prefer the 5th, because of payday. A date on the 5th is judged only by these rules.\n\nAmount: ask for the full past_due. Never ask how much they can pay. Accept only the full past_due, or exactly floor_30_percent (30 percent of past_due, rounded half up to the penny) once they have said the full amount is too much. No other amount. Never use minimum_payment or instalment_amount as the floor. If they say the full amount is too much, offer the floor once, on the deadline. That offer does not use an attempt.\nAttempts: a flat no, with no date and no amount, uses an attempt. Early has no second attempt. On a late product the second attempt is the floor on the deadline. When the attempts are used up, say goodbye. The outcome is no_promise with reason refused.\n\nSaving a promise: read back the amount and the date, then ask, in these words, \"Do you confirm?\" Only after a clear yes, call create_promise with that amount and date (YYYY-MM-DD). After it returns ok true, say, in these words, \"A confirmation email will be sent to the address on file.\" Then say goodbye. The outcome is promise. If create_promise fails, call it once more with the same amount and date. If it fails again, do not say the promise is saved. Say goodbye. The outcome is no_promise with reason service_error.\n\nHardship (they cannot pay anything): do not start the attempts and do not offer the floor. Say one sentence of sympathy, then offer the support queue once. If they accept, call transfer_to_agent with queue support. The outcome is transferred with reason support. If they decline, say goodbye. The outcome is no_promise with reason hardship. Never offer a discount or a waiver.\nA new plan or lower instalments: do not describe a plan and do not record a promise. Call transfer_to_agent with queue restructuring. The outcome is transferred with reason restructuring.\nAlready paid: do not record a promise. Say, in these words, \"Payments can take one business day to appear.\" Then say goodbye. The outcome is paid, with no reason.\nA dispute: do not argue and do not record a promise. Offer the general queue. If they accept, call transfer_to_agent with queue general (outcome transferred, reason general). If they decline, say goodbye (outcome no_promise, reason dispute).\nA request for a person: call transfer_to_agent with queue general. The outcome is transferred with reason general.\nAfter transfer_to_agent returns ok true, tell them you are connecting them and say goodbye. Never call add_note.",
+   "tools": [
+    {
+     "type": "function",
+     "config": {
+      "timeoutMs": 12000,
+      "maxRetries": 0
+     },
+     "function": {
+      "name": "get_account",
+      "handler": "__function__:api_call",
+      "description": "The customer's late products. CALL it once, before you say anything about the account. Call it once more if it fails.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "url": {
+         "type": "string",
+         "default": "https://freya-bank-mock.freyavoice.workers.dev/v1/get_account"
+        },
+        "method": {
+         "type": "string",
+         "default": "POST"
+        },
+        "headers": {
+         "type": "object",
+         "properties": {
+          "Content-Type": {
+           "type": "string",
+           "default": "application/json"
+          }
+         }
+        },
+        "body": {
+         "type": "object",
+         "properties": {
+          "customer_id": {
+           "type": "string",
+           "default": "{{customer_id}}"
+          }
+         },
+         "required": [
+          "customer_id"
+         ]
+        }
+       }
+      }
+     },
+     "post_process_code": "try:\n    from decimal import Decimal, ROUND_HALF_UP\n    if isinstance(result, dict):\n        result.pop('header', None)\n        d = result.get('data')\n        if isinstance(d, dict):\n            if d.get('ok') is False:\n                d['what_to_do_next'] = 'The account could not be loaded. Call get_account once more.'\n            for p in (d.get('products') or []):\n                if not isinstance(p, dict):\n                    continue\n                due = Decimal(str(p.get('past_due')))\n                p['floor_30_percent'] = str((due * Decimal('0.3')).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP))\n                if int(p.get('days_late') or 0) <= 10:\n                    p['band'] = 'early'\n                    p['attempts'] = 1\n                    p['latest_promise_date'] = '2026-10-21 (Wednesday)'\n                else:\n                    p['band'] = 'late'\n                    p['attempts'] = 2\n                    p['latest_promise_date'] = '2026-10-15 (Thursday)'\nexcept Exception:\n    pass\n"
+    },
+    {
+     "type": "function",
+     "config": {
+      "timeoutMs": 12000,
+      "maxRetries": 0
+     },
+     "function": {
+      "name": "create_promise",
+      "handler": "__function__:api_call",
+      "description": "Record a payment promise, one per product. CALL it only after the customer said yes to \"Do you confirm?\" on the read-back of amount and date. If it fails, call it once more with the same amount and date.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "url": {
+         "type": "string",
+         "default": "https://freya-bank-mock.freyavoice.workers.dev/v1/create_promise"
+        },
+        "method": {
+         "type": "string",
+         "default": "POST"
+        },
+        "headers": {
+         "type": "object",
+         "properties": {
+          "Content-Type": {
+           "type": "string",
+           "default": "application/json"
+          }
+         }
+        },
+        "body": {
+         "type": "object",
+         "properties": {
+          "customer_id": {
+           "type": "string",
+           "default": "{{customer_id}}"
+          },
+          "product_id": {
+           "type": "string",
+           "default": "{{product_id}}",
+           "description": "product_id copied unchanged from the get_account result."
+          },
+          "amount": {
+           "type": "number",
+           "default": "{{amount}}",
+           "description": "The full past_due, or exactly floor_30_percent."
+          },
+          "date": {
+           "type": "string",
+           "default": "{{date}}",
+           "description": "Promise date as YYYY-MM-DD."
+          }
+         },
+         "required": [
+          "customer_id",
+          "product_id",
+          "amount",
+          "date"
+         ]
+        }
+       }
+      }
+     },
+     "post_process_code": "try:\n    if isinstance(result, dict):\n        result.pop('header', None)\n        d = result.get('data')\n        if isinstance(d, dict) and d.get('ok') is True:\n            d['what_to_do_next'] = 'Saved. Say: A confirmation email will be sent to the address on file. Then say goodbye, ending with Have a good day.'\n        elif isinstance(d, dict):\n            d['what_to_do_next'] = 'Not saved. Call create_promise once more with the same amount and date. Do not say it is saved.'\nexcept Exception:\n    pass\n"
+    },
+    {
+     "type": "function",
+     "config": {
+      "timeoutMs": 12000,
+      "maxRetries": 0
+     },
+     "function": {
+      "name": "transfer_to_agent",
+      "handler": "__function__:api_call",
+      "description": "Hand the call to a person. CALL it with restructuring when they want a new plan or lower instalments, with support when a hardship customer accepts support, with general when they ask for a person or accept help with a dispute.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "url": {
+         "type": "string",
+         "default": "https://freya-bank-mock.freyavoice.workers.dev/v1/transfer_to_agent"
+        },
+        "method": {
+         "type": "string",
+         "default": "POST"
+        },
+        "headers": {
+         "type": "object",
+         "properties": {
+          "Content-Type": {
+           "type": "string",
+           "default": "application/json"
+          }
+         }
+        },
+        "body": {
+         "type": "object",
+         "properties": {
+          "customer_id": {
+           "type": "string",
+           "default": "{{customer_id}}"
+          },
+          "queue": {
+           "type": "string",
+           "enum": [
+            "restructuring",
+            "general",
+            "support"
+           ],
+           "default": "{{queue}}",
+           "description": "One of: restructuring, general, support."
+          }
+         },
+         "required": [
+          "customer_id",
+          "queue"
+         ]
+        }
+       }
+      }
+     }
+    },
+    {
+     "type": "function",
+     "config": {
+      "timeoutMs": 12000,
+      "maxRetries": 0
+     },
+     "function": {
+      "name": "schedule_callback",
+      "handler": "__function__:api_call",
+      "description": "Book a callback. CALL it only if the verified customer asks to be called back, for today or the next business day, 10:00 to 18:00, later than now.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "url": {
+         "type": "string",
+         "default": "https://freya-bank-mock.freyavoice.workers.dev/v1/schedule_callback"
+        },
+        "method": {
+         "type": "string",
+         "default": "POST"
+        },
+        "headers": {
+         "type": "object",
+         "properties": {
+          "Content-Type": {
+           "type": "string",
+           "default": "application/json"
+          }
+         }
+        },
+        "body": {
+         "type": "object",
+         "properties": {
+          "customer_id": {
+           "type": "string",
+           "default": "{{customer_id}}"
+          },
+          "date": {
+           "type": "string",
+           "default": "{{date}}",
+           "description": "Callback date as YYYY-MM-DD."
+          },
+          "time": {
+           "type": "string",
+           "default": "{{time}}",
+           "description": "Callback time as HH:MM, 24 hour."
+          }
+         },
+         "required": [
+          "customer_id",
+          "date",
+          "time"
+         ]
+        }
+       }
+      }
+     }
+    },
+    {
+     "type": "function",
+     "config": {
+      "timeoutMs": 12000,
+      "maxRetries": 0
+     },
+     "function": {
+      "name": "add_note",
+      "handler": "__function__:api_call",
+      "description": "NEVER call this tool. The policy for this campaign says: do not call add_note.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "url": {
+         "type": "string",
+         "default": "https://freya-bank-mock.freyavoice.workers.dev/v1/add_note"
+        },
+        "method": {
+         "type": "string",
+         "default": "POST"
+        },
+        "headers": {
+         "type": "object",
+         "properties": {
+          "Content-Type": {
+           "type": "string",
+           "default": "application/json"
+          }
+         }
+        },
+        "body": {
+         "type": "object",
+         "properties": {
+          "customer_id": {
+           "type": "string",
+           "default": "{{customer_id}}"
+          },
+          "product_id": {
+           "type": "string",
+           "default": "{{product_id}}",
+           "description": "product_id from the get_account result."
+          },
+          "reason": {
+           "type": "string",
+           "enum": [
+            "refused",
+            "hardship",
+            "dispute",
+            "paid",
+            "service_error"
+           ],
+           "default": "{{reason}}",
+           "description": "One of: refused, hardship, dispute, paid, service_error."
+          },
+          "text": {
+           "type": "string",
+           "default": "{{text}}",
+           "description": "Short note."
+          }
+         },
+         "required": [
+          "customer_id",
+          "product_id",
+          "reason"
+         ]
+        }
+       }
+      }
+     }
+    },
+    {
+     "type": "function",
+     "config": {
+      "timeoutMs": 10000
+     },
+     "function": {
+      "name": "end_call",
+      "handler": "__function__:end_call",
+      "description": "Ends the call. You normally do NOT call this: the phrase \"Have a good day.\" ends the call by itself. Call it without any text only if the customer answers after your goodbye.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "message_mode": {
+         "type": "string",
+         "default": "none"
+        },
+        "interruptible": {
+         "type": "boolean",
+         "default": true
+        },
+        "trigger_pattern": {
+         "type": "string",
+         "default": "Have a good day|have a good day"
+        },
+        "trigger_timeout": {
+         "type": "number",
+         "default": 3
+        },
+        "trigger_pattern_both": {
+         "type": "string",
+         "default": "goodbye|bye|have a good day|you too|thank you|thanks|take care"
+        }
+       }
+      }
+     }
+    }
+   ],
+   "transitions": []
+  }
+ },
+ "tools": [
+  {
+   "type": "function",
+   "config": {
+    "timeoutMs": 12000,
+    "maxRetries": 0,
+    "alwaysRunsAt": [
+     "end_of_call"
+    ]
+   },
+   "function": {
+    "name": "close_call",
+    "handler": "__function__:api_call",
+    "description": "Record how the call ended, from the conversation. Always the last tool call.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "url": {
+       "type": "string",
+       "default": "https://freya-bank-mock.freyavoice.workers.dev/v1/close_call"
+      },
+      "method": {
+       "type": "string",
+       "default": "POST"
+      },
+      "headers": {
+       "type": "object",
+       "properties": {
+        "Content-Type": {
+         "type": "string",
+         "default": "application/json"
+        }
+       }
+      },
+      "body": {
+       "type": "object",
+       "properties": {
+        "customer_id": {
+         "type": "string",
+         "default": "{{customer_id}}"
+        },
+        "outcome": {
+         "type": "string",
+         "enum": [
+          "promise",
+          "paid",
+          "transferred",
+          "no_promise",
+          "not_verified",
+          "not_reached"
+         ],
+         "default": "{{outcome}}",
+         "description": "promise: create_promise returned ok true. paid: the customer said the product is already paid. transferred: transfer_to_agent returned ok true. no_promise: verified customer, no promise. not_verified: the identity check did not pass. not_reached: the customer was not on the line."
+        },
+        "reason": {
+         "type": "string",
+         "default": "{{reason}}",
+         "description": "Leave out for promise and paid. not_verified: failed (three wrong answers) or declined (refused the questions twice). not_reached: callback (a callback was scheduled) or no_callback (no time in the window). no_promise: refused (attempts used up), hardship (declined support), dispute, or service_error. transferred: restructuring, support or general (the queue)."
+        }
+       },
+       "required": [
+        "customer_id",
+        "outcome"
+       ]
+      }
+     }
+    }
+   },
+   "pre_process_code": "try:\n    b = config.get('body')\n    if isinstance(b, dict) and b.get('outcome') in ('promise', 'paid'):\n        b.pop('reason', None)\nexcept Exception:\n    pass\n"
+  }
+ ]
+}
