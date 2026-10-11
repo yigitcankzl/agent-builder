@@ -254,7 +254,7 @@ def once_tool(lines):
             "try:\n"
             "    _P = globals().get('params')\n"
             "    _line = str((_P if isinstance(_P, dict) else dict()).get('line') or '').strip()\n"
-            "    _used = _json.loads(vars.get('gate_once') or '[]')\n"
+            "    _used = [x for x in str(vars.get('gate_once') or '').split(',') if x]\n"
             "    vars['gate_say'], vars['gate_new'], vars['gate_ok'] = '', 'no', 'no'\n"
             "    if _line not in _L:\n"
             "        vars['gate_status'], vars['gate_error'] = 'unknown_line', 'say_once line must be one of: ' + ', '.join(_L)\n"
@@ -263,7 +263,7 @@ def once_tool(lines):
             "        vars['gate_error'] = ('ALREADY SAID ONCE (' + _line + '): do not say or offer it again. Instead: ' + _L[_line]['after'])\n"
             "    else:\n"
             "        _used.append(_line)\n"
-            "        vars['gate_once'] = _json.dumps(_used)\n"
+            "        vars['gate_once'] = ','.join(_used)\n"
             "        vars['gate_status'], vars['gate_ok'], vars['gate_error'] = 'once_ok', 'yes', ''\n"
             "    if _line in _L and _L[_line]['np']:\n"
             "        vars['gate_np'] = _line\n"
@@ -283,35 +283,38 @@ def once_tool(lines):
 # next_offer only: (1) after a no-persuasion line (hardship ...) no offer is made at all: the gate state is restored and
 # the model is told the close instead; (2) an open offer is re-said at most once: a further 'first' becomes 'flat' (the
 # next attempt), so a talkative customer's non-answers move the call on instead of looping (live PUB-06 89957a2d).
+# Scratch values live in Python names (HYB_*), never in vars: after v6's next_offer wrote vars named _np_block and
+# _st_backup, every later api_call hook in the call failed with "Sandbox did not return a parseable result" (live v6
+# PUB-06 8c4f0608: the bank recorded the promise, the hook failed, the model said it could not be saved). The counter
+# is a plain "p1:2,p2:1" string, not JSON.
 def offer_guard(lines):
     np = {k: v["after"] for k, v in lines.items() if v["np"]}
-    pre = ("try:\n"
-           "    vars['_np_block'], vars['_st_backup'] = '', vars.get('gate_st') or ''\n"
-           f"    _NP = _json.loads({json.dumps(json.dumps(np))})\n"
-           "    if vars.get('np_topic') == 'yes' and _NP and not vars.get('gate_np'):\n"
-           "        vars['gate_np'] = list(_NP)[0]\n"
-           "    if vars.get('gate_np') in _NP:\n"
-           "        vars['_np_block'] = _NP[vars['gate_np']]\n"
-           "    _ev = str(vars.get('gate_event') or 'first')\n"
-           "    _fn = vars.get('gate_first_n')\n"
-           "    _fn = _json.loads(_fn) if isinstance(_fn, str) and _fn.startswith('{') else dict()\n"
-           "    _pk = str(vars.get('gate_product') or '')\n"
-           "    _n = int(_fn.get(_pk) or 0)\n"
-           "    if _ev == 'first':\n"
-           "        _n += 1\n"
-           "        if _n > 2:\n"
-           "            vars['gate_event'], _n = 'flat', 1\n"
+    pre = ("HYB_NP_BLOCK, HYB_ST_BACKUP = '', vars.get('gate_st') or ''\n"
+           "try:\n"
+           f"    HYB_NP = _json.loads({json.dumps(json.dumps(np))})\n"
+           "    if vars.get('np_topic') == 'yes' and HYB_NP and not vars.get('gate_np'):\n"
+           "        vars['gate_np'] = list(HYB_NP)[0]\n"
+           "    if vars.get('gate_np') in HYB_NP:\n"
+           "        HYB_NP_BLOCK = HYB_NP[vars['gate_np']]\n"
+           "    HYB_EV = str(vars.get('gate_event') or 'first')\n"
+           "    HYB_FN = dict(x.split(':', 1) for x in str(vars.get('gate_first_n') or '').split(',') if x.count(':') == 1)\n"
+           "    HYB_PK = str(vars.get('gate_product') or '').replace(':', '').replace(',', '')\n"
+           "    HYB_N = int(HYB_FN.get(HYB_PK) or 0)\n"
+           "    if HYB_EV == 'first':\n"
+           "        HYB_N += 1\n"
+           "        if HYB_N > 2:\n"
+           "            vars['gate_event'], HYB_N = 'flat', 1\n"
            "    else:\n"
-           "        _n = 1\n"
-           "    _fn[_pk] = _n\n"
-           "    vars['gate_first_n'] = _json.dumps(_fn)\n"
+           "        HYB_N = 1\n"
+           "    HYB_FN[HYB_PK] = str(HYB_N)\n"
+           "    vars['gate_first_n'] = ','.join(k + ':' + v for k, v in HYB_FN.items())\n"
            "except Exception:\n"
            "    pass\n")
     post = ("try:\n"
-            "    if vars.get('_np_block'):\n"
-            "        vars['gate_st'] = vars.get('_st_backup') or vars.get('gate_st')\n"
+            "    if HYB_NP_BLOCK:\n"
+            "        vars['gate_st'] = HYB_ST_BACKUP or vars.get('gate_st')\n"
             "        vars['gate_status'], vars['gate_ok'], vars['gate_say'], vars['gate_new'] = 'no_persuasion', 'no', '', 'no'\n"
-            "        vars['gate_error'] = 'NO OFFER: ' + str(vars.get('gate_np')) + ' was raised, the brief allows no persuasion. Instead: ' + vars['_np_block']\n"
+            "        vars['gate_error'] = 'NO OFFER: ' + str(vars.get('gate_np')) + ' was raised, the brief allows no persuasion. Instead: ' + HYB_NP_BLOCK\n"
             "except Exception:\n"
             "    pass\n")
     return pre, post

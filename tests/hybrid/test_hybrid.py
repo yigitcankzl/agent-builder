@@ -125,5 +125,8 @@ r = call("next_offer", gate_product="p1", gate_event="first")
 ok("np_topic=yes from the extraction alone also blocks the offer", r["gate_status"] == "no_persuasion", r)
 spoken = [n["on_enter"]["text"] for n in WF["nodes"].values() if (n.get("on_enter") or {}).get("type") == "tts"]
 ok("no 'call is recorded' in spoken lines (PUB-10 6ffe9fde judge: honesty word)", not any("call is recorded" in t.lower() for t in spoken), spoken)
+# live v6 PUB-06 8c4f0608: after vars named _np_block/_st_backup appeared, every api_call hook failed to return
+bad = [k for k, v in V.items() if k.startswith("_") or (isinstance(v, str) and v.startswith("{") and k not in ("gate_st", "gate_account"))]
+ok("the gates write no var named _x and no JSON-object strings besides gate_st", not bad, bad)
 print("PASS" if all(checks) else "FAIL")
 sys.exit(0 if all(checks) else 1)
