@@ -167,6 +167,7 @@ def validate(wf, rp, oas_path, unstable_quotes=()):
     send = [("close_call", "outcome", r["outcome"]) for r in (rp.get("closing") or {}).get("table") or [] if not r.get("blocked")]
     send += [("transfer_to_agent", "queue", q) for q in ((rp.get("transfer") or {}).get("queue_map") or {}).values()]
     send += [("transfer_to_agent", "queue", q) for q in (rp.get("transfer") or {}).get("pre_verification_queues") or []]
+    send += [("transfer_to_agent", "queue", r.get("queue")) for r in ((rp.get("products") or {}).get("route_by_type") or {}).values()]
     send += [("add_note", "reason", e["note_reason"]) for e in rp.get("events") or [] if e.get("note_reason")]
     send += [("close_call", "outcome", e["outcome"]) for coll in ("events", "who_rules") for e in rp.get(coll) or []
              if e.get("outcome") and not e.get("blocked")]
@@ -307,6 +308,9 @@ def validate(wf, rp, oas_path, unstable_quotes=()):
     for t in ((rp.get("products") or {}).get("floor_by_type") or {}):
         if types and t not in types and t != "*":     # '*' = the floor for any type (gap 3)
             errs.append(f"14: product type {t!r} not in the OAS get_account enum")
+    for t in ((rp.get("products") or {}).get("route_by_type") or {}):
+        if types and t not in types:
+            errs.append(f"14: routed product type {t!r} not in the OAS get_account enum")
     for q in (rp.get("identity") or {}).get("questions") or []:
         if not q.get("blocked") and enum("verify_identity", "field") and q.get("field") not in enum("verify_identity", "field"):
             errs.append(f"14: identity field {q.get('field')!r} not in the OAS enum and not blocked")

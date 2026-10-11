@@ -60,9 +60,10 @@ def deadline_for(today, days_late, policy):
         if days_late <= b['max_days_late']:
             band = b
             break
-    if dl.get('rule', 'business_days_after_today') == 'calendar_days_after_today':
-        # a calendar deadline on a non-business day: the last recordable day is the business day before it
-        d = shift_to_business_day(today + datetime.timedelta(days=band['days']), policy, -1)
+    if (band.get('rule') or dl.get('rule', 'business_days_after_today')) == 'calendar_days_after_today':
+        # A closed calendar deadline rolls as the band says; legacy policies roll back.
+        roll = band.get('roll') or dl.get('roll') or 'previous'
+        d = shift_to_business_day(today + datetime.timedelta(days=band['days']), policy, 1 if roll == 'next' else -1)
         return d if d is not None and d >= today else today
     return add_business_days(today, band['days'], policy)
 

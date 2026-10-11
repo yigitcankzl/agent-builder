@@ -544,11 +544,14 @@ def load_products(policy, st, rows, today):
         dl = int(float(r.get('days_late') or 0))
         band = _band(policy, dl)
         dline = deadline_for(today, dl, policy)
-        st['products'].append(dict(id=str(r.get('product_id')), status='open', attempts=0, floor_offered=False,
+        route = ((policy.get('products') or dict()).get('route_by_type') or dict()).get(str(r.get('type')))
+        st['products'].append(dict(id=str(r.get('product_id')), status='route_pending' if route else 'open', attempts=0, floor_offered=False,
                                    write_failures=0, offer=None, note=None))
         st['_pd'].append(dict(id=str(r.get('product_id')), type=str(r.get('type')), name=_name(policy, r), past_due=float(r.get('past_due') or 0),
                               days_late=dl, floor=_floor(policy, r), band=band.get('name'), deadline=iso(dline),
                               plan=_plan(policy, band), too_much=False, note_reason=None, refused_offers=[]))
+        if route:
+            st['_pd'][-1]['route'] = route
     distinct_names(st)
 
 
@@ -856,7 +859,7 @@ def on_tool(policy, st, te, today, cv):
         return verify_result(policy, st, data, cv)
     if op == 'account':
         load_products(policy, st, _account_rows(te, policy), today)
-        return account_statement(policy, st, today)
+        return account_statement(policy, st, today, cv)
     if op == 'promise':
         i = _index(st, pend['product_id'])
         st['products'][i]['status'] = 'persisted'
@@ -873,6 +876,9 @@ def on_tool(policy, st, te, today, cv):
         return do_close(policy, st, o, r, D_FAREWELL)
     if op == 'transfer':
         st['transfers'].append(dict(queue=st['_xfer_queue']))
+        if pend.get('product_id'):
+            st['products'][_index(st, pend['product_id'])]['status'] = 'routed'
+            return next_write(policy, st, cv)
         o, r = st['_xfer_close']
         return do_close(policy, st, o, r, D_FAREWELL)
     return resay(st)
@@ -908,6 +914,9 @@ def tool_failed(policy, st, te, today, cv):
         st['products'][i]['status'] = 'noted'
         return next_write(policy, st, cv)
     if pend['op'] == 'transfer':   # continue the call, never claim the transfer happened
+        if pend.get('product_id'):
+            st['products'][_index(st, pend['product_id'])]['status'] = 'route_failed'
+            return next_write(policy, st, cv)
         return resay(st)
     if pend['op'] == 'callback':
         o, r = V(policy)['callback_failed']
@@ -954,12 +963,15 @@ def verify_result(policy, st, data, cv):
     return ask(st, qs[idt['idx']].get('ask') or D_SAFE, 'id_' + idt['order'][idt['idx']])
 
 
-def account_statement(policy, st, today):
-    lines = [debt_intro(policy)] + [product_line(pd) for pd in st['_pd']]
-    if len(st['products']) == 1:
-        p, pd = _p(st, 0)
+def account_statement(policy, st, today, cv=None):
+    active = _open_products(st)
+    if not active:
+        return next_write(policy, st, cv or dict(customer_id=st.get('_cid')))
+    lines = [debt_intro(policy)] + [product_line(st['_pd'][i]) for i in active]
+    if len(active) == 1:
+        p, pd = _p(st, active[0])
         p['status'], p['offer'] = 'proposed', dict(amount=pd['past_due'], date=iso(today))
-        st['cur'] = 0
+        st['cur'] = active[0]
         st['offer'] = dict(product_ids=[p['id']], amount=pd['past_due'], date=iso(today), kind='full')
         text = ' '.join(x for x in lines + [pay_today_question(policy)] if x)
     else:
@@ -997,6 +1009,14 @@ def next_write(policy, st, cv):
                 pd['_noted_try'] = True
                 st['_last_args'] = dict(customer_id=cid(cv), product_id=p['id'], reason=pd['note_reason'])
                 return call(st, 'note', 'add_note', dict(st['_last_args']), product_id=p['id'])
+    for p, pd in zip(st['products'], st['_pd']):
+        if p['status'] == 'route_pending':
+            r = pd['route']
+            p['status'] = 'routing'
+            st['_xfer_queue'] = r['queue']
+            st['_xfer_close'] = [r['close']['outcome'], r['close'].get('reason')]
+            st['_last_args'] = dict(customer_id=cid(cv), queue=r['queue'])
+            return call(st, 'transfer', 'transfer_to_agent', dict(st['_last_args']), product_id=p['id'])
     if any(p['status'] == 'persisted' for p in st['products']):
         st['_wrapup_said'] = True
         st['q'] = 'none'
@@ -1744,6 +1764,8 @@ def topic_event(policy, st, ev, today, cv):
         st['_q_prev'], st['_ask_prev'] = st['q'], st.get('_last_ask') or ''
         return ask(st, (row or dict()).get('say') or D_HELP_FIRST, 'help_first')
     if st['q'] == 'support_offer' and t in TOPIC_INFO + ('decline', 'purpose', 'hardship'):
+        if t in TOPIC_INFO and (event_row(policy, t) or dict()).get('continuation_only') and ev.get('also') not in ('reject', 'no'):
+            return resay(st, info_line(policy, st, t))
         line = ''        # PUB-05: "no, can I get a discount?" declines the support offer; it is never offered again
         if t == 'terms' and st.get('_terms_n', 0) < 1:
             st['_terms_n'] = 1
@@ -1877,6 +1899,10 @@ def on_user(policy, st, ev, today, cv):
             return do_close(policy, st, o, r, D_FAREWELL)
         return resay(st)
     # negotiation / readback / account
+    if ev.get('prod') and str(ev['prod']).isdigit():
+        i = _valid_prod(st, ev, None)
+        if i is not None and st['_pd'][i].get('route'):
+            return after_resolved(policy, st, today, cv)
     consume_bulk_refusals(policy, st, ev)
     if k == 'topic':
         return topic_event(policy, st, ev, today, cv)

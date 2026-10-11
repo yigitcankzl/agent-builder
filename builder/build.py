@@ -105,7 +105,9 @@ def _rules_summary(policy):
         if isinstance(v, dict) and v.get("source"):
             out[k] = [s.get("quote") if isinstance(s, dict) else s for s in v["source"]][:6]
     for i, b in enumerate((policy.get("deadline") or {}).get("bands") or []):
-        out[f"deadline.bands[{i}]"] = {kk: b.get(kk) for kk in ("name", "min_days_late", "max_days_late", "days", "attempts")}
+        out[f"deadline.bands[{i}]"] = {kk: b.get(kk) for kk in ("name", "min_days_late", "max_days_late", "days", "attempts", "rule", "roll", "source")}
+    if (policy.get("products") or {}).get("route_by_type"):
+        out["products.route_by_type"] = policy["products"]["route_by_type"]
     for band, steps in ((policy.get("attempts") or {}).get("plan") or {}).items():
         out[f"attempts.plan.{band}"] = [(s.get("date_rule"), s.get("amount_rule"), ((s.get("source") or [{}])[0] or {}).get("quote")) for s in steps]
     return out
@@ -165,6 +167,7 @@ def _assumptions(rp, brep, result):
             "api_mismatch": [f"{m.get('field')} {m.get('value')!r}: {m.get('action')}" for m in brep.get("api_mismatch") or []],
             "tools_blocked": [f"{t}: {v.get('why')}" for t, v in (rp.get("tool_status") or {}).items() if v.get("status") == "blocked"],
             "unsupported_source_rules": [n for n in notes if "unsupported source rule" in n],
+            "unquoted_policy_fields": brep.get("source_gaps") or [],
             "partial_agent": bool(result.get("partial")), "stripped_features": result.get("degraded") or [],
             "examiner": (result or {}).get("examiner"),
             "signals": [(result or {}).get("signal")] if (result or {}).get("signal") else [],

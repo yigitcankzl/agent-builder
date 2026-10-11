@@ -17,7 +17,7 @@ to_reducer(policy, oas_path, stable_unmapped=None) -> (reducer_policy, report)
 import copy, json, os, re, sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from builder.engine.date_policy import _norm, validate, unsupported_rules
+from builder.engine.date_policy import _norm, bad_quotes, validate, unsupported_rules
 from builder.policy_extract import oas_summary
 from builder.oas import load_oas
 
@@ -114,6 +114,123 @@ def _first_quote(node):
         if isinstance(s, str):
             return s
     return ""
+
+
+def _sources(node, inherited=None):
+    src = node.get("source", inherited or []) if isinstance(node, dict) else inherited or []
+    src = src or []
+    src = src if isinstance(src, list) else [src]
+    return [s for s in src if (isinstance(s, str) and s.strip()) or
+            (isinstance(s, dict) and s.get("file") != "default" and str(s.get("quote") or "").strip())]
+
+
+def source_gaps(policy):
+    """Semantic fields inherit a section's quotes; plumbing is OAS/contract evidence, not business policy."""
+    skip = {"inputs", "tool_args", "tool_results", "composed_fields", "api_mismatch", "tool_status", "tools",
+            "unmapped_topics", "unplaced_hooks", "topics_absent", "who_checklist", "free_talk_nodes", "superseded", "source_errors"}
+    out = []
+    def walk(x, path, inherited):
+        if isinstance(x, dict):
+            src = _sources(x, inherited)
+            if x.get("quote"):
+                src = src or [x["quote"]]
+            for k, v in x.items():
+                if k not in ("source", "quote") and not k.startswith(("_", "brief_")):
+                    walk(v, path + "." + k if path else k, src)
+        elif isinstance(x, list):
+            for i, v in enumerate(x):
+                walk(v, f"{path}[{i}]", inherited)
+        elif x not in (None, "") and not inherited:
+            out.append(path)
+    for k, v in policy.items():
+        if k not in skip and not k.startswith("_"):
+            walk(v, k, [])
+    return out
+
+
+def source_guard(p):
+    """Drop unquoted business rows/mappings and unsourced close effects; never turn a prohibition into a close."""
+    notes = []
+    def drop(path):
+        notes.append(f"ASSUMPTION {path}: no supporting brief quote; dropped, never voiced or acted on")
+    for key in ("events", "who_rules", "aliases", "hooks"):
+        kept = []
+        for i, r in enumerate(p.get(key) or []):
+            if _sources(r):
+                kept.append(r)
+            else:
+                drop(f"{key}[{i}]")
+        if key in p:
+            p[key] = kept
+    for key, it in (p.get("topic_checklist") or {}).items():
+        if it.get("present") and not _sources(it):
+            it["present"] = False
+            drop(f"topic_checklist.{key}")
+    for key, it in (p.get("sentences") or {}).items():
+        if isinstance(it, dict) and it.get("text") and not _sources(it):
+            it["text"] = ""
+            drop(f"sentences.{key}.text")
+    cl = p.get("closing") or {}
+    cl["table"] = [r for i, r in enumerate(cl.get("table") or [])
+                   if _sources(r, cl.get("source")) or drop(f"closing.table[{i}]")]
+    def close_sources(x, path, inherited):
+        if isinstance(x, dict):
+            src = _sources(x, inherited)
+            if x.get("quote"):
+                src = src or [x["quote"]]
+            if x.get("outcome") and not src:
+                drop(path + ".close")
+                x["outcome"], x["reason"] = "", ""
+            for k, v in x.items():
+                if k != "source" and not k.startswith(("_", "brief_")):
+                    close_sources(v, path + "." + k, src)
+        elif isinstance(x, list):
+            for i, v in enumerate(x):
+                close_sources(v, f"{path}[{i}]", inherited)
+    for k, v in p.items():
+        if k not in CLOSE_SKIP + ("superseded",) and not k.startswith("_"):
+            close_sources(v, k, [])
+    for r in list(p.get("events") or []) + list((p.get("topic_checklist") or {}).values()):
+        quotes = [_first_quote({"source": [s]}) for s in _sources(r)]
+        positive = [re.sub(r"\b(?:do not|don't|never)\s+(?:\w+\s+){0,2}(?:close|end|stop|transfer|handover)\w*\b", "", q, flags=re.I)
+                    for q in quotes]
+        if r.get("outcome") and not any(re.search(r"\b(close|end|stop|transfer|handover)\w*\b", q, re.I) for q in positive):
+            drop(f"event {r.get('topic', 'checklist')}.close")
+            r["outcome"], r["reason"], r["continuation_only"] = "", "", True
+    return notes
+
+
+def band_rules(p):
+    """Recover legacy band overrides only from unambiguous, quoted day-count instructions."""
+    notes = []
+    dl = p.get("deadline") or {}
+    for b in dl.get("bands") or []:
+        src = _sources(b, dl.get("source"))
+        if b.get("rule"):
+            b.setdefault("source", src)
+            continue
+        choices = []
+        for s in src:
+            q = _first_quote({"source": [s]})
+            for m in re.finditer(r"\b(\d+)(?:st|nd|rd|th)? (business|calendar) days? after today\b", q, re.I):
+                if int(m.group(1)) == b.get("days"):
+                    choices.append((m.group(2).lower() + "_days_after_today", s))
+        if choices and len({r for r, s in choices}) == 1:
+            b["rule"], b["source"] = choices[0][0], [s for r, s in choices]
+            if b["rule"] == "calendar_days_after_today":
+                for s in src:
+                    q = _first_quote({"source": [s]})
+                    m = re.search(r"\b(previous|next) business day\b", q, re.I)
+                    if m and re.search(r"\b(calendar|latest promise|deadline)\b", q, re.I):
+                        b.setdefault("roll", m.group(1).lower())
+                        b["source"].append(s)
+                        break
+            notes.append(f"deadline band {b.get('name')}: counting rule recovered from its quoted day count")
+        elif choices:
+            problem = f"deadline band {b.get('name')}: ambiguous quoted counting rules; no override guessed"
+            p.setdefault("source_errors", []).append(problem)
+            notes.append("ASSUMPTION " + problem)
+    return notes
 
 
 def _match(head, cues):
@@ -561,7 +678,7 @@ def floor_spec(v, acct_fields, products_source=None):
     rnd = prm.get("round") or (prm.get("rounding") or {}).get("mode") if isinstance(prm.get("rounding"), dict) else prm.get("round")
     to = prm.get("to") or ((prm.get("rounding") or {}).get("to") if isinstance(prm.get("rounding"), dict) else None)
     to = {0.01: "cent", "0.01": "cent", 1: "unit", "1": "unit", 1.0: "unit"}.get(to, to)
-    out = {"kind": kind, "source": v.get("source") or DEFAULT}
+    out = {"kind": kind, "source": _sources(v, products_source) or DEFAULT}
     if kind == "field":
         f = prm.get("field")
         if not f:
@@ -790,12 +907,12 @@ def extra_topics(p, live):
         ev = next((e for e in p.get("_events_raw") or [] if e.get("topic") == u.get("topic")), {})
         o, r = ev.get("outcome") or u.get("outcome"), ev.get("reason") or u.get("reason")
         eff = str(ev.get("effect") or u.get("effect") or "")
-        immediate = re.search(r"\b(close|stop|end)\w*", eff, re.I) and not re.search(r"\b(second|twice|again|repeat\w*|after \w+ times)\b", eff, re.I)
+        immediate = re.search(r"\b(close|stop|end)\w*", u.get("quote") or "", re.I) and re.search(r"\b(close|stop|end)\w*", eff, re.I) and not re.search(r"\b(second|twice|again|repeat\w*|after \w+ times)\b", eff, re.I)
         if o and (o, r or None) in pairs and u.get("quote") and immediate:
             m = re.search(r"\bif (?:the (?:customer|person|caller)|they)\s+(?:says?\s+(?:that\s+)?)?(?:they\s+)?(.+?)(?:[,.;]|$)", u["quote"], re.I)
             trig = (m.group(1).strip() if m else str(u["topic"]))[:80]
             out.append({"id": _slug(u["topic"]), "trigger": trig, "effect": "close", "outcome": o, "reason": r or None,
-                        "quote": u["quote"]})
+                        "quote": u["quote"], "source": ev.get("source") or []})
             u["action"] = f"extra topic: close {o}/{r}"
             notes.append(f"extra topic {_slug(u['topic'])}: close {o}/{r} ({u['quote'][:60]!r})")
     return out, notes
@@ -916,7 +1033,7 @@ def tool_status(p, oas_path):
             why = "no OAS property for role(s) " + ", ".join(miss)
         elif t == "transfer_to_agent":
             tr = p.get("transfer") or {}
-            if not (tr.get("queue_map") or tr.get("pre_verification_queues")):
+            if not (tr.get("queue_map") or tr.get("pre_verification_queues") or (p.get("products") or {}).get("route_by_type")):
                 why = "no brief queue binds to the OAS queue field"
         elif t == "close_call":
             live = [r for r in (p.get("closing") or {}).get("table") or [] if not r.get("blocked")]
@@ -1031,8 +1148,8 @@ def _derived_sentences(p, stable, brief_text=None):
                 break
     for sid, text in CONTRACT_SENTENCES.items():
         if not has(sid):
-            sent[sid] = {"text": text, "verbatim": True, "max_times": 99, "source": DEFAULT}
-            notes.append(f"sentence {sid}: no brief wording, contract default used")
+            sent[sid] = {"text": "", "verbatim": True, "max_times": 99, "source": DEFAULT}
+            notes.append(f"ASSUMPTION sentence {sid}: no brief wording; no sentence synthesized")
     return notes
 
 
@@ -1048,9 +1165,9 @@ def _date_templates(p):
             words = [w for w in re.split(r"<[A-Z]+>", txt) if w.strip()]
             if words and all(any(_norm(w) in _norm(q or "") for q in quotes) for w in words):
                 continue
-        node[key] = default
+        node[key] = ""
         if txt and txt != default:
-            notes.append(f"{sec}.{key}: extractor wording replaced by the contract template")
+            notes.append(f"ASSUMPTION {sec}.{key}: extractor wording not in its quote; dropped")
     return notes
 
 
@@ -1128,6 +1245,8 @@ def to_reducer(policy, oas_path, stable_unmapped=None, brief_text=None):
                 oas.setdefault(tool, {})[role] = spec["props"][field]["enum"]
     p = copy.deepcopy(policy)
     mism, notes = [], []
+    notes += source_guard(p)
+    notes += band_rules(p)
 
     def resolve(path, value, field, enum):
         """-> the value to use, or None = BLOCKED. Exact OAS value, or an explicit sourced alias; else api_mismatch."""
@@ -1149,12 +1268,20 @@ def to_reducer(policy, oas_path, stable_unmapped=None, brief_text=None):
             cvs[r] = r
             notes.append(f"meta.call_vars: role {r} not stated, mapped to the variable {r}")
     meta["call_vars"] = cvs
+    if not (p.get("now") or {}).get("var"):
+        p.setdefault("now", {})["var"] = cvs["now"]
+        notes.append("ASSUMPTION now.var: runtime input binding, not a business policy value")
     # ---- products
     types = _enum(oas, "get_account", "products[].type", response=True)
     prod = p.setdefault("products", {})
     for k in ("floor_by_type", "naming_by_type"):
         m = {}
         for t, v in (prod.get(k) or {}).items():
+            if not _sources(v, prod.get("source")):
+                notes.append(f"ASSUMPTION products.{k}.{t}: no supporting brief quote; dropped")
+                if k == "floor_by_type":
+                    p.setdefault("source_errors", []).append(f"products.{k}.{t}: missing source for a floor rule")
+                continue
             nt = "*" if str(t).strip() in ("*", "any", "all") else _ptype(t)
             if types and nt not in types and nt != "*":
                 nt = resolve(f"products.{k}.{t}", nt, "get_account.products[].type", types)
@@ -1224,7 +1351,9 @@ def to_reducer(policy, oas_path, stable_unmapped=None, brief_text=None):
     # Success rows may require a reason too; preserve the sourced pair, not just its outcome.
     nulls = [r for r in live if not r["reason"]]
     paid_row = next((r for r in live if re.search(r"\b(paid|settled|already)\b", str(r.get("when", "")) + " " + str(r["outcome"]), re.I)), None)
-    promise_row = next((r for r in live if r is not paid_row and re.search(r"\b(promise|arrangement|recorded|saved|agreed)\w*", str(r.get("when", "")) + " " + str(r["outcome"]), re.I)), None) \
+    promise_row = next((r for r in live if r is not paid_row and re.search(r"\b(promise|arrangement|recorded|saved|agreed)\w*", str(r.get("when", "")) + " " + str(r["outcome"]), re.I)
+                        and (not re.search(r"\btransfer\w*\b", str(r.get("when", "")), re.I) or
+                             re.search(r"\b(no|not|nothing|without)\b(?:\s+\w+){0,3}\s+transfer\w*\b", str(r.get("when", "")), re.I))), None) \
         or next((r for r in nulls if r is not paid_row), None)
     slots.update(promise=promise_row, paid=paid_row)
     cl["slots"] = {k: ({"outcome": v["outcome"], "reason": v["reason"]} if v else None) for k, v in slots.items()}
@@ -1267,19 +1396,32 @@ def to_reducer(policy, oas_path, stable_unmapped=None, brief_text=None):
                        else {"outcome": None, "reason": None, "action": "end_without_close",
                              "why": "no usable not-reached row in the OAS enum"}),
         "before_verified": {"outcome": (declined or {}).get("outcome"), "reason": (declined or {}).get("reason")},
-        "after_verified": "computed", "source": src}
+        "after_verified": "computed", "source": _sources(cl) + _sources(idn) or src}
     # ---- writes, transfer, tools
     w = p.setdefault("writes", {})
     tr = w.get("transfer") or {}
     e_q = _enum(oas, "transfer_to_agent", "queue")
     qmap = {}
-    for sit, q in (tr.get("queue_map") or {}).items():
+    for sit, q in list((tr.get("queue_map") or {}).items()):
+        if not _sources(tr, w.get("source")):
+            notes.append(f"ASSUMPTION transfer.queue_map.{sit}: no supporting brief quote; dropped")
+            tr["queue_map"].pop(sit)
+            continue
+        if types and _ptype(sit) in types:
+            notes.append(f"ASSUMPTION transfer.queue_map.{sit}: product type, not a topic; dropped")
+            tr["queue_map"].pop(sit)
+            continue
         v = resolve(f"writes.transfer.queue_map.{sit}", q, "transfer_to_agent.queue", e_q)
         if v:
             qmap[sit] = v
     pre = [v for i, q in enumerate(tr.get("pre_verification_queues") or [])
+           if _sources(tr, w.get("source"))
            if (v := resolve(f"writes.transfer.pre_verification_queues[{i}]", q, "transfer_to_agent.queue", e_q))]
     hr = p.get("human_request") or {}
+    if hr.get("queue") and not _sources(hr):
+        notes.append("ASSUMPTION human_request.queue: no supporting brief quote; dropped")
+        p["human_request"] = dict(hr, queue="", applies_before_verification=False)
+        hr = {}
     if hr.get("applies_before_verification") and hr.get("queue"):
         v = resolve("human_request.queue", hr["queue"], "transfer_to_agent.queue", e_q)
         if v and v not in pre:
@@ -1293,12 +1435,52 @@ def to_reducer(policy, oas_path, stable_unmapped=None, brief_text=None):
         v = resolve("human_request.queue", hr["queue"], "transfer_to_agent.queue", e_q)
         if v:
             qtopic["human"] = v
+    transfer_sources = _sources(hr) + _sources(tr, w.get("source"))
     for t, q in explicit_queues(brief_text, set(qtopic) | {"restructure", "human", "hardship"}, e_q).items():
         if not qtopic.get(t):
             notes.append(f"ASSUMPTION transfer.queue_map.{t}: filled {q!r} from raw text (extractor left it empty)")
             qtopic[t] = q
+            transfer_sources += [{"file": "brief", "quote": clause} for clause in re.split(r"(?<=[.;])\s+|\n", brief_text or "")
+                                 if explicit_queues(clause, {t}, e_q).get(t) == q]
     p["transfer"] = {"queue_map": qtopic, "pre_verification_queues": pre,
-                     "source": (hr.get("source") or []) + (w.get("source") or []) or DEFAULT}
+                     "source": transfer_sources or DEFAULT}
+    routes = dict(prod.get("route_by_type") or {})
+    for ev in p.get("events") or []:
+        typ = _ptype(ev.get("topic"))
+        if not types or typ not in types or typ in routes:
+            continue
+        src = _sources(ev)
+        for s in src:
+            q = _first_quote({"source": [s]})
+            m = re.search(r"\btransfer (?:every|each|all)\b[^.;]*?\bto (?:the )?([A-Za-z_]+) queue\b", q, re.I)
+            if m and any(re.search(r"\bno note\b|\bdo not (?:write|add|record) a? ?note\b", _first_quote({"source": [x]}), re.I) for x in src):
+                routes[typ] = {"action": "transfer", "queue": m.group(1), "note": False, "source": src}
+                notes.append(f"products.route_by_type.{typ}: recovered from the quoted product exception")
+                break
+    bound_routes = {}
+    for typ, r in routes.items():
+        typ = _ptype(typ)
+        src = _sources(r, prod.get("source"))
+        if not src:
+            notes.append(f"ASSUMPTION products.route_by_type.{typ}: no supporting quote; dropped")
+            p.setdefault("source_errors", []).append(f"products.route_by_type.{typ}: missing source for a mandatory route")
+            continue
+        if r.get("action") != "transfer" or r.get("note") is not False or (types and typ not in types):
+            notes.append(f"ASSUMPTION products.route_by_type.{typ}: unsupported route, deterministic build rejected")
+            r = dict(r, invalid=True)
+        queue = resolve(f"products.route_by_type.{typ}.queue", r.get("queue"), "transfer_to_agent.queue", e_q)
+        close = next((x for x in live if re.search(r"\btransfer\w*\b", str(x.get("when") or ""), re.I)
+                      and (x.get("reason") == queue or len([z for z in live if re.search(r"\btransfer\w*\b", str(z.get("when") or ""), re.I)]) == 1)), None)
+        bound_routes[typ] = dict(r, queue=queue, source=src,
+                                close={"outcome": close["outcome"], "reason": close.get("reason"), "source": close.get("source") or cl.get("source")} if close else {})
+    if bound_routes:
+        prod["route_by_type"] = bound_routes
+    else:
+        prod.pop("route_by_type", None)
+    cb = w.get("callback")
+    if isinstance(cb, dict) and not any(cb.get(k) for k in ("days", "start", "end")):
+        w.pop("callback")
+        notes.append("ASSUMPTION writes.callback: empty extraction means no callback rule; omitted")
     if not tr.get("pre_verification_queues"):
         notes.append("transfer.pre_verification_queues not stated by the brief: empty (no transfer before verification)")
     nt = w.setdefault("notes", {})
@@ -1381,6 +1563,7 @@ def to_reducer(policy, oas_path, stable_unmapped=None, brief_text=None):
                 continue
             evs.append({"topic": t, "brief_topic": t, "precedence": len(evs), "say": it.get("say", ""), "effect": it.get("effect", ""),
                         "outcome": it.get("outcome") or "", "reason": it.get("reason") or "", "note_reason": it.get("note_reason") or "",
+                        "continuation_only": bool(it.get("continuation_only")),
                         "source": it.get("source") or DEFAULT})
         p["topics_absent"] = absent
         for i, ev in enumerate(evs):   # the checklist's tool values go through the same exact-enum rule
@@ -1422,10 +1605,6 @@ def to_reducer(policy, oas_path, stable_unmapped=None, brief_text=None):
         quotes = [str(x.get("quote") if isinstance(x, dict) else x) for x in (ev.get("source") or [])]
         if s_ and (_norm(s_.strip('"')) not in _norm(" ".join(quotes)) or INSTRUCTION.search(s_)):
             ev["say_dropped"], ev["say"] = s_, ""
-        if not ev.get("say"):
-            line = speakable(quotes)
-            if line:
-                ev["say"], ev["say_rewritten_from"] = line, True
     # outcomes/reasons carried by event and who rules are sent to close_call too: same enum rule, same block
     for coll, name in ((evs, "events"), (who, "who_rules")):
         for i, ev in enumerate(coll):
@@ -1463,7 +1642,7 @@ def to_reducer(policy, oas_path, stable_unmapped=None, brief_text=None):
     # ---- sentences, honesty, free talk
     sent = p.setdefault("sentences", {})
     for sid, text in DEFAULT_SENTENCES.items():
-        sent.setdefault(sid, {"text": text, "verbatim": True, "max_times": 99, "source": DEFAULT})
+        sent.setdefault(sid, {"text": "", "verbatim": True, "max_times": 99, "source": DEFAULT})
     notes += _map_sentence_keys(p)
     notes += _derived_sentences(p, stable_unmapped or [], brief_text)
     for sid in FIXED_SENTENCES:
@@ -1535,10 +1714,21 @@ def to_reducer(policy, oas_path, stable_unmapped=None, brief_text=None):
         p.setdefault("meta", {})["assistant_disclosure_forbidden"] = True
         notes.append("the brief forbids saying the agent is an assistant: the greet adds no disclosure")
     notes += placeholder_lint(p)
+    notes += source_guard(p)
+    gaps = source_gaps(p)
+    notes += [f"ASSUMPTION {path}: policy field has no supporting brief quote" for path in gaps]
+    evidence_errors = []
+    if brief_text is not None:
+        overrides = {"bands": [b for b in p.get("deadline", {}).get("bands", []) if b.get("rule") or b.get("roll")],
+                     "routes": (prod.get("route_by_type") or {})}
+        evidence_errors = [f"{path}: source quote is not in the brief" for path, f, q in bad_quotes(overrides, brief_text)]
+        notes += [f"ASSUMPTION {e}; deterministic build rejected" for e in evidence_errors]
+    if evidence_errors:
+        p.setdefault("source_errors", []).extend(evidence_errors)
     notes += [f"tool {t} BLOCKED: {v['why']}" for t, v in p["tool_status"].items() if v["status"] == "blocked"]
     unsupported = unsupported_rules(p)
     notes += [f"ASSUMPTION unsupported source rule: {e}; deterministic build rejected, use L3" for e in unsupported]
-    report = {"api_mismatch": mism, "notes": notes, "errors": validate(p) + unsupported,
+    report = {"api_mismatch": mism, "notes": notes, "source_gaps": gaps, "errors": validate(p) + unsupported,
               "events": [(e_["brief_topic"], e_["topic"]) for e_ in evs], "who": [(x["brief_topic"], x["who"]) for x in who]}
     return p, report
 

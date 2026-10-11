@@ -31,7 +31,7 @@ def mandatory_tools(p):
     if (w.get("callback") or ((p.get("identity") or {}).get("gate") or {}).get("on_no") == "callback"
             or any(e.get("effect_kind", e.get("effect")) == "callback" for e in p.get("who_rules") or [])):
         required.add("schedule_callback")
-    if any(tr.get("queue_map") or tr.get("pre_verification_queues") for tr in transfers) or (p.get("human_request") or {}).get("queue"):
+    if any(tr.get("queue_map") or tr.get("pre_verification_queues") for tr in transfers) or (p.get("human_request") or {}).get("queue") or (p.get("products") or {}).get("route_by_type"):
         required.add("transfer_to_agent")
     return required
 
