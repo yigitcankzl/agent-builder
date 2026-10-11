@@ -2,9 +2,11 @@
 
     python3 tests/final_shadow/render.py tests/final_shadow/persona_templates.json bindings.json [-o out.json]
 
-bindings.json: {"values": {"<placeholder>": "<text>", ...}, "enable_branches": ["hardship", ...]}
+bindings.json: {"values": {"<placeholder>": "<text>", ...}, "enable_branches": ["hardship", ...],
+               "not_applicable_tags": ["identity", ...]}
 A persona is rendered only if every name in its `requires` has a value; a conditional persona also needs its
-`branch` in enable_branches. Any placeholder left unresolved raises.
+`branch` in enable_branches; a persona carrying a not-applicable tag is skipped (e.g. identity when the caller is
+verified before the call). Any placeholder left unresolved raises.
 """
 import argparse
 import json
@@ -34,8 +36,13 @@ def fill(text, values, persona_id):
 def render(templates, bindings):
     values = {k: str(v) for k, v in (bindings.get("values") or {}).items() if v not in (None, "")}
     enabled = set(bindings.get("enable_branches") or [])
+    off = set(bindings.get("not_applicable_tags") or [])
     rendered, skipped = [], []
     for p in templates["personas"]:
+        na = sorted(off & set(p["tags"]))
+        if na:
+            skipped.append({"id": p["id"], "reason": "not applicable: " + ", ".join(na)})
+            continue
         if p["conditional"] and p["branch"] not in enabled:
             skipped.append({"id": p["id"], "reason": f"branch {p['branch']} not enabled"})
             continue

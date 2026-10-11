@@ -52,7 +52,7 @@ def test_schema():
 def test_ids_and_count():
     ids = [p["id"] for p in PERSONAS]
     check(len(ids) == len(set(ids)), "duplicate ids")
-    check(15 <= len(ids) <= 20, f"{len(ids)} templates")
+    check(15 <= len(ids) <= 30, f"{len(ids)} templates")
 
 
 def test_styles_covered():
@@ -97,6 +97,34 @@ def test_render_and_conditionals():
     part = R.render(TEMPLATES, {"values": {"amount": "x"}, "enable_branches": []})
     check(all(set(next(p for p in PERSONAS if p["id"] == r["id"])["requires"]) <= {"amount"}
               for r in part["rendered"]), "personas with missing requires are skipped")
+
+
+STATEMENT = {"debt_currency_switch", "due_date_talkative", "move_week_pieces", "move_week_corrects",
+             "email_address_asks_back", "pay_now_handover", "asks_for_person", "privacy_card_number",
+             "debt_and_email_one_turn", "multiple_cards_choice"}
+
+
+def test_statement_case():
+    """The final case (IVR-verified statement-debt line): its templates exist, need no identity answer, and a
+    bindings file without identity values and with the identity tag off renders them and skips identity cleanly."""
+    by = {p["id"]: p for p in PERSONAS}
+    check(STATEMENT <= set(by), f"missing {STATEMENT - set(by)}")
+    for i in STATEMENT:
+        check(not any(r.startswith("identity_answer") for r in by[i]["requires"]) and "identity" not in by[i]["tags"], i)
+    for p in PERSONAS:
+        if any(r.startswith("identity_answer") for r in p["requires"]):
+            check("identity" in p["tags"], f"{p['id']}: identity-based without the identity tag")
+    vals = {k: f"‹{k}›" for k in TEMPLATES["placeholders"] if not k.startswith("identity_answer")}
+    out = R.render(TEMPLATES, {"values": vals, "enable_branches": ["multiple_cards"], "not_applicable_tags": ["identity"]})
+    ids = {r["id"] for r in out["rendered"]}
+    check(STATEMENT <= ids, f"statement templates not rendered: {STATEMENT - ids}")
+    ident = {p["id"] for p in PERSONAS if "identity" in p["tags"]}
+    check(not (ids & ident), "identity template rendered")
+    reasons = {s["id"]: s["reason"] for s in out["skipped"]}
+    check(all(reasons.get(i, "").startswith("not applicable: identity") for i in ident), f"identity skips: {reasons}")
+    out = R.render(TEMPLATES, {"values": vals})     # without the tag switch they are still skipped, never raise
+    check(not ({r["id"] for r in out["rendered"]} & ident), "identity rendered without identity values")
+    check(not any(i in {r["id"] for r in out["rendered"]} for i in {"multiple_cards_choice"}), "branch off by default")
 
 
 def test_unresolved_fails():
