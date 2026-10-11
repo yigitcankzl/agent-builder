@@ -168,9 +168,18 @@ def guard_attempt_date_rules(p, mism, notes):
     after = (p.get("date_rules") or {}).get("after_deadline") if isinstance(p.get("date_rules"), dict) else None
     general = after.get("source") or [] if isinstance(after, dict) and after.get("action") == "offer_deadline" else []
     general = general if date_rule_supported("deadline", general) else []
+    multi = p.get("multi_product") or {}
+    def common_today(s):
+        return date_rule_supported("today", [s]) and bool(
+            re.search(r"\ball\b[^.?!]*\b(?:products?|accounts?|ones|them)\b", _quote([s]), re.I))
+    opening_only = multi.get("ask_all_today_once") and any(common_today(s) for s in _sources(multi))
     for band, steps in ((p.get("attempts") or {}).get("plan") or {}).items():
         for i, step in enumerate(steps):
             value, src = step.get("date_rule"), step.get("source") or []
+            # A shared opening quote does not authorize asking for today separately for each product.
+            if value == "today" and opening_only and any(common_today(s) for s in src):
+                step["source"] = src = [s for s in src if not common_today(s)]
+                notes.append(f"attempts.plan.{band}[{i}]: common today question quote is opening-only, not per-product persuasion")
             if date_rule_known(value) and date_rule_supported(value, src):
                 continue
             path = f"attempts.plan.{band}[{i}].date_rule"
