@@ -249,9 +249,15 @@ CP_PRE = """try:
     lerr = str(vars.get('create_promise_response.error') or '')
     if last and lok == 'true' and last not in written:
         written.append(last)
-    uncertain = bool(last) and lok not in ('true', 'false') and bool(lerr) and '.invalid' not in lerr
-    if len(terms) == 1 and last == target and lok == 'false':      # without hook persistence: the platform's own count
-        derived = int(vars.get('create_promise_success_count') or 0) - (1 if target in written else 0)
+    # A non-2xx answer from the bank arrives as a transport error too ("API request failed: {'ok': False, 'error':
+    # 'service unavailable, nothing was recorded'}", live v8 raw-4 PUB-10 12706780): the bank ANSWERED, so it is a
+    # definite failure. Uncertain is only an error with no bank answer in it (timeout, connection, unparseable).
+    answered = bool(_re2.search(r"api request failed|'ok': ?false|\\"ok\\": ?false|nothing was recorded|status code [45]\\d\\d", lerr.lower()))
+    uncertain = bool(last) and lok not in ('true', 'false') and bool(lerr) and '.invalid' not in lerr and not answered
+    if len(terms) == 1 and last == target and (lok == 'false' or answered):   # the platform's own counts (no hook needed)
+        derived = int(vars.get('create_promise_success_count') or 0) - (1 if target in written else 0) if lok == 'false' else 0
+        own = int(vars.get('gate_blocked') or 0)       # our own .invalid blocks are transport errors too: not the bank's
+        derived = max(derived, int(vars.get('create_promise_failure_count') or 0) - own if answered else 0)
         failed[target] = str(max(1, derived, int(failed.get(target) or 0)))
     heard = vars.get('rb_answer') == 'yes'
     if not heard and vars.get('rb_answer') in (None, '', 'other'):
@@ -273,6 +279,8 @@ CP_PRE = """try:
         vars['gate_writing'] = target
     vars['gate_written'] = ','.join(written)
     vars['gate_failed'] = ','.join(k + ':' + v for k, v in failed.items())
+    if '.invalid' in str(config.get('url')):
+        vars['gate_blocked'] = str(int(vars.get('gate_blocked') or 0) + 1)
 except Exception:
     config['url'] = 'https://not-confirmed-read-back-and-ask-again.invalid/'
 """

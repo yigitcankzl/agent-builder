@@ -137,6 +137,26 @@ for persist in (True, False):          # False: hook writes are lost; only the p
 vs = _copy.deepcopy(base)
 auto(vs, "p2", None, "DNS resolution failed for 'not-confirmed-read-back-and-ask-again.invalid'")
 ok("our own block (a .invalid host) is not an uncertain write", "invalid" not in pre_on(vs, "p2")["url"], vs.get("gate_written"))
+# live v8 raw-4 PUB-10 12706780: the bank's designed first failure is a non-2xx, reported as a transport error
+BANK503 = "API request failed: {'ok': False, 'error': 'service unavailable, nothing was recorded'}"
+for persist in (True, False):
+    tag = "hooks persist" if persist else "hooks do NOT persist"
+    on = (lambda vs: vs) if persist else (lambda vs: _copy.deepcopy(vs))
+    vs = _copy.deepcopy(base)
+    fc0 = int(vs.get("gate_blocked") or 0)        # the platform counts our earlier own blocks as failures too
+    vs["create_promise_failure_count"] = fc0
+    pre_on(on(vs), "p2"); auto(vs, "p2", None, BANK503); vs["create_promise_failure_count"] = fc0 + 1
+    cfg = pre_on(on(vs), "p2")
+    ok(f"[{tag}] a non-2xx bank answer ('nothing was recorded') is a definite failure: the retry passes", "invalid" not in cfg["url"] and cfg["body"]["date"] == "2026-10-19", cfg["url"])
+    auto(vs, "p2", None, BANK503); vs["create_promise_failure_count"] = fc0 + 2
+    ok(f"[{tag}] the second bank failure blocks: bank-failed-again", "bank-failed-again" in pre_on(on(vs), "p2")["url"], vs.get("gate_failed"))
+vs = _copy.deepcopy(base)
+fc0 = int(vs.get("gate_blocked") or 0)
+vs["rb_answer"] = "no"; pre_on(vs, "p2"); vs["rb_answer"] = "yes"   # our own block (not confirmed): a transport error
+vs["create_promise_failure_count"] = fc0 + 1
+auto(vs, "p2", None, "DNS resolution failed for 'not-confirmed-read-back-and-ask-again.invalid'")
+pre_on(vs, "p2"); auto(vs, "p2", None, BANK503); vs["create_promise_failure_count"] = fc0 + 2
+ok("our own earlier block is not counted as a bank failure: the retry still passes", "invalid" not in pre_on(vs, "p2")["url"], (vs.get("gate_blocked"), vs.get("gate_failed")))
 r = post(_copy.deepcopy(base), None, 503)
 ok("a 5xx answered by the bank counts as a definite failure (retry message)", "once more" in r.get("what_to_do_next", ""), r)
 # invented product ids (live proof 1): mapped to the real one, or rejected with the valid ids named
