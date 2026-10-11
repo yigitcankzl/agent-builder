@@ -123,9 +123,7 @@ class PartialQuestionTests(unittest.TestCase):
                      "kind=topic;also=none;st=partial;prod=;t=human",
                      "kind=topic;also=none;st=partial;prod=;t=hardship"):
             actual, act = say(pol, copy.deepcopy(st), body)
-            # no question in it: the continue line, or the plan guard's clarify at the open ask (24ec05a invariant)
-            self.assertEqual(act["type"], "say_exact")
-            self.assertIn(act["text"], (R.D_CONTINUE, R.D_OFFER_NUDGE))
+            self.assertEqual(act, dict(type="say_exact", text=R.D_CONTINUE))
             self.assertEqual(actual["counters"], st["counters"])
             self.assertIsNone(actual["pending"])
 

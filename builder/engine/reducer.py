@@ -852,7 +852,6 @@ def step(policy, st, event, tool_event, now, call_vars=None):
             info = ev.get('t')
         if info and ev.get('st') == 'partial':
             partial_answer = True
-            ev = dict(ev, _question=info)     # answered + the continue line: never the plan guard's nudge / clarify
             if ev.get('kind') in (None, '', 'other'):
                 ev = dict(ev, kind='topic', t=info)   # a question is not cut-off offer chatter
         if info:       # PUB-04: a date (or any event) plus "are you a robot?": the event once, the answer line first
@@ -1702,16 +1701,22 @@ def plan_guard(policy, st, ev):
     if status == 'complete' and ev.get('why') == 'restore' and q in ('readback', 'what_to_change'):
         st.pop('_uncertain_q', None)
         return restore_readback(policy, st)
-    if status in ('partial', 'ambiguous'):
+    if status == 'partial':
+        # a cut-off turn never acts and is never talked over: the continue line (on_user), the pieces kept; a bare yes
+        # right after it re-asks the open question instead of agreeing / writing
+        if q in ('offer', 'pay_today', 'readback'):
+            st['_uncertain_q'] = q
+        if q == 'readback' and k in ('yes', 'no', 'accept', 'reject'):
+            return ask(st, D_RB_CLARIFY, q)    # a half yes / no to the read-back is a hedge on the decision (bb748cf5)
+        return None
+    if status == 'ambiguous':
         if q in ('offer', 'pay_today'):
             st['_uncertain_q'] = q
             return offer_chatter(st) if offer_is_open(st) else ask(st, D_OFFER_NUDGE, q)
         if q == 'readback':
             st['_uncertain_q'] = q
             return ask(st, D_RB_CLARIFY, q)
-        if status == 'ambiguous':
-            return resay(st)
-        return None
+        return resay(st)
     if q in ('readback', 'what_to_change') and k in ('yes', 'accept'):
         has_date = any(str(ev.get(x) or '').strip() for x in ('rel', 'd', 'm', 'wd', 'items')) or \
             ev.get('wk') in ('this', 'next', 'after_next') or ev.get('vague') == 'yes'
@@ -2166,7 +2171,7 @@ def topic_event(policy, st, ev, today, cv):
 
 # ---------------------------------------------------------------- per-phase user handling
 def on_user(policy, st, ev, today, cv):
-    guarded = None if ev.get('_question') else plan_guard(policy, st, ev)
+    guarded = plan_guard(policy, st, ev)
     if guarded:
         return guarded
     if ev.get('st') == 'partial':
