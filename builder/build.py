@@ -27,6 +27,12 @@ before the save. If it ends on EXTRACT, S2, S3 or S5, build waits for L3 until b
 check passed, saves THAT workflow once and exports it (exit 0, fallback_used=L3, a fallback_selection trace event).
 There is exactly one save per slot per build.
 
+Hybrid (BUILDER_HYBRID=1, OFF by default): when the main path passes, build waits for the L3 candidate and runs
+builder/hybrid.wire(L3 workflow, the main path's reducer policy): the gates (dates, amounts, offers, read-back) become
+code tools of the L3 agent and create_promise is blocked unless the read-back was confirmed. If it wires and passes the
+static check, the hybrid is the one save (result candidate=hybrid); else the main workflow is saved as without the flag.
+fallback_selection traces the choice and the reason. A main-path failure still selects the plain L3 as above.
+
 Exit codes (also `exit_code` in the JSON result; the trace has a `signal` event with the code):
   0  built, validated and saved (or --no-save)
   2  fallback_required: nothing saved, the previous export for the slot stays; `signal` names why and `next` the
@@ -172,6 +178,46 @@ def _assumptions(rp, brep, result):
             "examiner": (result or {}).get("examiner"),
             "signals": [(result or {}).get("signal")] if (result or {}).get("signal") else [],
             "s1_sources": (result or {}).get("s1") or []}
+
+
+def hybrid_enabled():
+    return os.environ.get("BUILDER_HYBRID") == "1"
+
+
+def _hybrid(fb, wf, rp, openapi, trace, t_end, out_dir, slot):
+    """BUILDER_HYBRID=1, main path valid: the L3 candidate + the main path's reducer policy -> hybrid.wire() (gates as
+    code tools). Returns (workflow, candidate): the hybrid when it wired and passed the static check, else the main
+    workflow unchanged (today's rule). The choice and its reason are traced as fallback_selection."""
+    t = time.time()
+    why = None
+    if fb is None:
+        why = "no L3 candidate (writer not started)"
+    elif not rp:
+        why = "no reducer policy"
+    else:
+        r = fb.wait(max(0, t_end - 150 - time.time()))
+        if r.get("workflow") is None or r.get("errors"):
+            why = "L3 candidate unusable: " + "; ".join((r.get("errors") or ["no workflow"])[:3])
+        elif time.time() > t_end - 60:
+            why = "no time left to wire"
+        else:
+            try:
+                from builder import hybrid
+                from builder.fallback_llm import check, oas_ops
+                hw = hybrid.wire(r["workflow"], rp)
+                errs = check(hw, oas_ops(openapi))
+                if errs:
+                    why = "hybrid static check: " + "; ".join(errs[:3])
+                else:
+                    os.makedirs(out_dir, exist_ok=True)
+                    json.dump(hw, open(os.path.join(out_dir, f"{slot}.hybrid.workflow.json"), "w"), indent=1)
+                    trace.log("fallback_selection", candidate="hybrid", wire_s=round(time.time() - t, 2),
+                              l3_seconds=r.get("seconds"), kb=len(json.dumps(hw)) // 1024)
+                    return hw, "hybrid"
+            except Exception as e:
+                why = f"wiring failed: {type(e).__name__}: {str(e)[:200]}"
+    trace.log("fallback_selection", candidate="main", hybrid=False, reason=why, wire_s=round(time.time() - t, 2))
+    return wf, "main"
 
 
 def _save(freya_client, slot, wf, out_dir, trace, result, candidate):
@@ -408,10 +454,15 @@ def build(briefs, openapi, slot=None, freya_client=None, out_dir="submission", t
     if time.time() > t0 + budget_s - 30:
         return finish("time guard fired before saving", 2, "GUARD")
     from builder import smoke as _sm
+    cand, main_wf = "main", wf
+    if hybrid_enabled():    # OFF by default: the main path stays the candidate unless BUILDER_HYBRID=1
+        wf, cand = _hybrid(fb[0], wf, rp, openapi, trace, t_end, out_dir, slot)
+        if cand == "hybrid":
+            result.update(candidate="hybrid")
     if fb[0] and not _sm.enabled():
-        fb[0].cancel()      # before the save: one save per slot, the main candidate
-    _save(freya_client, slot, wf, out_dir, trace, result, "main")
-    if not _smoke(freya_client, wf, trace, result, "main", rp):
+        fb[0].cancel()      # before the save: one save per slot (main or hybrid)
+    _save(freya_client, slot, wf, out_dir, trace, result, cand)
+    if not _smoke(freya_client, wf, trace, result, cand, rp):
         # S7: the saved main workflow cannot hold a chat. L3 (kept alive while the smoke runs) replaces it in the same
         # slot and is smoked again; without a valid L3 the build fails loudly.
         r3 = fb[0].wait(max(0, t_end - 150 - time.time())) if fb[0] else {}
@@ -430,6 +481,7 @@ def build(briefs, openapi, slot=None, freya_client=None, out_dir="submission", t
         fb[0] = None
         return finish("smoke failed after the save and no valid L3 workflow", 2, "S7", next="a human checks the slot")
     # a generic call through the compiled graph (Fork 3's walker): wiring bugs only; a warning signal, never blocking
+    wf = main_wf      # the graph walk and the self-test check the engine workflow (also the hybrid's policy)
     try:
         wk = walk_smoke(rp, wf, openapi)
     except Exception as e:

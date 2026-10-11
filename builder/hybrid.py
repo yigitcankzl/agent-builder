@@ -29,11 +29,13 @@ GATE_NAME = {"check_terms": "date_amount_gate", "next_offer": "attempt_gate", "c
 def prefix(tool):
     names = GATE_IN[tool]
     return ("try:\n"
+            "    import json as _json\n"
             "    _P = globals().get('params')\n"
             "    _P = _P if isinstance(_P, dict) else dict()\n"
             f"    for _k in {names!r}:\n"
             "        _v = _P.get(_k)\n"
             "        vars[_k] = '' if _v is None else str(_v)\n"
+            "    vars['gate_bad_product'] = ''\n"
             "    if not vars.get('gate_account'):\n"
             "        for _p in ('get_account_response.data', 'get_account_data', 'get_account_response'):\n"
             "            if vars.get(_p):\n"
@@ -45,8 +47,60 @@ def prefix(tool):
             "                if str(_k).startswith('get_account_response.data.'):\n"
             "                    _d['t_' + str(_k)] = vars.get(_k)\n"
             "            vars.update(_d)\n"
+            + PRODUCT_FIX +
             "except Exception as _e:\n"
             "    vars['gate_prefix_error'] = str(_e)[:150]\n")
+
+
+# The model sometimes invents a product id (credit_card_4821, cc_4821, prod_123: live proof 1). _fix maps a reference
+# to a real product_id: exact id, then a card_last4 inside it, then a unique product type word, then a position, then
+# the only product. An unknown one is kept (the gate rejects it) and gate_bad_product names the valid ids; the suffix
+# puts that into gate_error, which the next turn's prompt shows.
+PRODUCT_FIX = (
+    "    _rows = dict()\n"
+    "    for _k in list(vars.keys()):\n"
+    "        _s = str(_k)\n"
+    "        if _s.startswith('get_account_response.data.products.'):\n"
+    "            _p = _s[len('get_account_response.data.products.'):].split('.')\n"
+    "            if len(_p) == 2 and _p[0].isdigit():\n"
+    "                _rows.setdefault(int(_p[0]), dict())[_p[1]] = str(vars.get(_k))\n"
+    "    if not _rows:\n"
+    "        try:\n"
+    "            _a = vars.get('gate_account')\n"
+    "            _a = _json.loads(_a) if isinstance(_a, str) else _a\n"
+    "            _a = _a.get('data', _a) if isinstance(_a, dict) and 'products' not in _a else _a\n"
+    "            for _i, _r in enumerate((_a or dict()).get('products') or []):\n"
+    "                _rows[_i] = dict((str(_x), str(_y)) for _x, _y in _r.items())\n"
+    "        except Exception:\n"
+    "            pass\n"
+    "    _rows = [_rows[_i] for _i in sorted(_rows)]\n"
+    "    _ids = [_r.get('product_id', '') for _r in _rows]\n"
+    "    _words = dict(credit_card=('credit', 'card'), personal_loan=('personal',), car_loan=('car',))\n"
+    "    def _fix(ref):\n"
+    "        ref = str(ref or '').strip()\n"
+    "        if not _rows or ref in _ids:\n"
+    "            return ref\n"
+    "        low = ref.lower()\n"
+    "        for pick in ([r for r in _rows if r.get('card_last4') and r['card_last4'] in low],\n"
+    "                     [r for r in _rows if any(w in low for w in _words.get(r.get('type', ''), (r.get('type') or '#',)))]):\n"
+    "            if len(pick) == 1:\n"
+    "                return pick[0].get('product_id', '')\n"
+    "        if ref.isdigit() and 0 < int(ref) <= len(_rows):\n"
+    "            return _rows[int(ref) - 1].get('product_id', '')\n"
+    "        if len(_rows) == 1:\n"
+    "            return _rows[0].get('product_id', '')\n"
+    "        vars['gate_bad_product'] = 'product ' + ref + ' is not a product_id; use one of: ' + ', '.join(_ids)\n"
+    "        return ref\n"
+    "    if vars.get('gate_product'):\n"
+    "        vars['gate_product'] = _fix(vars.get('gate_product'))\n"
+    "    if vars.get('gate_terms'):\n"
+    "        _t = []\n"
+    "        for _x in str(vars.get('gate_terms')).split('|'):\n"
+    "            _f = _x.strip().split(':')\n"
+    "            if len(_f) == 3:\n"
+    "                _f[0] = _fix(_f[0])\n"
+    "            _t.append(':'.join(_f))\n"
+    "        vars['gate_terms'] = '|'.join(_t)\n")
 
 
 # confirm(yes) counts only when the extraction model heard a yes after the read-back (rb_answer, reset by the read-back)
@@ -63,6 +117,8 @@ def suffix():
     return ("\ntry:\n"
             "    if vars.get('gate_unheard') == 'yes':\n"
             "        vars['gate_status'], vars['gate_error'], vars['gate_unheard'] = 'stale', 'no yes heard after the read-back', 'no'\n"
+            "    if vars.get('gate_bad_product'):\n"
+            "        vars['gate_error'] = vars.get('gate_bad_product')\n"
             "    vars['gate_new'] = 'yes' if vars.get('gate_say') else 'no'\n"
             "    if vars.get('gate_status') in ('readback', 'repeat'):\n"
             "        vars['rb_answer'] = 'other'\n"
@@ -98,9 +154,10 @@ GATES (code decides these; never compute them yourself):
 - Dates and amounts: EVERY time the customer names a date or an amount, call check_terms with it BEFORE you answer, even when you think it is fine or not allowed; also before you propose, accept or read back one. If it is not recordable, the system says the right sentence to the customer for you; then go on from the customer's answer.
 - Offers: before every persuasion offer call next_offer (first, flat, too_much). The system says the offer. When no offer is left it says nothing: close as refused.
 - Read-back: call confirm with gate_action=readback and the exact terms; the system says the read-back and the confirm question. After the customer says yes, call confirm with gate_action=yes, then confirm with gate_action=next, then create_promise (it takes the granted terms itself). Repeat next + create_promise until nothing is left. If the customer changes anything, call confirm with gate_action=change and start again with check_terms.
+- Products: gate_product and the product in gate_terms are the product_id EXACTLY as get_account returned it (for example p1), never a name, type or card number. If the gate error names the valid ids, call the gate again with one of them.
 - A route status means this product goes to a person: transfer with the queue {{gate_queue}}, no offer, no read-back.
 - Never say recorded, scheduled, booked or transferred before the tool returned ok true.
-Latest gate result: status {{gate_status}}, ok {{gate_ok}}, date {{gate_out_date}}, amount {{gate_out_amount}}, sentence: {{gate_say}}
+Latest gate result: status {{gate_status}}, ok {{gate_ok}}, date {{gate_out_date}}, amount {{gate_out_amount}}, sentence: {{gate_say}}, error: {{gate_error}}
 
 MODEL-OWNED RULES: everything else in this prompt (opening, identity, third parties, callbacks, hardship, disputes, transfers, the closing outcome and reason) is yours to follow exactly as written; the gates cover only dates, amounts, offers and the read-back."""
 
@@ -176,7 +233,7 @@ def wire(wf, rp):
         raise ValueError("no node with create_promise")
     gates = [gate_tool(t, rp) for t in GATE_IN]
     wf["test_variables"] = dict(wf.get("test_variables") or {}, gate_say="", gate_new="no", gate_status="none", gate_ok="no",
-                                gate_out_date="", gate_out_amount="", gate_queue="")
+                                gate_out_date="", gate_out_amount="", gate_queue="", gate_error="")
     for h in hosts:
         n = nodes[h]
         n["tools"] = [gate_create_promise(t) if (t.get("function") or {}).get("name") == "create_promise" else t

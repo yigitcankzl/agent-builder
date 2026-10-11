@@ -17,7 +17,7 @@ CP = next(t for t in HOST["tools"] if t["function"]["name"] == "create_promise")
 V = {"now": "2026-10-14T11:00", "get_account_response.data.ok": True}
 for k, x in dict(product_id="p1", type="personal_loan", past_due=2125.10, days_late=20, instalment_amount=400).items():
     V["get_account_response.data.products.0." + k] = x
-for k, x in dict(product_id="p2", type="credit_card", past_due=420.0, days_late=5, minimum_payment=35).items():
+for k, x in dict(product_id="p2", type="credit_card", card_last4="4821", past_due=420.0, days_late=5, minimum_payment=35).items():
     V["get_account_response.data.products.1." + k] = x      # early band: deadline Wed 21 Oct, one attempt
 
 
@@ -66,5 +66,16 @@ r = call("confirm", gate_action="yes")
 ok("a second yes is stale (granted once)", r["gate_status"] == "stale", r)
 call("check_terms", gate_product="p1", gate_date="2026-10-15", gate_amount="2125.10")
 ok("any later gate run closes the write permission", "blocked.invalid" in pre()["url"], V.get("gate_status"))
+# invented product ids (live proof 1): mapped to the real one, or rejected with the valid ids named
+r = call("check_terms", gate_product="credit_card_4821", gate_date="2026-10-16", gate_amount="420")
+ok("credit_card_4821 -> p2 (card_last4)", V["gate_product"] == "p2" and r["gate_status"] == "non_business", r)
+r = call("check_terms", gate_product="personal loan", gate_date="2026-10-15", gate_amount="2125.10")
+ok("'personal loan' -> p1 (type word)", V["gate_product"] == "p1" and r["gate_status"] == "ok", r)
+r = call("check_terms", gate_product="2", gate_date="2026-10-19", gate_amount="420")
+ok("'2' -> p2 (position)", V["gate_product"] == "p2", r)
+r = call("check_terms", gate_product="prod_123", gate_date="2026-10-19", gate_amount="420")
+ok("prod_123 -> rejected, gate_error names p1, p2", "p1, p2" in (r["gate_error"] or "") and r["gate_ok"] == "no", r)
+r = call("confirm", gate_action="readback", gate_terms="cc_4821:420:2026-10-19")
+ok("read-back terms cc_4821 -> p2", r["gate_status"] in ("readback", "repeat") and V["gate_terms"].startswith("p2:"), r)
 print("PASS" if all(checks) else "FAIL")
 sys.exit(0 if all(checks) else 1)

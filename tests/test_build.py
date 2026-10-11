@@ -224,6 +224,46 @@ if __name__ == "__main__":
         finally:
             SM.run, SM.running_sims = real_run, real_sims
             os.environ.pop("BUILDER_SMOKE", None)
+        # hybrid (BUILDER_HYBRID=1): L3 candidate + the main path's policy -> hybrid.wire(); one save; fallback to main
+        saves = lambda r: [json.loads(l)["candidate"] for l in open(r["trace"]) if json.loads(l)["event"] == "save"]
+        sel = lambda r: [json.loads(l) for l in open(r["trace"]) if json.loads(l)["event"] == "fallback_selection"]
+        os.environ["BUILDER_HYBRID"] = "1"
+        try:
+            FakeL3.made.clear()
+            fh = MockFreya()
+            rh = build([os.path.join(ROOT, "briefs", "brief-a.md")], OAS, "hyb", fh, os.path.join(tmp, "h1"), os.path.join(tmp, "tr"),
+                       2, 1500, saved_extractor("brief-a"), fallback=FakeL3)
+            w = list(fh.saved.values())[0]
+            gated = [k for k, n in w["nodes"].items() if any(t["function"]["name"] == "confirm" for t in n.get("tools") or [])]
+            check(rh["exit_code"] == 0 and rh.get("candidate") == "hybrid" and saves(rh) == ["hybrid"] and len(fh.saved) == 1 and gated
+                  and sel(rh)[0]["candidate"] == "hybrid", rh)
+            print("ok hybrid: on -> the wired L3 + gates saved once, exit 0, fallback_selection=hybrid (wire %.2f s)" % sel(rh)[0]["wire_s"])
+            import builder.hybrid as HY
+            real_wire = HY.wire
+            HY.wire = lambda wf, rp: (_ for _ in ()).throw(ValueError("gate_source: unsupported policy"))
+            try:
+                fh2 = MockFreya()
+                rh2 = build([os.path.join(ROOT, "briefs", "brief-a.md")], OAS, "hyb-fail", fh2, os.path.join(tmp, "h2"), os.path.join(tmp, "tr"),
+                            2, 1500, saved_extractor("brief-a"), fallback=FakeL3)
+            finally:
+                HY.wire = real_wire
+            s2 = sel(rh2)
+            check(rh2["exit_code"] == 0 and saves(rh2) == ["main"] and not rh2.get("candidate") and s2[0]["candidate"] == "main"
+                  and "wiring failed" in s2[0]["reason"], rh2)
+            print("ok hybrid: wiring fails -> the main workflow saved once (today's rule), reason traced")
+            fh3 = MockFreya()
+            rh3 = build([os.path.join(ROOT, "briefs", "brief-a.md")], OAS, "hyb-badl3", fh3, os.path.join(tmp, "h3"), os.path.join(tmp, "tr"),
+                        2, 1500, saved_extractor("brief-a"), fallback=lambda b, o, log: FakeL3(b, o, log, errors=["shape: no greet"]))
+            check(rh3["exit_code"] == 0 and saves(rh3) == ["main"] and "L3 candidate unusable" in sel(rh3)[0]["reason"], rh3)
+            print("ok hybrid: L3 candidate invalid -> the main workflow saved once")
+            fh4 = MockFreya()
+            rh4 = build([os.path.join(ROOT, "briefs", "brief-a.md")], OAS, "hyb-l3", fh4, os.path.join(tmp, "h4"), os.path.join(tmp, "tr"),
+                        2, 1500, boom, fallback=FakeL3)
+            check(rh4["exit_code"] == 0 and rh4.get("fallback_used") == "L3" and saves(rh4) == ["llm"], rh4)
+            print("ok hybrid: main path failed (no policy) -> the plain L3 saved, as today")
+        finally:
+            os.environ.pop("BUILDER_HYBRID", None)
+        print("ok hybrid: off -> unchanged (every case above ran with the flag unset)")
         print("PASS")
     finally:
         shutil.rmtree(tmp)
