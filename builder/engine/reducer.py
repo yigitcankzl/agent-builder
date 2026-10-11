@@ -313,7 +313,8 @@ def init_state(policy, call_vars=None):
               hangup=dict(slot='unclear', outcome=_none(hb.get('outcome')), reason=_none(hb.get('reason'))),
               tok='kstart', last_tok='kstart', runs=0,
               _pd=[], _tc=dict(), _last_ask='', _queue=[], _cb_out=0, _ask_time=0, _xfer_pre='no',
-              _wrapup_said=False, _what_change=0, _id_hint=0, _id_retry=0)
+              _wrapup_said=False, _what_change=0, _id_hint=0, _id_retry=0, _confirmed_readback=None,
+              _readback_valid=False)
     st['counters']['confirm_name'] = 1          # the greet speaks the name question (§12 choice 2)
     st['_cid'] = cid(call_vars or dict())
     for h in policy.get('hooks') or []:
@@ -642,10 +643,27 @@ def ask(st, text, q):
 OUR_OFFERS = ('floor', 'attempt_n')   # offers the agent proposed (PUB-06); a read-back of the customer's own date is re-said
 RESAY_CAP = 3   # DEFAULT cap for every q: the same open question re-said this many times in a row, then loop_break()
 D_OFFER_NUDGE = "Sorry, I didn't catch that. Can you manage that?"   # contract default: no amount, date, or floor clause
+D_RB_CLARIFY = 'Do you confirm that exact read-back, yes or no?'
 
 
 def offer_is_open(st):
     return st.get('q') == 'offer' and (st.get('offer') or dict()).get('kind') in OUR_OFFERS
+
+
+def readback_item(st, product_id):
+    return next((x for x in ((st.get('readback') or dict()).get('items') or []) if x['product_id'] == product_id), None)
+
+
+def void_readback(st, rejected=False):
+    """Invalidate the current terms; a change keeps them as the last restorable plan, an explicit no does not."""
+    rb = st.get('readback')
+    if not rb or not st.get('_readback_valid', True):
+        return
+    if not rejected:
+        st['_rb_restore'] = dict(readback=copy.deepcopy(rb), products=copy.deepcopy(st['products']),
+                                 note_reasons=[pd.get('note_reason') for pd in st['_pd']])
+    st['_readback_valid'] = False
+    st.pop('_confirmed_readback', None)
 
 
 def offer_chatter(st):
@@ -759,7 +777,7 @@ def normalise(ev, st):
         return None
     e = dict(ev)
     k = e.get('kind')
-    if k == 'accept' and st['q'] != 'none':          # §11.1 maps yes and accept identically for every open q
+    if k == 'accept' and st['q'] not in ('none', 'readback', 'what_to_change'):
         e['kind'] = 'yes'
     if k == 'other' and e.get('st') == 'none' and st['q'] == 'help_first':
         e['kind'], e['st'] = 'yes', 'complete'
@@ -1027,9 +1045,17 @@ def next_write(policy, st, cv):
         i = _index(st, pid)
         p = st['products'][i]
         if p['status'] == 'confirmed':
+            approved = next((x for x in (st.get('_confirmed_readback') or []) if x['product_id'] == pid), None)
+            if not approved or approved.get('amount') != p['offer'].get('amount') or approved.get('date') != p['offer'].get('date'):
+                for product in st['products']:
+                    if product['status'] == 'confirmed':
+                        product['status'] = 'agreed'
+                st['_queue'] = []
+                return start_readback(policy, st)
             st['_last_args'] = dict(customer_id=cid(cv), product_id=pid, amount=api_amount(policy, p['offer']['amount']),
                                     date=p['offer']['date'])
             return call(st, 'promise', 'create_promise', dict(st['_last_args']), product_id=pid)
+    st['_confirmed_readback'] = None
     st['phase'] = 'wrapup'
     notes = (policy.get('writes') or dict()).get('notes') or dict()
     q = np_hook(policy)
@@ -1080,6 +1106,9 @@ def start_readback(policy, st):
         return None
     st['offer'] = None
     st['phase'] = 'readback'
+    st['_confirmed_readback'] = None
+    st.pop('_uncertain_q', None)
+    st['_readback_valid'] = True
     st['readback'] = dict(items=items, asked=((st.get('readback') or dict()).get('asked') or 0) + 1)
     if len(st['products']) > 1:
         st['cur'] = _index(st, items[0]['product_id']) if st['cur'] is not None else None
@@ -1270,7 +1299,9 @@ def items_event(policy, st, ev, today, cv):
         if amt is not None and not amount_fits(policy, pd, amt):
             bad = bad or (i, '', d, amt)
             continue
-        p['status'], p['offer'] = 'agreed', dict(amount=amt if amt is not None else (pd['floor'] if pd['too_much'] else pd['past_due']), date=d)
+        prior = readback_item(st, p['id']) or dict()
+        p['status'], p['offer'] = 'agreed', dict(amount=amt if amt is not None else prior.get(
+            'amount', pd['floor'] if pd['too_much'] else pd['past_due']), date=d)
     flag = (policy.get('attempts') or dict()).get('flat_refusal_uses_attempt', True)
     raw = str(ev.get('refused') or '')
     if (flag.get('value') if isinstance(flag, dict) else flag) is not False and re.fullmatch(r'[1-9][0-9]?(,[1-9][0-9]?)*', raw):
@@ -1358,7 +1389,9 @@ def date_event(policy, st, ev, today, cv):
             # one amount never goes to several products (raw-2 surface: 220 + 640 + 75 summed to 935): only a product
             # whose own amount it is takes it, every other product its own full amount
             own = _num(amt) if amt and _num(amt) is not None and abs(_num(amt) - pd['past_due']) < 0.005 else None
-            p['status'], p['offer'] = 'agreed', dict(amount=own if own is not None else (pd['floor'] if pd['too_much'] else pd['past_due']), date=iso(d))
+            prior = readback_item(st, p['id']) or dict()
+            p['status'], p['offer'] = 'agreed', dict(amount=own if own is not None else prior.get(
+                'amount', pd['floor'] if pd['too_much'] else pd['past_due']), date=iso(d))
         st['offer'] = None
         out = after_resolved(policy, st, today, cv)
         if said and out.get('type') == 'say_exact':
@@ -1374,7 +1407,9 @@ def date_event(policy, st, ev, today, cv):
             st['offer'] = dict(product_ids=[p['id']], amount=None, date=iso(r['accepted']), kind='customer')
             return amount_event(policy, st, ev, today, cv)
         amt = None
-    amount = float(amt) if amt else ((st['offer'] or dict()).get('amount') or (pd['floor'] if pd['too_much'] else pd['past_due']))
+    prior = readback_item(st, p['id']) or dict()
+    amount = float(amt) if amt else ((st['offer'] or dict()).get('amount') or prior.get('amount') or
+                                     (pd['floor'] if pd['too_much'] else pd['past_due']))
     if reason == 'ok':
         if multi and st['cur'] is not None and i != st['cur'] or (multi and st['cur'] is None):
             p['status'], p['offer'] = 'agreed', dict(amount=amount, date=iso(r['accepted']))
@@ -1582,7 +1617,8 @@ def amount_event(policy, st, ev, today, cv):
         amt = float(ev.get('amt'))
     except Exception:
         return resay(st)
-    date = (st['offer'] or dict()).get('date') or iso(today)
+    prior = readback_item(st, p['id']) or dict()
+    date = (st['offer'] or dict()).get('date') or prior.get('date') or iso(today)
     o = st.get('offer') or dict()
     if st['q'] in ('offer', 'pay_today') and o.get('amount') is not None and abs(amt - float(o['amount'])) < 0.005:
         return yes_event(policy, st, today, cv)     # 'Yes, I can pay the full 540': the open offer's own amount (biz-1 PUB-07)
@@ -1608,6 +1644,82 @@ def amount_event(policy, st, ev, today, cv):
     return ask(st, pre + offer_line(pd, amt, date), 'offer')
 
 
+def restore_readback(policy, st):
+    saved = st.pop('_rb_restore', None) or dict()
+    rb = saved.get('readback') or dict()
+    if not rb.get('items'):
+        return ask(st, D_WHAT_CHANGE, 'what_to_change')
+    st['products'] = copy.deepcopy(saved['products'])
+    for pd, reason in zip(st['_pd'], saved.get('note_reasons') or []):
+        pd['note_reason'] = reason
+    st['readback'], st['offer'], st['_queue'] = None, None, []
+    return start_readback(policy, st)
+
+
+def accept_readback_change(policy, st, ev):
+    """An accept after a rejected/changed read-back selects terms; it never confirms them."""
+    items = copy.deepcopy((st.get('readback') or dict()).get('items') or [])
+    if not items:
+        return ask(st, D_WHAT_CHANGE, 'what_to_change')
+    prod = str(ev.get('prod') or '')
+    if prod == 'all':
+        chosen = set(x['product_id'] for x in items)
+    elif prod.isdigit() and 0 < int(prod) <= len(st['products']):
+        chosen = set([st['products'][int(prod) - 1]['id']])
+    elif len(items) == 1:
+        chosen = set([items[0]['product_id']])
+    else:
+        return ask(st, D_WHAT_CHANGE, 'what_to_change')
+    for it in items:
+        i = _index(st, it['product_id'])
+        p, pd = _p(st, i)
+        if p['id'] in chosen:
+            p['status'], p['offer'], pd['note_reason'] = 'agreed', dict(amount=it['amount'], date=it['date']), None
+        else:
+            p['status'], pd['note_reason'] = 'refused', V(policy)['note']['refused']
+    st['offer'] = None
+    return start_readback(policy, st)
+
+
+def plan_guard(policy, st, ev):
+    """One trust boundary for plan uncertainty, read-back invalidation, restoration and re-confirmation."""
+    q, k, status = st.get('q'), ev.get('kind'), ev.get('st')
+    if status == 'complete' and ev.get('why') == 'restore' and q in ('readback', 'what_to_change'):
+        st.pop('_uncertain_q', None)
+        return restore_readback(policy, st)
+    if status in ('partial', 'ambiguous'):
+        if q in ('offer', 'pay_today'):
+            st['_uncertain_q'] = q
+            return offer_chatter(st) if offer_is_open(st) else ask(st, D_OFFER_NUDGE, q)
+        if q == 'readback':
+            st['_uncertain_q'] = q
+            return ask(st, D_RB_CLARIFY, q)
+        if status == 'ambiguous':
+            return resay(st)
+        return None
+    if q in ('readback', 'what_to_change') and k in ('yes', 'accept'):
+        has_date = any(str(ev.get(x) or '').strip() for x in ('rel', 'd', 'm', 'wd', 'items')) or \
+            ev.get('wk') in ('this', 'next', 'after_next') or ev.get('vague') == 'yes'
+        has_amount = str(ev.get('amt') or '').strip()
+        if ev.get('also') in ('no', 'reject'):
+            ev['kind'], k = 'no', 'no'
+        elif has_date or has_amount:
+            ev['kind'] = k = 'date_amount' if has_date and has_amount else 'date' if has_date else 'amount'
+        elif k == 'yes' and str(ev.get('prod') or '').isdigit():
+            ev['kind'], k = 'accept', 'accept'
+    uncertain = st.pop('_uncertain_q', None)
+    if uncertain == 'readback' and k == 'yes':
+        rb = st.get('readback') or dict()
+        if not st.get('_readback_valid', True):
+            return ask(st, D_WHAT_CHANGE, 'what_to_change')
+        return ask(st, readback_line(policy, st, rb.get('items') or [], st.get('_clamped') or []), 'readback')
+    if q in ('readback', 'what_to_change') and k in ('date', 'date_amount', 'amount', 'accept'):
+        void_readback(st, rejected=ev.get('also') in ('reject', 'no'))
+        if k == 'accept':
+            return accept_readback_change(policy, st, ev)
+    return None
+
+
 def yes_event(policy, st, today, cv):
     q = st['q']
     if q in ('pay_today', 'offer') and st['offer']:
@@ -1619,9 +1731,17 @@ def yes_event(policy, st, today, cv):
             if p['status'] in ('open', 'proposed'):
                 p['status'], p['offer'] = 'agreed', dict(amount=pd['past_due'], date=iso(today))
         return after_resolved(policy, st, today, cv)
-    if q == 'readback' and st['readback']:
+    if q == 'readback' and st['readback'] and st.get('_readback_valid', True):
+        items = st['readback']['items']
+        agreed = [p for p in st['products'] if p['status'] == 'agreed']
+        exact = bool(items) and len(items) == len(agreed) and all(any(
+            it['product_id'] == p['id'] and abs(float(it['amount']) - float(p['offer']['amount'])) < 0.005 and
+            it['date'] == p['offer']['date'] for it in items) for p in agreed)
+        if not exact:
+            return start_readback(policy, st) or ask(st, D_WHAT_CHANGE, 'what_to_change')
         st['_queue'] = []
-        for it in st['readback']['items']:
+        st['_confirmed_readback'] = copy.deepcopy(items)
+        for it in items:
             i = _index(st, it['product_id'])
             st['products'][i]['status'] = 'confirmed'
             st['_queue'].append(it['product_id'])
@@ -1638,10 +1758,12 @@ def no_event(policy, st, ev, today, cv):
     if q in ('pay_today', 'offer'):
         return reject_event(policy, st, dict(why='flat'), today, cv)
     if q == 'readback':
+        void_readback(st, rejected=True)
         if st['_what_change'] < 1:
             st['_what_change'] += 1
             return ask(st, D_WHAT_CHANGE, 'what_to_change')
     if q in ('readback', 'what_to_change'):
+        void_readback(st, rejected=True)
         for it in (st['readback'] or dict()).get('items') or []:
             i = _index(st, it['product_id'])
             st['products'][i]['status'] = 'refused'
@@ -2029,6 +2151,9 @@ def topic_event(policy, st, ev, today, cv):
 
 # ---------------------------------------------------------------- per-phase user handling
 def on_user(policy, st, ev, today, cv):
+    guarded = plan_guard(policy, st, ev)
+    if guarded:
+        return guarded
     if ev.get('st') == 'partial':
         if offer_is_open(st) and ev.get('kind') in (None, '', 'other'):
             return offer_chatter(st)     # a cut-off chat is not a second statement of the offer

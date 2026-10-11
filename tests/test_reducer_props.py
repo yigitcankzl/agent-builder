@@ -26,6 +26,8 @@ EVENTS = [
     "kind=reject;also=none;st=complete;prod=;why=flat", "kind=reject;also=none;st=complete;prod=;why=too_much",
     "kind=date;also=none;st=complete;prod=;rel=;d=26;m=;wd=mon;wk=none;vague=no", "kind=date;also=none;st=complete;prod=all;rel=;d=;m=;wd=fri;wk=this;vague=no",
     "kind=date;also=none;st=partial;prod=;rel=;d=;m=;wd=;wk=none;vague=no", "kind=date;also=none;st=complete;prod=;rel=;d=;m=;wd=;wk=after_next;vague=yes",
+    "kind=no;also=none;st=partial;prod=", "kind=date;also=none;st=ambiguous;prod=;rel=;d=19;m=10;wd=mon;wk=none;vague=no",
+    "kind=other;also=none;st=ambiguous;prod=",
     "kind=date;also=none;st=complete;prod=;rel=;d=20;m=;wd=fri;wk=none;vague=no", "kind=amount;also=none;st=complete;prod=;amt=50",
     "kind=amount;also=reject;st=complete;prod=;amt=300", "kind=callback;also=none;st=complete;prod=;rel=tomorrow;d=;m=;wd=;wk=none;vague=no;tm=11:00",
     "kind=topic;also=none;st=complete;prod=;t=hardship", "kind=topic;also=none;st=complete;prod=;t=injection",
@@ -66,7 +68,7 @@ def props(n=3000, seed=11):
         pol = POL[rng.choice(["A", "A+B"])]
         account = rng.choice(ACCOUNTS)
         st = R.init_state(pol, CV)
-        persisted_ever, callback_ok, transfer_ok = False, False, False
+        persisted_ever, callback_ok, transfer_ok, approved = False, False, False, None
         push = it % 2 == 0      # half the runs are pushed through identity so negotiation, read-back and writes get coverage
         names = []
         run_len, last_text = 0, None
@@ -90,16 +92,21 @@ def props(n=3000, seed=11):
                 st["tok"] = tok
                 ev = R.parse_event("n=" + tok + ";src=user;" + body if body else "", st, TOPICS)
                 st2, act = R.step(pol, st, ev, None, NOW, CV)
+                if ev and ev.get("kind") == "yes" and prev.get("q") == "readback" and \
+                        prev.get("_readback_valid", True) and not prev.get("_uncertain_q"):
+                    approved = copy.deepcopy(prev["readback"]["items"])
+                elif ev:
+                    approved = None
                 if ev:
                     st2["last_tok"] = tok
                     # token processed once: the same raw event again is stale
                     check(R.parse_event("n=" + tok + ";src=user;" + body, st2, TOPICS) is None or st2["tok"] != tok or True, "stale")
-                if ev and ev.get("st") == "partial":
-                    a = dict(st2); b = dict(st)
-                    for x in ("runs", "last_tok", "hangup", "_said_n", "_said_last"):
-                        a.pop(x, None); b.pop(x, None)
-                    check(a == b, "partial changed state")
-                    check(act["type"] == "say_exact", "partial must speak the continue line")
+                if ev and ev.get("st") in ("partial", "ambiguous"):
+                    for before, after in zip(st.get("products") or [], st2.get("products") or []):
+                        check(after.get("status") not in ("agreed", "confirmed") or after.get("status") == before.get("status"),
+                              f"uncertainty accepted a plan: {before} -> {after}")
+                    check(not (act["type"] == "call_tool" and act.get("tool") == "create_promise"),
+                          f"uncertainty wrote a promise: {act}")
                 st = st2
             check(isinstance(act, dict) and act.get("type") in ("say_exact", "speak_free", "call_tool", "close"), f"one action {act}")
             # never loop: the same tts text more than RESAY_CAP + 1 times in a row is a stuck question
@@ -125,6 +132,10 @@ def props(n=3000, seed=11):
                 if act["tool"] == "create_promise":
                     p = st["products"][R._index(st, act["args"]["product_id"])]
                     check(p["status"] == "confirmed", "create_promise for a non-confirmed product")
+                    item = next((x for x in approved or [] if x["product_id"] == act["args"]["product_id"]), None)
+                    check(item is not None and item["date"] == act["args"]["date"] and
+                          abs(float(R.api_amount(pol, item["amount"])) - float(act["args"]["amount"])) < 0.005,
+                          f"create_promise without an identical explicit-yes read-back: {act}")
             for p, pd in zip(st["products"], st.get("_pd") or []):
                 check(p["attempts"] <= len(pd["plan"]), "attempt cap")
             check(st["counters"]["confirm_name"] <= 2, "confirm_name cap")

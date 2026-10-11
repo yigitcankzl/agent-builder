@@ -842,7 +842,88 @@ def per_item_terms():
     return True
 
 
+def ledger_invariants_live():
+    """The three live ledger failures: restore an earlier read-back, question echoes only clarify, and a selected
+    product after a rejected multi-product read-back must itself be read back and confirmed before the write."""
+    import copy, json
+    from builder.engine.event_field import field, CONTRACT_TOPICS
+    pol = POL["A"]
+
+    # bb748cf5: Monday -> Tuesday -> "forget it, keep it as it was" restores Monday and reads it back again.
+    st = to_readback(pol)
+    p = st["products"][0]
+    p["offer"]["date"] = "2026-10-19"
+    st["readback"]["items"][0]["date"] = "2026-10-19"
+    st["_last_ask"] = R.readback_line(pol, st, st["readback"]["items"], [])
+    st, a = say(pol, st, "kind=date;also=none;st=complete;prod=1;rel=;d=20;m=10;wd=tue;wk=none;vague=no")
+    check(st["q"] == "readback" and "Tuesday 20 October" in a["text"], f"changed read-back: {a}")
+    st, a = say(pol, st, "kind=no;also=none;st=partial;prod=")
+    check(a["type"] == "say_exact" and "yes or no" in a["text"].lower() and not st.get("pending"), f"partial no only clarifies: {a}")
+    st, a = say(pol, st, "kind=accept;also=none;st=complete;prod=1;why=restore")
+    check(st["q"] == "readback" and "Monday 19 October" in a["text"] and "Tuesday 20 October" not in a["text"],
+          f"restored read-back: {a}")
+    st, a = say(pol, st, "kind=yes;also=none;st=complete;prod=")
+    check(a["type"] == "call_tool" and a["args"]["date"] == "2026-10-19", f"only restored terms written: {a}")
+
+    # A yes after an uncertainty clarification is still not a yes directly to the full read-back: re-read, then ask again.
+    st = to_readback(pol)
+    st, a = say(pol, st, "kind=date;also=none;st=ambiguous;prod=1;rel=;d=14;m=10;wd=wed;wk=none;vague=no")
+    st, a = say(pol, st, "kind=yes;also=none;st=complete;prod=")
+    check(st["q"] == "readback" and a["type"] == "say_exact" and not st.get("pending") and "Do you confirm" in a["text"],
+          f"yes to a clarification must cause a full re-read: {a}")
+    st, a = say(pol, st, "kind=yes;also=none;st=complete;prod=")
+    check(a["type"] == "call_tool" and a["tool"] == "create_promise", f"yes directly after the re-read writes: {a}")
+
+    st = to_readback(pol)
+    st["products"][0]["offer"]["amount"] -= 1
+    st, a = say(pol, st, "kind=yes;also=none;st=complete;prod=")
+    check(st["q"] == "readback" and a["type"] == "say_exact" and not st.get("pending"),
+          f"a stale read-back cannot authorise changed terms: {a}")
+    st = to_readback(pol)
+    st, a = say(pol, st, "kind=yes;also=amount;st=complete;prod=;amt=540")
+    check(a["type"] == "say_exact" and not st.get("pending"), f"yes plus terms is a plan update, not confirmation: {a}")
+
+    # c65734a0 / 8f7e05cb: exact values repeated as questions are uncertainty, never proposals.
+    prompt = field({"topics": CONTRACT_TOPICS, "identity_fields": ["date_of_birth"]})["extraction_prompt"]
+    for text in ("Thursday 15 October? This week?", "Two thousand one hundred? That much?", "Monday 19 October? That late?"):
+        check(text in prompt, f"live uncertainty example missing: {text}")
+    for body in ("kind=other;also=none;st=ambiguous;prod=",
+                 "kind=date;also=none;st=ambiguous;prod=1;rel=;d=15;m=10;wd=thu;wk=this;vague=no"):
+        before = to_statement(pol)[0]
+        products, offer = copy.deepcopy(before["products"]), copy.deepcopy(before["offer"])
+        after, a = say(pol, before, body)
+        check(a["type"] == "say_exact" and "manage that" in a["text"].lower(), f"uncertainty asks yes/no: {a}")
+        check(after["products"] == products and after["offer"] == offer and not after.get("pending"),
+              f"uncertainty changed the plan: {after['products']} / {a}")
+
+    # 8f7e05cb: after a cut-off no, accepting only product 1 causes a new one-product read-back, not three writes.
+    multi = json.load(open(os.path.join(ROOT, "tests/generated/rehearsal/raw-2.reducer_policy.json")))
+    acc = [dict(product_id="p1", type="credit_card", past_due=510.0, days_late=16, minimum_payment=153.0),
+           dict(product_id="p2", type="personal_loan", past_due=1320.0, days_late=16, instalment_amount=440.0),
+           dict(product_id="p3", type="car_loan", past_due=140.0, days_late=7, instalment_amount=46.0)]
+    st = R.init_state(multi, CV)
+    st["verified"], st["phase"], st["q"] = "yes", "readback", "readback"
+    R.load_products(multi, st, acc, R._d(NOW))
+    terms = [(510.0, "2026-10-19"), (528.0, "2026-10-19"), (140.0, "2026-10-22")]
+    for p, (amount, date) in zip(st["products"], terms):
+        p["status"], p["offer"] = "agreed", dict(amount=amount, date=date)
+    st["readback"] = dict(items=[dict(product_id=p["id"], amount=p["offer"]["amount"], date=p["offer"]["date"])
+                                     for p in st["products"]], asked=1)
+    st["_readback_valid"] = True
+    st["_last_ask"] = R.readback_line(multi, st, st["readback"]["items"], [])
+    st, a = say(multi, st, "kind=no;also=none;st=partial;prod=")
+    check(not st.get("pending"), f"cut-off no cannot write: {a}")
+    st, a = say(multi, st, "kind=accept;also=none;st=complete;prod=1")
+    check(st["q"] == "readback" and "510.00" in a["text"] and "528.00" not in a["text"] and "140.00" not in a["text"] and
+          not st.get("pending"), f"selection needs its own read-back: {a}")
+    st, a = say(multi, st, "kind=yes;also=none;st=complete;prod=")
+    check(a["type"] == "call_tool" and a["tool"] == "create_promise" and a["args"]["product_id"] == "p1",
+          f"only explicitly re-confirmed product writes: {a}")
+    return True
+
+
 if __name__ == "__main__":
+    print("ledger confirmation and uncertainty live shapes:", ledger_invariants_live())
     print("per-product terms in one turn (raw-2 PUB-12 live, PER_ITEM):", per_item_terms())
     print("gate denial is the callback (PUB-03 live):", gate_denial_is_callback())
     print("a moved day names the day the customer proposed (PUB-07 live):", named_day_on_moved_date())
@@ -881,10 +962,11 @@ if __name__ == "__main__":
         st = R.init_state(pol, CV)
         st, a = say(pol, st, "kind=topic;also=none;st=complete;prod=;t=purpose")
         check(st["counters"]["confirm_name"] == 2 and st["q"] == "confirm_name", f"{name}: purpose in opening counted")
-        # 3. accept == yes under every open q (support_offer -> transfer)
+        # 3. accept at a read-back is a plan selection, never the explicit yes that authorises a write
         st = to_readback(pol)
         st, a = say(pol, st, "kind=accept;also=none;st=complete;prod=")
-        check(a["type"] == "call_tool" and a["tool"] == "create_promise", f"{name}: accept at read-back confirms: {a}")
+        check(st["q"] == "readback" and a["type"] == "say_exact" and not st.get("pending"),
+              f"{name}: accept at read-back must be re-read: {a}")
         # 4. first dispute at read-back -> what to change; a second one closes as dispute
         st = to_readback(pol)
         st, a = say(pol, st, "kind=topic;also=none;st=complete;prod=;t=dispute")
