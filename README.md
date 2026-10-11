@@ -51,6 +51,13 @@ python3 builder/build.py briefs/brief-a.md tools/openapi.json --slot brief-a 2>&
 python3 builder/build.py <brief files or folders...> <openapi.json> --slot <name> --budget-min 25
 ```
 
+For the final, the deployed mock exposes its exact contract at `/openapi.json`; the final wrapper downloads it, pins
+all tool calls to that mock, keeps the contract beside the submission, and invokes the same frozen builder:
+
+```bash
+python3 builder/final.py <case-folder> https://your-mock.workers.dev 2>&1 | tee traces/final.log
+```
+
 Progress lines go to stderr; the last stdout line is the JSON result. Exit codes: 0 built and saved, 2 fallback required (nothing saved; `signal` and `next` say why), 3 engine not loaded (fix the clone). The trace is `traces/<slot>-<time>.jsonl` with a `.txt` summary whose first block lists the assumptions, defaults and everything not implemented. Flags: `--runs 2` (extraction runs), `--no-l3` (no LLM fallback writer), `--no-examiner`, `--mock-freya`, `--no-save`.
 `BUILDER_SMOKE=1` adds a two-turn chat smoke after the save (needs `FREYA_API_KEY`). A platform error skips it and keeps the workflow; workflow evidence (signal S7) puts the L3 workflow in the same slot. With `--no-save` or `--mock-freya` the trace records the smoke as off.
 The `.txt` summary starts with a BUILD block (commit, dirty files, models, the command, exit code, signal) and a PIPELINE block (extraction, examiner, bridge, validator, save, graph walk, self-test, smoke, each with its status and seconds). Keys and tokens are redacted when the trace is written.
@@ -88,14 +95,18 @@ The same phone agent can pass a customer in one run and fail it in the next. Tre
 
 ## The final
 
-- On Sunday we publish briefs you have not seen. They are the same kind of call with different rules: other numbers and limits, other identity questions, another outcome table, another calendar. Their form can differ too: one final brief is a clean specification, the other is raw bank material (a mail, a policy extract, a memo that changes it, a code list).
-- Each final brief comes with its own tool API file. The seven tool names stay the same. The fields and the allowed values can change.
-- After the final briefs open you may fix a bug in your builder. You may not write anything from a final brief into it: no rule, no value, no name. Fixing a crash on a table your parser did not expect is allowed. Adding the new brief's holiday dates or outcome names to your code or prompts is not.
-- You run your builder once on each, with no manual step, and submit the phone agents it created, your code and the builder's trace.
-- You export each phone agent to a file with `freya.export_workflow(workflow_id, "<brief>.workflow.json")` and submit those files. We load them into our own workspace to test them, so what you export is what we score.
-- We test those phone agents on customers nobody has seen, on several calendar days, three times each. A customer counts only when all three runs pass. A phone agent that is right most of the time is not right.
-- Final customers can have up to three products, as in Brief B.
-- Final customers talk like people. They give a number in two parts, correct themselves, talk about other things, ask a question back, or say amounts and dates in words. The facts stay the same. Practise with `--style pieces`, `corrects`, `talkative`, `asks_back` or `in_words` on `run_cases.py`.
+- One Turkish case opens Sunday at 17:00 UTC (20:00 Istanbul): Freya Bank's credit-card statement-debt line.
+- The zip contains mixed bank documents, a service contract, test customers, Q&A and six example conversations.
+- We implement and keep online a Cloudflare Worker mock from that contract, then run the builder once on the case folder
+  and mock URL. The final phone agent may call only that mock.
+- After the case opens we may fix a generic builder bug. No final rule, value, name or field may be added to the builder
+  or its prompts.
+- We submit exactly one exported workflow, the matching builder trace, repo/commit/run command and mock URL before
+  20:00 UTC (23:00 Istanbul). The workflow is not edited after the run.
+- Evaluators import that workflow into their workspace and hidden simulated customers call it; the trace is reviewed
+  for integrity but is not scored.
+
+See `FINAL-RUNBOOK.md` and `submission.example.json`.
 
 So build something that reads a brief, not something that knows this one. Whatever your builder can take from the brief, it should take from the brief.
 
