@@ -4,7 +4,7 @@
 Checks the pipeline wiring, the trace contents and key stripping, the time guard, the extraction-failure fallback and
 the repair pass. The real end-to-end runs (with Claude) are in tests/build_e2e.py.
 """
-import json, os, shutil, sys, tempfile
+import json, os, shutil, sys, tempfile, time
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 from builder.build import MockFreya, build
@@ -157,6 +157,67 @@ if __name__ == "__main__":
         check(r9["exit_code"] == 0 and r9.get("fallback_used") == "L3" and r9["main_signal"] == "EXTRACT" and len(fr.saved) == 1, r9)
         check(sel and sel[0]["candidate"] == "llm" and [e["candidate"] for e in ev9 if e["event"] == "save"] == ["llm"], "one save, of the L3 candidate")
         print("ok L3: main path failed (EXTRACT) -> L3 saved once, exit 0, fallback_used=L3")
+        # Frozen raw-4 extraction: customer_named is backed only by an amount quote. It gets one focused retry; a
+        # supported customer_named answer remains a loud S5 because the deterministic reducer does not implement it.
+        raw4_dir = os.path.join(ROOT, "tests", "fixtures", "brief_reading", "raw-4-single")
+        raw4 = json.load(open(os.path.join(raw4_dir, "extracted.json")))
+        raw4_report = {"seconds": 0, "quotes_rejected": 0, "quotes_repaired": 0, "quotes_unverified": 0,
+                       "errors": [], "oas_warnings": [], "core_missing": []}
+        seen = []
+        real_rf = BB.reextract_fields
+
+        def raw4_extractor(*args):
+            return json.loads(json.dumps(raw4)), raw4_report
+
+        def retry_dates(paths, mismatches, *args):
+            seen.extend(mismatches)
+            source = {"file": "brief.md", "quote": "A date they name that is a business day on or before the deadline does not use an attempt."}
+            return {m["policy_path"]: {"value": "customer_named", "source": source, "why": "the customer names the date",
+                                        "accepted": True} for m in mismatches if m.get("evidence") == "date_rule"}
+        BB.reextract_fields = retry_dates
+        try:
+            r9b = build([os.path.join(raw4_dir, "brief.md")], OAS, "raw4-date-source", MockFreya(), os.path.join(tmp, "sub9b"),
+                        os.path.join(tmp, "tr"), 1, 1500, raw4_extractor, fallback=FakeL3)
+        finally:
+            BB.reextract_fields = real_rf
+        check(r9b.get("fallback_used") == "L3" and r9b["main_signal"] == "S5", r9b)
+        check({m["policy_path"] for m in seen} == {"attempts.plan.early[0].date_rule", "attempts.plan.late[0].date_rule"}, seen)
+        print("ok date evidence: frozen raw-4 fields retried once; supported-but-unimplemented customer_named stays loud S5 -> L3")
+
+        # A ready L3 must be selected as soon as a slow main reaches its terminal S5, not after either cap.
+        import threading
+        class TimedL3(FakeL3):
+            def start(self):
+                self.t0, self.cap_s, self.done = time.time(), 2.0, threading.Event()
+                def ready():
+                    time.sleep(0.04)
+                    self.done.set()
+                threading.Thread(target=ready, daemon=True).start()
+                return self
+            def wait(self, timeout):
+                self.done.wait(timeout)
+                return {"workflow": self.wf, "errors": self.errors, "seconds": round(time.time() - self.t0, 2)}
+        forced = json.load(open(os.path.join(V3, "run4", "brief-a.json")))
+        report = json.load(open(os.path.join(V3, "run4", "brief-a.report.json")))
+        def slow_main(*args):
+            time.sleep(0.2)
+            return forced, report
+        before = time.time()
+        real_generate, real_validate = BB.generate, BB.validate
+        BB.generate = lambda *args: {"initial_node": "end", "nodes": {"end": {"node_type": "end_call"}}}
+        BB.validate = lambda *args: ["24: unsupported source rule: terminal core failure"]
+        try:
+            r9c = build([os.path.join(ROOT, "briefs", "brief-a.md")], OAS, "fast-l3", MockFreya(), os.path.join(tmp, "sub9c"),
+                        os.path.join(tmp, "tr"), 2, 1500, slow_main, fallback=TimedL3)
+        finally:
+            BB.generate, BB.validate = real_generate, real_validate
+        elapsed = time.time() - before
+        selection = next(e for e in map(json.loads, open(r9c["trace"])) if e["event"] == "fallback_selection")
+        validators = [e for e in map(json.loads, open(r9c["trace"])) if e["event"] == "validator"]
+        check(r9c.get("fallback_used") == "L3" and elapsed < 0.5 and elapsed >= 0.18, (r9c, elapsed))
+        check(len(validators) == 2 and all(not e["passed"] for e in validators), validators)
+        check(selection["waited_s"] < 0.1 and 1.5 < selection["wait_limit_s"] < 2.0, selection)
+        print(f"ok L3 timing: completed in {elapsed:.2f}s (max of 0.20s main failure and 0.04s L3), no cap wait")
         fr2 = MockFreya()
         FakeL3.made.clear()
         r10 = build([os.path.join(ROOT, "briefs", "brief-a.md")], OAS, "l3main", fr2, os.path.join(tmp, "sub10"), os.path.join(tmp, "tr"),

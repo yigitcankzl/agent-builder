@@ -114,6 +114,21 @@ def name_question(policy, cv):
     return fill_names(q, cv)
 
 
+def caller_line(policy):
+    """The brief-backed opening identity, without a recording notice or any account detail."""
+    for h in policy.get('hooks') or []:
+        if h.get('point') != 'opening' or not h.get('text'):
+            continue
+        for part in re.split(r'(?<=[.!?])\s+', str(h['text']).strip()):
+            if not re.search(r'\brecord(?:ed|ing)\b', part, re.I) and re.search(
+                    r"\b(?:assistant|calling from|this is|I am|I'm)\b", part, re.I):
+                return part
+    desc = str((policy.get('meta') or dict()).get('agent_self_description') or '').strip().rstrip('.')
+    if not desc:
+        return ''
+    return desc + '.' if desc.lower().startswith(('i am ', "i'm ", 'this is ')) else 'I am ' + desc + '.'
+
+
 def pay_today_question(policy):
     return sentence(policy, 'pay_today') or sentence(policy, 'ask_today') or sentence(policy, 'first_ask') or \
         'Can you make this payment today?'
@@ -755,6 +770,9 @@ def normalise(ev, st):
         e['kind'] = 'callback'           # a day with a time before the account is discussed is a call-time preference
     if e.get('kind') == 'other' and st['q'] == 'confirm_name':
         e['kind'], e['who'] = 'who', 'unclear'
+    # Live extractors sometimes preserve the secondary question in t= but omit also=topic.
+    if e.get('kind') != 'topic' and e.get('t') in TOPIC_RANK and e.get('t') != 'other' and not e.get('also_t'):
+        e['also_t'] = e['t']
     # §1.5: in the opening a stated speaker ranks above any topic but injection (PUB-02 live: 'No, I'm her husband.
     # What is this about?' came as t=purpose;also=who;who=other and was re-asked into an unclear close); in the security
     # questions an answer ranks above any topic but injection. The topic stays as also_t (an answer topic is answered).
@@ -805,12 +823,12 @@ def step(policy, st, event, tool_event, now, call_vars=None):
                                        no_delta=True), today, cv)
     else:
         ev = normalise(event, st)
-        info = ev.get('also_t') if ev and ev.get('kind') != 'topic' and ev.get('also_t') in TOPIC_INFO else None
+        info = ev.get('also_t') if ev and ev.get('kind') != 'topic' and ev.get('also_t') in TOPIC_INFO + ('purpose',) else None
         if info:       # PUB-04: a date (or any event) plus "are you a robot?": the event once, the answer line first
             ev = dict(ev, also='none', also_t='')
         act = on_user(policy, st, ev, today, cv) if ev else resay(st)
         if info:
-            line = info_line(policy, st, info)
+            line = caller_line(policy) if info == 'purpose' and st.get('verified') != 'yes' else info_line(policy, st, info)
             if line:
                 st['_info_next'] = ((st.get('_info_next') or '') + ' ' + line).strip()
     if st.get('_info_next') and act.get('type') in ('say_exact', 'close'):   # an answer line waits for a spoken line

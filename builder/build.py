@@ -23,8 +23,9 @@ With the smoke off nothing changes.
 L3 fallback (builder/fallback_llm.py, Fork 5): the direct LLM workflow writer starts in its own thread as soon as the
 sources are readable (not on S0, not when nothing is readable; --no-l3 turns it off). The main path is capped at
 MAIN_CAP_S (15 min + 90 s) or --budget-min - 90 s, whichever is earlier. If the main path passes, L3 is cancelled
-before the save. If it ends on EXTRACT, S2, S3 or S5, build waits for L3 until budget - 150 s and, when L3's static
-check passed, saves THAT workflow once and exports it (exit 0, fallback_used=L3, a fallback_selection trace event).
+before the save. If it ends on EXTRACT, S2, S3 or S5, build waits for L3 until the earlier of its own cap or
+budget - 150 s and, when L3's static check passed, saves THAT workflow once and exports it (exit 0,
+fallback_used=L3, a fallback_selection trace event).
 There is exactly one save per slot per build.
 
 Exit codes (also `exit_code` in the JSON result; the trace has a `signal` event with the code):
@@ -203,17 +204,25 @@ def build(briefs, openapi, slot=None, freya_client=None, out_dir="submission", t
 
     state = {}      # the latest bridged policy and bridge report, for the assumptions block
 
+    def wait_for_l3():
+        now = time.time()
+        limit = max(0, t_end - 150 - now)
+        if isinstance(getattr(fb[0], "cap_s", None), (int, float)) and isinstance(getattr(fb[0], "t0", None), (int, float)):
+            limit = min(limit, max(0, fb[0].cap_s - (now - fb[0].t0)))
+        started = time.time()
+        return fb[0].wait(limit), limit, time.time() - started
+
     def finish(reason=None, code=0, signal=None, **extra):
         trace.log("assumptions", **_assumptions(state.get("rp"), state.get("brep"), result))
         if not reason and fb[0]:
             fb[0].cancel()
             trace.log("fallback_selection", candidate="main", l3="cancelled")
         if reason and fb[0] and signal in L3_SIGNALS:
-            wait = max(0, t_end - 150 - time.time())
-            r = fb[0].wait(wait)
+            r, wait_limit, waited = wait_for_l3()
             ok = r.get("workflow") is not None and not r.get("errors")
             trace.log("fallback_selection", candidate="llm" if ok else "none", main_signal=signal, main_reason=reason,
-                      waited_s=round(wait, 1), l3_seconds=r.get("seconds"), l3_errors=(r.get("errors") or [])[:5])
+                      waited_s=round(waited, 1), wait_limit_s=round(wait_limit, 1), l3_seconds=r.get("seconds"),
+                      l3_errors=(r.get("errors") or [])[:5])
             if ok and time.time() < t_end - 30:
                 os.makedirs(out_dir, exist_ok=True)
                 json.dump(r["workflow"], open(os.path.join(out_dir, f"{slot}.l3.workflow.json"), "w"), indent=1)
@@ -336,7 +345,7 @@ def build(briefs, openapi, slot=None, freya_client=None, out_dir="submission", t
                 r = res.get(m["policy_path"]) or {}
                 trace.log("re_extract", field=m["field"], policy_path=m["policy_path"], old=m["value"], new=r.get("value"),
                           quote=(r.get("source") or {}).get("quote"), why=r.get("why"),
-                          result="mapped (sourced, in the OAS enum)" if r.get("accepted") else "kept block")
+                          result="accepted (sourced, allowed)" if r.get("accepted") else "kept block")
             if any(r.get("accepted") for r in res.values()):
                 pol = apply_reextraction(pol, mism, res)
                 rp, brep = to_reducer(pol, openapi, stable, brief_text)
@@ -384,7 +393,7 @@ def build(briefs, openapi, slot=None, freya_client=None, out_dir="submission", t
         # A full L3 agent wins over a partial L2 agent, even if L2 passes static checks.
         l3_errors = ["L3 unavailable"]
         if fb[0]:
-            r3 = fb[0].wait(max(0, t_end - 150 - time.time()))
+            r3, _, _ = wait_for_l3()
             if r3.get("workflow") is not None and not r3.get("errors") and time.time() < t_end - 30:
                 return finish("main workflow invalid; selecting full L3 over partial L2", 2, "S5", next="L3")
             l3_errors = r3.get("errors") or ["L3 has no usable workflow or save budget"]
@@ -414,7 +423,7 @@ def build(briefs, openapi, slot=None, freya_client=None, out_dir="submission", t
     if not _smoke(freya_client, wf, trace, result, "main", rp):
         # S7: the saved main workflow cannot hold a chat. L3 (kept alive while the smoke runs) replaces it in the same
         # slot and is smoked again; without a valid L3 the build fails loudly.
-        r3 = fb[0].wait(max(0, t_end - 150 - time.time())) if fb[0] else {}
+        r3 = wait_for_l3()[0] if fb[0] else {}
         if r3.get("workflow") is not None and not r3.get("errors"):
             json.dump(r3["workflow"], open(os.path.join(out_dir, f"{slot}.l3.workflow.json"), "w"), indent=1)
             _save(freya_client, slot, r3["workflow"], out_dir, trace, result, "llm")

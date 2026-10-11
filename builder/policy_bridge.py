@@ -17,8 +17,8 @@ to_reducer(policy, oas_path, stable_unmapped=None) -> (reducer_policy, report)
 import copy, json, os, re, sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from builder.engine.date_policy import _norm, bad_quotes, validate, unsupported_rules
-from builder.policy_extract import oas_summary
+from builder.engine.date_policy import DATE_RULES, _norm, bad_quotes, validate, unsupported_rules
+from builder.policy_extract import date_rule_supported, oas_summary
 from builder.oas import load_oas
 
 DEFAULT = [{"file": "default", "quote": ""}]
@@ -114,6 +114,43 @@ def _first_quote(node):
         if isinstance(s, str):
             return s
     return ""
+
+
+def normalize_time(value):
+    """Normalize a quoted clock time to 24-hour HH:MM, or None when it is not a clock time."""
+    s = str(value or "").strip().lower()
+    if s in ("noon", "midday"):
+        return "12:00"
+    if s == "midnight":
+        return "00:00"
+    m = re.fullmatch(r"(\d{1,2})(?:[:.](\d{2}))?\s*(a\.?m\.?|p\.?m\.?|h)?", s)
+    if not m:
+        return None
+    hour, minute, suffix = int(m.group(1)), int(m.group(2) or 0), (m.group(3) or "").replace(".", "")
+    if minute > 59 or (suffix in ("am", "pm") and not 1 <= hour <= 12) or (suffix not in ("am", "pm") and hour > 23):
+        return None
+    if suffix == "am":
+        hour %= 12
+    elif suffix == "pm":
+        hour = hour % 12 + 12
+    return f"{hour:02d}:{minute:02d}"
+
+
+def guard_attempt_date_rules(p, mism, notes):
+    """An attempt date rule is unanswered until its own quote supports that value."""
+    for band, steps in ((p.get("attempts") or {}).get("plan") or {}).items():
+        for i, step in enumerate(steps):
+            value = step.get("date_rule")
+            if value in DATE_RULES and date_rule_supported(value, step.get("source") or []):
+                continue
+            path = f"attempts.plan.{band}[{i}].date_rule"
+            mism.append({"policy_path": path, "value": value, "field": "attempts.date_rule",
+                         "oas_enum": list(DATE_RULES), "action": "reextract", "evidence": "date_rule",
+                         "band": band, "index": i})
+            step["date_rule"] = None
+            error = f"{path}={value!r} has no quote supporting that date rule"
+            p.setdefault("source_errors", []).append(error)
+            notes.append(f"ASSUMPTION {error}; treating it as unanswered pending targeted re-extraction")
 
 
 def _sources(node, inherited=None):
@@ -1245,6 +1282,7 @@ def to_reducer(policy, oas_path, stable_unmapped=None, brief_text=None):
                 oas.setdefault(tool, {})[role] = spec["props"][field]["enum"]
     p = copy.deepcopy(policy)
     mism, notes = [], []
+    guard_attempt_date_rules(p, mism, notes)
     notes += source_guard(p)
     notes += band_rules(p)
 
@@ -1478,6 +1516,13 @@ def to_reducer(policy, oas_path, stable_unmapped=None, brief_text=None):
     else:
         prod.pop("route_by_type", None)
     cb = w.get("callback")
+    if isinstance(cb, dict):
+        for key in ("start", "end"):
+            if key in cb:
+                normalized = normalize_time(cb[key])
+                if normalized is not None and normalized != cb[key]:
+                    notes.append(f"writes.callback.{key}: normalized {cb[key]!r} to {normalized!r}")
+                    cb[key] = normalized
     if isinstance(cb, dict) and not any(cb.get(k) for k in ("days", "start", "end")):
         w.pop("callback")
         notes.append("ASSUMPTION writes.callback: empty extraction means no callback rule; omitted")

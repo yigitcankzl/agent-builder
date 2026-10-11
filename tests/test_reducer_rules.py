@@ -286,15 +286,45 @@ def pub02_live():
         cv = dict(customer_id="c_p2", first_name="Ana", last_name="Costa", title="Ms", now=NOW)
         st = R.init_state(pol, cv)
         st["tok"] = "kstart"
-        e = R.parse_event("n=kstart;src=user;kind=topic;also=who;st=complete;prod=;t=purpose;who=other;party=relative", st, TOPICS)
-        st, a = R.step(pol, st, e, None, NOW, cv)
-        check(a["type"] == "say_exact" and st["phase"] == "third_party" and "when" in a["text"].lower(), f"{name} PUB-02: {a}")
-        for w in ("debt", "payment", "overdue", "collections"):
-            check(w not in a["text"].lower(), f"{name} PUB-02 disclosed '{w}': {a}")
+        caller = R.caller_line(pol)
+        check(caller, f"{name}: policy has a caller identity line")
+        for raw in (
+                "n=kstart;src=user;kind=topic;also=who;st=complete;prod=;t=purpose;who=other;party=relative",
+                "n=kstart;src=user;kind=who;also=none;st=complete;prod=;who=other;party=relative;t=purpose"):
+            st = R.init_state(pol, cv)
+            st["tok"] = "kstart"
+            e = R.parse_event(raw, st, TOPICS)
+            st, a = R.step(pol, st, e, None, NOW, cv)
+            check(a["type"] == "say_exact" and st["phase"] == "third_party" and "when" in a["text"].lower()
+                  and a["text"].startswith(caller), f"{name} PUB-02: {a}")
+            for w in ("debt", "payment", "overdue", "collections"):
+                check(w not in a["text"].lower(), f"{name} PUB-02 disclosed '{w}': {a}")
         st = R.init_state(pol, CV)
         st, a = say(pol, st, "kind=who;also=none;st=complete;prod=;who=self;party=")
         st, a = say(pol, st, "kind=topic;also=identity;st=complete;prod=;t=purpose;field=date_of_birth;ans=1990-01-01")
         check(a["type"] == "call_tool" and a["tool"] == "verify_identity", f"{name}: identity answer under a topic label: {a}")
+    return True
+
+
+def cut_off_chatter():
+    """PUB-10 live (e3ffe948): unfinished talkative prose is partial, so it gets an invitation to continue instead of
+    interrupting with the open security question. A completed non-answer still uses the existing ID_OTHER_CAP."""
+    from builder.engine.event_field import field, CONTRACT_TOPICS
+    prompt = field({"topics": CONTRACT_TOPICS, "identity_fields": ["date_of_birth", "phone_last4"]})["extraction_prompt"]
+    for fragment in ("I've been so busy getting ready for my cousin'", "I've been so busy with work I haven"):
+        check(fragment in prompt and fragment + " -> " in prompt, f"missing partial example: {fragment}")
+    for name, pol in POL.items():
+        st = R.init_state(pol, CV)
+        st, a = say(pol, st, "kind=who;also=none;st=complete;prod=;who=self;party=")
+        st, a = say(pol, st, "kind=identity;also=none;st=complete;prod=;field=date_of_birth;ans=1990-01-01;y=1990")
+        st, a = tool(pol, st, dict(verified=True, all_verified=False, wrong_answers_left=3))
+        for _ in range(2):
+            st, a = say(pol, st, "kind=other;also=none;st=partial;prod=")
+            check(a == {"type": "say_exact", "text": R.sentence(pol, "continue_line", R.D_CONTINUE)},
+                  f"{name}: cut-off customer was interrupted: {a}")
+        before = st.get("_id_other", 0)
+        st, a = say(pol, st, "kind=other;also=none;st=none;prod=")
+        check(st.get("_id_other") == before + 1 and "last four" in a["text"], f"{name}: existing other cap changed: {a}")
     return True
 
 
@@ -829,6 +859,7 @@ if __name__ == "__main__":
     print("PUB-06 rep 3: no second floor offer:", pub06_rep3())
     print("PUB-03 live: no inherited year:", pub03_live())
     print("PUB-02 live: speaker first in the opening:", pub02_live())
+    print("PUB-10 live: cut-off chatter is partial:", cut_off_chatter())
     print("answer topic + event, both orders (PUB-04):", answer_and_event())
     print("PUB-06 minimum-this-Friday + malformed events:", pub06_and_malformed())
     for name, pol in POL.items():

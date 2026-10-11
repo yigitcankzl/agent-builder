@@ -9,6 +9,7 @@ import copy, json, os, sys
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 from builder import policy_bridge as B
+from builder import policy_extract as E
 from builder.generator import generate
 from builder.validate_workflow import validate
 
@@ -466,8 +467,47 @@ def gap2_exact():
     check(B.answer_format(q)[0] == "free", "'exactly as said' wins over the postcode format -> free")
 
 
+def time_and_date_evidence():
+    print("== callback time normalization and attempt-date evidence")
+    forms = {"9am": "09:00", "9 a.m.": "09:00", "9:00": "09:00", "09.00": "09:00", "9": "09:00",
+             "noon": "12:00", "5pm": "17:00", "17h": "17:00", "12am": "00:00", "12pm": "12:00"}
+    check(all(B.normalize_time(value) == expected for value, expected in forms.items()), "quoted clock forms -> 24-hour HH:MM")
+    check(B.normalize_time("25:00") is None and B.normalize_time("after lunch") is None, "truly unparseable times stay invalid")
+    p = copy.deepcopy(BASE)
+    p["writes"]["callback"].update(start="9 a.m.", end="5pm")
+    rp, _ = B.to_reducer(p, OAS, [])
+    check((rp["writes"]["callback"]["start"], rp["writes"]["callback"]["end"]) == ("09:00", "17:00"),
+          "both validator HH:MM fields are normalized in the bridge")
+    p = copy.deepcopy(BASE)
+    p["attempts"]["plan"]["early"][0].update(date_rule="customer_named", source=src("Ask for the full past_due."))
+    rp, rep = B.to_reducer(p, OAS, [])
+    mismatch = next(m for m in rep["api_mismatch"] if m["policy_path"] == "attempts.plan.early[0].date_rule")
+    check(rp["attempts"]["plan"]["early"][0]["date_rule"] is None and mismatch["action"] == "reextract",
+          "an unsupported customer_named quote becomes unanswered and requests targeted re-extraction")
+    check(B.date_rule_supported("customer_named", src("A date they name that is a business day may be used.")),
+          "customer_named accepts a quote about the customer naming a date")
+    check(B.date_rule_supported("deadline", src("| aged | 2 | the deadline | monthly_premium |")) and
+          B.date_rule_supported("last_business_day_this_week", src("Propose the last working day of the current week.")),
+          "ordinary date rules accept direct wording, including table rows and synonyms")
+    raw4 = os.path.join(ROOT, "tests", "fixtures", "brief_reading", "raw-4-single", "brief.md")
+    path = "attempts.plan.early[0].date_rule"
+    mismatch = {"policy_path": path, "value": "customer_named", "field": "attempts.date_rule",
+                "oas_enum": list(B.DATE_RULES), "evidence": "date_rule"}
+    real_call = E.call_claude
+    try:
+        def retry(quote):
+            E.call_claude = lambda *args, **kwargs: json.dumps({"items": [{"policy_path": path,
+                "value": "customer_named", "source": {"file": "brief.md", "quote": quote}}]})
+            return E.reextract_fields([raw4], [mismatch], OAS)[path]["accepted"]
+        check(not retry("Ask for the full past_due."), "stubbed re-extraction rejects the same unsupported amount quote")
+        check(retry("A date they name that is a business day on or before the deadline does not use an attempt."),
+              "stubbed re-extraction accepts a verbatim customer-choice quote")
+    finally:
+        E.call_claude = real_call
+
+
 if __name__ == "__main__":
-    for g in (gap1, gap2, gap2_exact, gap3, gap4, regressions, derive_fixes, integration_fixes, honesty, bank_names, placeholders, too_much, rehearsal, assistant_disclosure, synthetic_fixes, close_enum, sentence_keys):
+    for g in (gap1, gap2, gap2_exact, gap3, gap4, time_and_date_evidence, regressions, derive_fixes, integration_fixes, honesty, bank_names, placeholders, too_much, rehearsal, assistant_disclosure, synthetic_fixes, close_enum, sentence_keys):
         g()
     print("RESULT:", "PASS" if not fails else f"FAIL ({len(fails)})")
     sys.exit(1 if fails else 0)

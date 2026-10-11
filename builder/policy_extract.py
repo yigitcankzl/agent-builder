@@ -146,6 +146,8 @@ Rules:
    `unmapped` the rules every agent of this kind enforces anyway: one promise per product; record only after a clear
    yes; the close tool is the last tool call; say goodbye before closing; a tool result decides success.
 10. attempts.plan: for each band, one entry per persuasion attempt, in order. DATE_RULE is one of: DATE_RULES_LIST.
+    Use customer_named only when that step's source says the customer names, chooses, proposes or suggests the date/day;
+    an amount quote or a general date constraint does not support customer_named.
     AMOUNT_RULE is one of: AMOUNT_RULES_LIST (floor_if_too_much_else_full = the floor if the customer already said
     the full amount is too much, else the full amount). Also fill the four attempts flags, each with its quote.
 12. human_request: when the customer asks for a person, which transfer queue is used, and whether the material lets
@@ -275,6 +277,25 @@ def _get(obj, path):
     return obj
 
 
+def date_rule_supported(value, source):
+    """True when a step's own quote says the date represented by its date_rule."""
+    src = source if isinstance(source, list) else [source]
+    text = " ".join(str(s.get("quote") or "") if isinstance(s, dict) else str(s or "") for s in src).lower()
+    chosen = (r"(?:names?|named|naming|chooses?|chosen|choosing|selects?|selected|selecting|picks?|picked|picking|"
+              r"proposes?|proposed|proposing|suggests?|suggested|suggesting|gives?|gave|given|giving)")
+    cues = {
+        "today": r"\b(?:ask|offer|propose|attempt|pay|payment)\b[^.]{0,100}\btoday\b|\btoday\b[^.]{0,100}\b(?:ask|offer|propose|attempt|pay|payment)\b",
+        "deadline": (r"\b(?:ask|offer|propose|attempt|floor)\b[^.]{0,100}\bdeadline\b|"
+                     r"\bdeadline\b[^.]{0,100}\b(?:ask|offer|propose|attempt|floor)\b|"
+                     r"\blatest recordable day\b|\bon that day\b|(?<!after )(?<!before )\bthe deadline\b"),
+        "next_business_day": r"\bnext business day\b",
+        "last_business_day_this_week": r"\blast (?:business|working) day (?:of|in) (?:this|the current) week\b",
+        "customer_named": (rf"\b(?:date|day) (?:that |the )?(?:customer|person|caller|they) {chosen}\b|"
+                           rf"\b(?:customer|person|caller|they) {chosen}(?: [a-z]+){{0,3}} (?:date|day)\b"),
+    }
+    return bool(re.search(cues.get(value, r"(?!)"), text, re.I))
+
+
 def material_block(files, oas):
     parts = [f"=== FILE: {name} ===\n{text}" for name, text in files.items()]
     return "TOOL API (tool -> field -> enum or type):\n" + json.dumps(oas, indent=1) + "\n\n" + "\n\n".join(parts)
@@ -352,8 +373,8 @@ def extract(paths, openapi=None, trace_path=None, repair=True, sink=None, deadli
     return policy, report
 
 
-REEXTRACT = """A tool API rejects some values of a bank's call policy: each value below is not in the allowed list of its tool
-field. Re-read the material for exactly these items and answer for each one:
+REEXTRACT = """Some values of a bank's call policy need a focused second reading: a value is outside its allowed list, or
+its current quote does not support it. Re-read the material for exactly these items and answer for each one:
 - if the material names a value that IS in the allowed list (directly, or through an explicit mapping such as a code
   list or a table row), give that allowed value and quote the line that supports it;
 - otherwise keep the material's own value unchanged and quote where it is required.
@@ -368,18 +389,20 @@ def reextract_fields(paths, mismatches, openapi=None, sink=None, deadline=None):
     and its quote is verbatim in the named file. Nothing else of the policy is touched."""
     trace = _Forward(sink, deadline) if sink is not None else Trace(None)
     files, oas = read_files(paths), oas_summary(openapi)
-    items = [{"policy_path": m["policy_path"], "value": m["value"], "field": m["field"], "allowed": m["oas_enum"]} for m in mismatches]
+    items = [{"policy_path": m["policy_path"], "value": m["value"], "field": m["field"], "allowed": m["oas_enum"],
+              "evidence": m.get("evidence")} for m in mismatches]
     out = parse_json(call_claude(REEXTRACT + "\nITEMS:\n" + json.dumps(items, indent=1) + "\n\nMATERIAL:\n" + material_block(files, oas),
                                  "re-extract api_mismatch fields", trace))
-    enum_of = {m["policy_path"]: m["oas_enum"] for m in mismatches}
+    by_path = {m["policy_path"]: m for m in mismatches}
     res = {}
     for it in out.get("items") or []:
         pth = it.get("policy_path")
-        if pth not in enum_of:
+        if pth not in by_path:
             continue
         verified = not bad_quotes({"x": {"source": [it.get("source") or {}]}}, files)
+        supported = by_path[pth].get("evidence") != "date_rule" or date_rule_supported(it.get("value"), [it.get("source") or {}])
         res[pth] = {"value": it.get("value"), "source": it.get("source"), "why": it.get("why"),
-                    "accepted": bool(verified and it.get("value") in (enum_of[pth] or []))}
+                    "accepted": bool(verified and supported and it.get("value") in (by_path[pth]["oas_enum"] or []))}
     return res
 
 
@@ -412,8 +435,15 @@ def apply_reextraction(policy, mismatches, res):
     for m in mismatches:
         r = res.get(m["policy_path"])
         if r and r["accepted"]:
-            p.setdefault("aliases", []).append({"field": m["field"], "brief_value": m["value"], "api_value": r["value"],
-                                                "source": [r["source"]], "why": r.get("why", "")})
+            if m.get("action") == "reextract":
+                node = (p.get("attempts") or {}).get("plan", {}).get(m.get("band"), [])[m["index"]] \
+                    if m.get("evidence") == "date_rule" else _get(p, m["policy_path"].rsplit(".", 1)[0])
+                node[m["policy_path"].rsplit(".", 1)[1]] = r["value"]
+                if r.get("source") and r["source"] not in node.setdefault("source", []):
+                    node["source"].append(r["source"])
+            else:
+                p.setdefault("aliases", []).append({"field": m["field"], "brief_value": m["value"], "api_value": r["value"],
+                                                    "source": [r["source"]], "why": r.get("why", "")})
     return p
 
 
