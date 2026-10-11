@@ -103,10 +103,28 @@ PRODUCT_FIX = (
     "        vars['gate_terms'] = '|'.join(_t)\n")
 
 
-# confirm(yes) counts only when the extraction model heard a yes after the read-back (rb_answer, reset by the read-back)
+# confirm(yes) counts only when the extraction model heard a yes after a read-back that still stands (rb_answer, reset
+# by the read-back). Otherwise, when a read-back exists (voided by a change, or not answered with a yes), the yes
+# becomes a fresh read-back of those terms: the customer hears them again and answers again (live PUB-01 47b66117: a
+# change, then "keep it as it was, yes I confirm" hit a voided read-back and the model closed as service_error).
+# A customer who really changed the terms gets them checked and read back by the model's own check_terms/readback.
 HEARD = ("try:\n"
-         "    if str(vars.get('gate_action') or '').strip().lower() == 'yes' and vars.get('rb_answer') != 'yes':\n"
-         "        vars['gate_action'], vars['gate_unheard'] = 'unheard', 'yes'\n"
+         "    if str(vars.get('gate_action') or '').strip().lower() == 'yes':\n"
+         "        _st = vars.get('gate_st')\n"
+         "        _st = _json.loads(_st) if isinstance(_st, str) and _st else (_st if isinstance(_st, dict) else dict())\n"
+         "        _rb = _st.get('_rb') or dict()\n"
+         "        _tm = '|'.join(str(_x[0]) + ':' + str(_x[1]) + ':' + str(_x[2]) for _x in _rb.get('terms') or [])\n"
+         "        if _tm and not _rb.get('granted') and (_rb.get('voided') or vars.get('rb_answer') != 'yes'):\n"
+         "            vars['gate_action'], vars['gate_terms'] = 'readback', _tm\n"
+         "        elif vars.get('rb_answer') != 'yes':\n"
+         "            vars['gate_action'], vars['gate_unheard'] = 'unheard', 'yes'\n"
+         "    elif str(vars.get('gate_action') or '').strip().lower() == 'next':\n"
+         "        _st = vars.get('gate_st')\n"
+         "        _st = _json.loads(_st) if isinstance(_st, str) and _st else (_st if isinstance(_st, dict) else dict())\n"
+         "        _rb = _st.get('_rb') or dict()\n"
+         "        _tm = '|'.join(str(_x[0]) + ':' + str(_x[1]) + ':' + str(_x[2]) for _x in _rb.get('terms') or [])\n"
+         "        if _tm and not _st.get('_granted') and not _rb.get('granted'):\n"
+         "            vars['gate_action'], vars['gate_terms'] = 'readback', _tm\n"
          "except Exception:\n"
          "    pass\n")
 
@@ -157,6 +175,8 @@ GATES (code decides these; never compute them yourself):
 - Products: gate_product and the product in gate_terms are the product_id EXACTLY as get_account returned it (for example p1), never a name, type or card number. If the gate error names the valid ids, call the gate again with one of them.
 - A route status means this product goes to a person: transfer with the queue {{gate_queue}}, no offer, no read-back.
 - Never say recorded, scheduled, booked or transferred before the tool returned ok true.
+- A missing confirmation is never a failure: if confirm next has nothing to write, or create_promise says the terms were not confirmed, read the terms back with confirm (gate_action=readback) and ask again. Do not close the call and do not say it could not be saved. service_error only when the bank itself failed twice.
+- If the customer changes the terms and then goes back to the earlier ones, call confirm with gate_action=readback and those terms; the system reads them back and the customer confirms again.
 Latest gate result: status {{gate_status}}, ok {{gate_ok}}, date {{gate_out_date}}, amount {{gate_out_amount}}, sentence: {{gate_say}}, error: {{gate_error}}
 
 MODEL-OWNED RULES: everything else in this prompt (opening, identity, third parties, callbacks, hardship, disputes, transfers, the closing outcome and reason) is yours to follow exactly as written; the gates cover only dates, amounts, offers and the read-back."""
@@ -181,9 +201,17 @@ CP_POST = """
 try:
     if isinstance(result, dict):
         d = result.get('data')
-        if not (isinstance(d, dict) and d.get('ok') is True):
-            result['what_to_do_next'] = ('NOT saved. Do not say it is recorded. If the customer has not said yes to a read-back '
-                                         'from confirm, read back again with confirm; else call create_promise once more.')
+        if 'blocked.invalid' in str(result):
+            result.pop('error', None)
+            result['status'] = 'not_confirmed'
+            result['message'] = 'Not sent to the bank: these terms have no confirmed read-back. This is NOT a service error.'
+            if isinstance(d, dict):
+                d.pop('what_to_do_next', None)
+            result['what_to_do_next'] = ('NOT saved, and NOT a failure: call confirm with gate_action=readback and the current '
+                                         'terms, and ask the customer to confirm. Do not close the call and do not use service_error.')
+        elif not (isinstance(d, dict) and d.get('ok') is True):
+            result['what_to_do_next'] = ('NOT saved by the bank. Do not say it is recorded. Call create_promise once more; if '
+                                         'the bank fails again, the outcome is service_error.')
 except Exception:
     pass
 """

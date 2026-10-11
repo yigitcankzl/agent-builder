@@ -53,8 +53,9 @@ ok("create_promise with no read-back is blocked", "blocked.invalid" in pre()["ur
 r = call("confirm", gate_action="readback", gate_terms="p1:2125.10:2026-10-15")
 ok("read-back spoken with the confirm question", r["gate_status"] == "readback" and r["gate_new"] == "yes" and V["rb_answer"] == "other", r)
 r = call("confirm", gate_action="yes")
-ok("confirm yes with no yes heard is stale", r["gate_status"] == "stale" and r["gate_ok"] == "no", r)
-call("confirm", gate_action="next")
+ok("confirm yes with no yes heard -> the read-back is said again, no grant", r["gate_status"] == "repeat" and r["gate_ok"] == "no" and r["gate_new"] == "yes" and "Do you confirm" in r["gate_say"], r)
+r = call("confirm", gate_action="next")
+ok("confirm next with nothing granted -> the read-back again, never a silent 'done'", r["gate_status"] in ("readback", "repeat") and r["gate_ok"] == "no", r)
 ok("then create_promise is still blocked", "blocked.invalid" in pre()["url"], V.get("gate_status"))
 V["rb_answer"] = "yes"          # the extraction heard the customer's yes
 r = call("confirm", gate_action="yes")
@@ -66,6 +67,24 @@ r = call("confirm", gate_action="yes")
 ok("a second yes is stale (granted once)", r["gate_status"] == "stale", r)
 call("check_terms", gate_product="p1", gate_date="2026-10-15", gate_amount="2125.10")
 ok("any later gate run closes the write permission", "blocked.invalid" in pre()["url"], V.get("gate_status"))
+# live PUB-01 47b66117: read-back -> "a day later?" (change) -> "keep it as it was, yes I confirm" -> must re-read, then write
+r = call("confirm", gate_action="readback", gate_terms="p2:420:2026-10-19")
+call("confirm", gate_action="change")
+V["rb_answer"] = "yes"          # the extraction heard "yes, I confirm" right after the change
+r = call("confirm", gate_action="yes")
+ok("yes on a voided read-back -> the same terms read back again (new read-back), no grant yet", r["gate_status"] == "readback" and r["gate_ok"] == "no" and "19 October" in r["gate_say"] and V["rb_answer"] == "other", r)
+V["rb_answer"] = "yes"
+r = call("confirm", gate_action="yes")
+ok("then the yes is granted", r["gate_status"] == "granted", r)
+r = call("confirm", gate_action="next")
+cfg = pre()
+ok("and the write goes through with p2 420 on 19 Oct", "blocked" not in cfg["url"] and cfg["body"]["product_id"] == "p2" and cfg["body"]["date"] == "2026-10-19", cfg)
+res = {"status": "error", "error": "URL validation failed", "message": "DNS resolution failed for 'blocked.invalid'", "status_code": 400}
+exec(CP["post_process_code"], {"result": res, "vars": V})
+ok("a blocked write reads as not_confirmed, never a service error", res["status"] == "not_confirmed" and "NOT a failure" in res["what_to_do_next"] and "service_error" in res["what_to_do_next"], res)
+res = {"status": "success", "data": {"ok": False, "error": "temporary failure"}}
+exec(CP["post_process_code"], {"result": res, "vars": V})
+ok("a bank failure still says NOT saved by the bank, retry once", "NOT saved by the bank" in res["what_to_do_next"], res)
 # invented product ids (live proof 1): mapped to the real one, or rejected with the valid ids named
 r = call("check_terms", gate_product="credit_card_4821", gate_date="2026-10-16", gate_amount="420")
 ok("credit_card_4821 -> p2 (card_last4)", V["gate_product"] == "p2" and r["gate_status"] == "non_business", r)
