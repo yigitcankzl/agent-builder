@@ -859,7 +859,8 @@ def ledger_invariants_live():
     st, a = say(pol, st, "kind=date;also=none;st=complete;prod=1;rel=;d=20;m=10;wd=tue;wk=none;vague=no")
     check(st["q"] == "readback" and "Tuesday 20 October" in a["text"], f"changed read-back: {a}")
     st, a = say(pol, st, "kind=no;also=none;st=partial;prod=")
-    check(a["type"] == "say_exact" and "yes or no" in a["text"].lower() and not st.get("pending"), f"partial no only clarifies: {a}")
+    check(a["type"] == "say_exact" and a["text"] == R.D_CONTINUE and not st.get("pending"),
+          f"partial no waits without repeating confirmation: {a}")
     st, a = say(pol, st, "kind=accept;also=none;st=complete;prod=1;why=restore")
     check(st["q"] == "readback" and "Monday 19 October" in a["text"] and "Tuesday 20 October" not in a["text"],
           f"restored read-back: {a}")
@@ -1048,7 +1049,7 @@ def raw5_loops_live():
         st, a = tool(pol, st, dict(verified=True, all_verified=True, wrong_answers_left=3))
         return tool(pol, st, dict(products=acc))
 
-    def writes(st, a):
+    def writes(st, a, with_state=False):
         out = []
         while (a["type"] == "call_tool" and a["tool"] == "create_promise") or a.get("resume_writes"):
             if a.get("resume_writes"):
@@ -1057,7 +1058,7 @@ def raw5_loops_live():
                 continue
             out.append((a["args"]["product_id"], a["args"]["amount"], a["args"]["date"]))
             st, a = tool(pol, st, dict(ok=True))
-        return out
+        return (out, st, a) if with_state else out
 
     def rb13():
         st, a = verified(acc13)
@@ -1098,6 +1099,41 @@ def raw5_loops_live():
         for t in turns:
             st, a = say(pol, st, t)
         check(writes(st, a) == want11, f"{turns}: confirmed once, both written: {a}")
+    # 1c4a413e: one cut-off confirmation spread across five extractor fragments. The standing read-back is retained;
+    # only the initial read-back asks for confirmation, and the final whole yes writes the two promises then transfers.
+    st, a = verified(acc11)
+    st, a = say(pol, st, "kind=date;also=reject;st=complete;prod=all;rel=;d=16;m=;wd=fri;wk=none;vague=no")
+    standing, spoken = json.loads(json.dumps(st["readback"])), [a["text"]]
+    for body in ("kind=yes;also=none;st=partial;prod=;rel=;d=;m=;wd=;wk=none;vague=no;amt=",
+                 "kind=amount;also=none;st=partial;prod=all;amt=",
+                 "kind=date;also=none;st=partial;prod=all;rel=;d=19;m=;wd=mon;wk=none;vague=no",
+                 "kind=date;also=none;st=partial;prod=;rel=;d=20;m=10;wd=;wk=none;vague=no",
+                 "kind=identity;also=none;st=complete;prod=;field=phone_last4;ans=2026"):
+        st, a = say(pol, st, body)
+        spoken.append(a.get("text", ""))
+        check(a == dict(type="say_exact", text=R.D_CONTINUE) and not st.get("pending"), f"partial confirmation waits: {body} -> {a}")
+        check(st["readback"] == standing and st["q"] == "readback", f"partial fragment changed the standing read-back: {body}")
+    check(sum("Do you confirm" in x for x in spoken) == 1, f"confirmation repeated: {spoken}")
+    st, a = say(pol, st, "kind=yes;also=none;st=complete;prod=")
+    written, st, a = writes(st, a, with_state=True)
+    check(written == want11, f"final yes writes both standing items: {a}")
+    check((st.get("pending") or {}).get("node") == "t_transfer_to_agent", f"car transfer preserved after writes: {st.get('pending')}")
+
+    # Raw-4 PUB-01: repeated cut-off yes fragments never re-ask or become refusals; a whole yes confirms the plan.
+    d4 = os.path.join(ROOT, "tests", "fixtures", "brief_reading", "raw-4-single")
+    raw4, _ = B.to_reducer(json.load(open(os.path.join(d4, "extracted.json"))), os.path.join(ROOT, "tools", "openapi.json"),
+                           brief_text=open(os.path.join(d4, "brief.md")).read())
+    st = to_readback(raw4)
+    standing, attempts, spoken = json.loads(json.dumps(st["readback"])), [p["attempts"] for p in st["products"]], []
+    for _ in range(5):
+        st, a = say(raw4, st, "kind=yes;also=none;st=partial;prod=")
+        spoken.append(a.get("text", ""))
+        check(a == dict(type="say_exact", text=R.D_CONTINUE) and not st.get("pending"), f"raw-4 partial yes: {a}")
+        check(st["readback"] == standing and [p["attempts"] for p in st["products"]] == attempts,
+              f"raw-4 partial yes changed the plan: {st}")
+    check(not any("confirm" in x.lower() for x in spoken), f"raw-4 repeated confirmation: {spoken}")
+    st, a = say(raw4, st, "kind=yes;also=none;st=complete;prod=")
+    check(a["type"] == "call_tool" and a["tool"] == "create_promise", f"raw-4 final yes writes the standing promise: {a}")
     # #14b: the app line only on t=change_promise, once
     st = rb13()
     st, a = say(pol, st, "kind=yes;also=none;st=complete;prod=")

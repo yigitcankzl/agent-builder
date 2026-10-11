@@ -1142,6 +1142,8 @@ def start_readback(policy, st):
     st['phase'] = 'readback'
     st['_confirmed_readback'] = None
     st.pop('_uncertain_q', None)
+    st.pop('_rb_confirm_partial', None)
+    st.pop('_rb_half_yes', None)
     st.pop('_rb_cut', None)
     st['_readback_valid'] = True
     st['readback'] = dict(items=items, asked=((st.get('readback') or dict()).get('asked') or 0) + 1)
@@ -1756,7 +1758,8 @@ def plan_guard(policy, st, ev):
             st['_uncertain_q'] = q
         if q == 'readback' and k in ('yes', 'no', 'accept', 'reject'):
             st['_rb_half_yes'], st['_rb_cut'] = k in ('yes', 'accept'), k
-            return ask(st, D_RB_CLARIFY, q)    # a half yes / no to the read-back is a hedge on the decision (bb748cf5)
+            st['_rb_confirm_partial'] = True
+            return None
         return None
     if status == 'ambiguous':
         if q in ('offer', 'pay_today'):
@@ -1780,10 +1783,14 @@ def plan_guard(policy, st, ev):
             ev['kind'] = k = 'date_amount' if has_date and has_amount else 'date' if has_date else 'amount'
         elif k == 'yes' and str(ev.get('prod') or '').isdigit():
             ev['kind'], k = 'accept', 'accept'
+    if q == 'readback' and st.get('_rb_confirm_partial'):
+        if k not in ('yes', 'accept', 'no', 'reject', 'date', 'date_amount', 'amount'):
+            return dict(type='say_exact', text=sentence(policy, 'continue_line', D_CONTINUE))
+        st.pop('_rb_confirm_partial', None)
     uncertain = st.pop('_uncertain_q', None)
-    half_yes = st.pop('_rb_half_yes', False) and st.get('_last_ask') == D_RB_CLARIFY
+    half_yes = st.pop('_rb_half_yes', False)
     if uncertain == 'readback' and k == 'yes' and not half_yes:
-        # a cut-off yes, then a yes to our 'yes or no?' clarify, confirms (raw-5 PUB-11 dc5afe27); else re-read
+        # only a whole yes that completes a pending partial yes can confirm; any other uncertain turn re-reads
         rb = st.get('readback') or dict()
         if not st.get('_readback_valid', True):
             return ask(st, D_WHAT_CHANGE, 'what_to_change')

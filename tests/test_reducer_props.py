@@ -95,8 +95,8 @@ def props(n=3000, seed=11):
                 st["tok"] = tok
                 ev = R.parse_event("n=" + tok + ";src=user;" + body if body else "", st, TOPICS)
                 st2, act = R.step(pol, st, ev, None, NOW, CV)
-                half_yes = prev.get("_uncertain_q") == "readback" and prev.get("_rb_half_yes") and \
-                    prev.get("_last_ask") == R.D_RB_CLARIFY
+                half_yes = prev.get("_uncertain_q") == "readback" and prev.get("_rb_confirm_partial") and \
+                    prev.get("_rb_half_yes")
                 if ev and ev.get("kind") == "yes" and prev.get("q") == "readback" and \
                         prev.get("_readback_valid", True) and (not prev.get("_uncertain_q") or half_yes):
                     approved = copy.deepcopy(prev["readback"]["items"])     # the read-back, or its yes-or-no clarify
