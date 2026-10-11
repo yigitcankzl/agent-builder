@@ -365,7 +365,9 @@ def _walk_sources(x):
             yield from _walk_sources(v)
 
 
-_SAY = re.compile(r"\b(?:say|tell (?:the customer|them|the caller))(?: that)? (.+)$", re.I)
+# 'say' as the agent's instruction only: never the customer's words ('if they say ...', 'when the customer says ...')
+_SAY = re.compile(r"(?<!\bthey )(?<!\bcustomer )(?<!\bcaller )(?<!\bhe )(?<!\bshe )(?<!\bperson )(?<!\bsomeone )"
+                  r"\b(?:say|tell (?:the customer|them|the caller))(?: that)? (.+)$", re.I)
 _OFFER = re.compile(r"\boffer to (connect (?:them|the customer) with .+)$", re.I)
 _CUT = re.compile(r"\s*(?:[,;.]|\band (?:then |also )?(?:continue|close|take|call|ask|make|do not|end|offer)\b|\bthen\b|\(rule)", re.I)
 
@@ -1650,6 +1652,10 @@ def to_reducer(policy, oas_path, stable_unmapped=None, brief_text=None):
         quotes = [str(x.get("quote") if isinstance(x, dict) else x) for x in (ev.get("source") or [])]
         if s_ and (_norm(s_.strip('"')) not in _norm(" ".join(quotes)) or INSTRUCTION.search(s_)):
             ev["say_dropped"], ev["say"] = s_, ""
+        if not ev.get("say"):      # the brief's own 'say (that) X' instruction, rewritten to the line it asks for
+            line = speakable(quotes)
+            if line:
+                ev["say"], ev["say_rewritten_from"] = line, True
     # outcomes/reasons carried by event and who rules are sent to close_call too: same enum rule, same block
     for coll, name in ((evs, "events"), (who, "who_rules")):
         for i, ev in enumerate(coll):

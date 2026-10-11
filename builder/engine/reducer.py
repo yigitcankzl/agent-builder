@@ -776,6 +776,8 @@ def normalise(ev, st):
     if ev is None:
         return None
     e = dict(ev)
+    if e.get('kind') == 'topic' and e.get('t') in QUESTION_TOPICS and e.get('also') in SUBSTANTIVE + ('date_amount', 'identity', 'who'):
+        e['kind'], e['also'], e['also_t'] = e['also'], 'none', e['t']    # kind=topic;also=date;t=robot -> the date + the question
     k = e.get('kind')
     if k == 'accept' and st['q'] not in ('none', 'readback', 'what_to_change'):
         e['kind'] = 'yes'
@@ -1969,7 +1971,8 @@ def info_line(policy, st, t):
     if t == 'terms':
         st['_terms_n'] = st.get('_terms_n', 0) + 1
         return brief_sentence(policy, 'no_other_terms', D_NO_TERMS) if st['_terms_n'] == 1 else ''
-    return (event_row(policy, t) or dict()).get('say') or (D_PROTECT if t == 'purpose' else '')
+    # a question is never left unanswered: 'are you a robot?' with no brief line -> the brief's own opening identity
+    return (event_row(policy, t) or dict()).get('say') or (D_PROTECT if t == 'purpose' else caller_line(policy) if t == 'robot' else '')
 
 
 def compose(spec, vals):
