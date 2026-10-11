@@ -2740,7 +2740,7 @@ def hub_main(vars, policy):
     enforce_budget(vars, policy)
 
 
-def minify(src):
+def minify(src, roots=('hub_main',)):
     """The shipped string (code_exec limit: code + data <= 131072 bytes): no docstrings or comments, no local-only
     import, and only the top-level names reachable from hub_main."""
     import ast
@@ -2756,7 +2756,7 @@ def minify(src):
         for t in ([n.name] if isinstance(n, (ast.FunctionDef, ast.ClassDef)) else
                   [x.id for x in getattr(n, 'targets', []) if isinstance(x, ast.Name)]):
             defs[t] = n
-    keep, todo = set(), ['hub_main']
+    keep, todo = set(), list(roots)
     while todo:
         k = todo.pop()
         if k in keep or k not in defs:
