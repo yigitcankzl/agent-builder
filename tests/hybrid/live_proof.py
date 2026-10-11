@@ -81,6 +81,12 @@ if __name__ == "__main__":
     sims = smoke.running_sims(freya)
     if sims is None or sims:
         sys.exit(f"STOP: simulation running or unknown ({sims}); nothing sent")
+    try:        # one turn on the tiny probe2 workflow first: a chat outage (503 in 0.2 s) stops here, nothing else sent
+        st = json.load(open(STATE))
+        r = freya.api("POST", "/api/v2/chat/message", {"workflowId": st["hybrid-probe2"]["workflow_id"], "message": "Hello?", "customerVariables": {}})
+        freya.api("POST", "/api/v2/chat/end", {"callId": r["callId"]})
+    except Exception as e:
+        sys.exit(f"STOP: chat health check failed: {str(e)[:200]}")
     wf = json.load(open(os.path.join(ROOT, "tests", "hybrid", "hybrid-raw-4.workflow.json")))
     ids = freya.save_workflow("hybrid-raw-4", wf, STATE)
     print("saved", ids)
