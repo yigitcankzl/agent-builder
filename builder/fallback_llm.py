@@ -50,6 +50,14 @@ Required:
   to the required preview or confirmation without asking the caller to repeat it. A cut-off or partial caller utterance is never a refusal
   or permission to end the call: ask them to continue and preserve the pending task. If a required spoken sequence is interrupted
   or too long for one turn, resume its unsaid required items before making an offer, changing topic, or calling the next API.
+- Actions with side effects: a preview or check tool never performs the action. After the caller's explicit confirmation, call
+  the tool that performs it in that same turn, then tell the caller the result from the tool's answer (done, or failed). Never
+  end or move on after a confirmation without that call. If a tool the action depends on failed (e.g. the read of an address or
+  state the action needs), do not call the action; follow the brief's failure path instead.
+- Answer the caller's questions about their own data from the mapped API results (e.g. which items, accounts or options they
+  have) before repeating your question; never give up on a question the results can answer.
+- When the caller asks for a person or another path the brief routes directly, follow it at once without extra offers. Say
+  amounts and dates in the exact spoken format the brief prescribes.
 - Spoken text (on_enter tts) may use {{x}} only for keys you put in test_variables, and test_variables holds the brief's call
   variables with sample values.
 - Code (if any) has no {{ }} and stays small. No knowledge base, no transfer_call nodes unless the tool API has no transfer tool.
