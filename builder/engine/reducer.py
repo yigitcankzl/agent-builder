@@ -839,6 +839,7 @@ def step(policy, st, event, tool_event, now, call_vars=None):
     today = _d(now)
     cv = dict(call_vars or dict())
     partial_answer = False
+    identity_question = False
     if st.pop('_resume_writes', False):   # a per-write notice was spoken; continue without consuming user input
         act = next_write(policy, st, cv)
     elif tool_event and st.get('pending'):
@@ -857,6 +858,8 @@ def step(policy, st, event, tool_event, now, call_vars=None):
         info = None
         if ev and ev.get('kind') != 'topic':
             info = next((x for x in (ev.get('also_t'), ev.get('t')) if x in QUESTION_TOPICS), None)
+        elif ev and st['phase'] == 'identity' and str(st.get('q') or '').startswith('id_'):
+            info = next((x for x in (ev.get('t'), ev.get('also_t')) if x in QUESTION_TOPICS), None)
         elif ev and ev.get('st') == 'partial' and ev.get('t') in QUESTION_TOPICS:
             info = ev.get('t')
         if info and ev.get('st') == 'partial':
@@ -865,8 +868,20 @@ def step(policy, st, event, tool_event, now, call_vars=None):
                 ev = dict(ev, kind='topic', t=info)   # a question is not cut-off offer chatter
         if info:       # PUB-04: a date (or any event) plus "are you a robot?": the event once, the answer line first
             ev = dict(ev, also='none', also_t='')
-        act = on_user(policy, st, ev, today, cv) if ev else resay(st)
-        if info:
+        identity_question = bool(info and st['phase'] == 'identity' and str(st.get('q') or '').startswith('id_')
+                                 and ev.get('st') != 'partial' and not (ev.get('kind') == 'topic' and ev.get('t') == 'decline')
+                                 and not (ev.get('kind') == 'identity' and
+                                 any(str(ev.get(k) or '').strip() for k in ('ans', 'd', 'm', 'y'))))
+        if identity_question:
+            # A question interrupts the pending security ask; neither refusal nor chatter caps apply to it.
+            row = event_row(policy, info if info != 'terms' else 'purpose') or dict()
+            line = row.get('say') or (event_row(policy, 'purpose') or dict()).get('say') or caller_line(policy)
+            qs = (policy.get('identity') or dict()).get('questions') or []
+            q = qs[st['identity']['idx']].get('ask') or ''
+            act = dict(type='say_exact', text=(line + ' ' + q).strip())
+        else:
+            act = on_user(policy, st, ev, today, cv) if ev else resay(st)
+        if info and not identity_question:
             # 'what is this about?' before verification: the brief's own answer, else who is calling (951431e, PUB-02)
             line = caller_line(policy) if info == 'purpose' and st.get('verified') != 'yes' and not (
                 event_row(policy, 'purpose') or dict()).get('say') else info_line(policy, st, info)
@@ -878,7 +893,7 @@ def step(policy, st, event, tool_event, now, call_vars=None):
     if act.get('type') == 'say_exact' and not str(act.get('text') or '').strip():
         act = dict(type='say_exact', text=sentence(policy, 'safe_repeat', D_SAFE))
     # never loop on one tts line: the same words more than RESAY_CAP + 1 times in a row break the loop by stage
-    if act.get('type') == 'say_exact' and act['text'] != sentence(policy, 'continue_line', D_CONTINUE) and not partial_answer:
+    if act.get('type') == 'say_exact' and act['text'] != sentence(policy, 'continue_line', D_CONTINUE) and not (partial_answer or identity_question):
         st['_said_n'] = st.get('_said_n', 0) + 1 if act['text'] == st.get('_said_last') else 1
         st['_said_last'] = act['text']
         if st['_said_n'] > RESAY_CAP + 1:
