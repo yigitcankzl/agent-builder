@@ -2212,7 +2212,7 @@ def topic_event(policy, st, ev, today, cv):
         return no_event(policy, st, dict(ev, kind='no'), today, cv)
     if t in ('paid', 'dispute'):
         row = event_row(policy, t)
-        say = (row or dict()).get('say') or ''
+        say = (row or dict()).get('say') or (brief_sentence(policy, 'paid_delay') if t == 'paid' else '')
         p, pd = _p(st, i)
         st['offer'] = None
         notes_on = bool(((policy.get('writes') or dict()).get('notes') or dict()).get('enabled'))

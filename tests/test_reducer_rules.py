@@ -973,6 +973,54 @@ def raw4_pub03_live():
     return True
 
 
+def raw4_paid_delay_live():
+    """Raw-4 PUB-08 (3b97feee): the saved policy had an empty paid event say, but the exact quoted line under
+    sentences.paid_delay. Say that line once before the farewell; an event-specific line still wins."""
+    import copy, json
+    from builder import policy_bridge as B
+    d = os.path.join(ROOT, "tests", "fixtures", "brief_reading", "raw-4-single")
+    pol, _ = B.to_reducer(json.load(open(os.path.join(d, "extracted.json"))), os.path.join(ROOT, "tools", "openapi.json"),
+                          brief_text=open(os.path.join(d, "brief.md")).read())
+    paid = next(x for x in pol["events"] if x["topic"] == "paid")
+    expected = pol["sentences"]["paid_delay"]["text"]
+    check(any(expected in (x.get("quote") or "") for x in pol["sentences"]["paid_delay"].get("source") or []),
+          "paid-delay fallback is not backed by the brief quote")
+    paid["say"] = ""                 # the final live policy shape
+    cv = dict(customer_id="c_paid", first_name="Hannah", last_name="Schmidt", title="Ms", now=NOW)
+    st = R.init_state(pol, cv)
+    actions = []
+    st, a = say(pol, st, "kind=who;also=none;st=complete;prod=;who=self;party="); actions.append(a)
+    st, a = say(pol, st, "kind=identity;also=none;st=complete;prod=;field=date_of_birth;ans=1993-04-28;d=28;m=4;y=1993"); actions.append(a)
+    st, a = tool(pol, st, dict(verified=True, all_verified=False, wrong_answers_left=3)); actions.append(a)
+    st, a = say(pol, st, "kind=identity;also=none;st=complete;prod=;field=phone_last4;ans=3317"); actions.append(a)
+    st, a = tool(pol, st, dict(verified=True, all_verified=True, wrong_answers_left=3)); actions.append(a)
+    st, a = tool(pol, st, dict(products=[dict(product_id="p1", type="credit_card", card_last4="5512",
+                                                    past_due=180.0, days_late=5, minimum_payment=54.0)])); actions.append(a)
+    before_paid = copy.deepcopy(st)
+    st, a = say(pol, st, "kind=topic;also=other;st=complete;prod=;t=paid"); actions.append(a)
+    check(a["type"] == "close" and (a["outcome"], a["reason"]) == ("paid", None), f"paid close: {a}")
+    check(a["farewell"] == expected + " " + R.D_FAREWELL and a["farewell"].count(expected) == 1,
+          f"paid-delay once before farewell: {a}")
+    check(not any(x.get("tool") == "create_promise" for x in actions) and st.get("readback") is None,
+          f"paid never confirms or writes: {actions}")
+
+    # hub_source strips source quotes before shipping; its default marker must preserve the same brief-only choice.
+    v = dict(cv, st=R._dump(before_paid), ev_tok="paid8",
+             ev="n=paid8;src=user;kind=topic;also=other;st=complete;prod=;t=paid")
+    exec(compile(R.hub_source(pol), "raw4-paid-hub", "exec"), {"vars": v})
+    check(v["route"] == "close" and (v["close_outcome"], v.get("close_reason") or None) == ("paid", None),
+          f"packed paid close: {v.get('route')} {v.get('close_outcome')} {v.get('close_reason')}")
+    check(v["farewell"] == expected + " " + R.D_FAREWELL and v["farewell"].count(expected) == 1,
+          f"packed paid-delay once before farewell: {v.get('farewell')}")
+
+    own = "The event-specific paid line."
+    paid["say"] = own
+    st, a = say(pol, before_paid, "kind=topic;also=other;st=complete;prod=;t=paid")
+    check(a["farewell"] == own + " " + R.D_FAREWELL and expected not in a["farewell"],
+          f"event say must win over paid_delay: {a}")
+    return True
+
+
 def raw5_loops_live():
     """q631 raw-5 reps3 live shapes. PUB-13 (34c351f2 / cdf23d67): 'a day later?' at the read-back, then 'keep it as it
     was (yes, I confirm)' at the day question looped to no_promise: the standing read-back is confirmed, no second
@@ -1066,6 +1114,7 @@ def raw5_loops_live():
 
 if __name__ == "__main__":
     print("raw-5 loops: read-back restore, echo yes, subset, route, app line (q631 live):", raw5_loops_live())
+    print("raw-4 PUB-08 paid-delay fallback:", raw4_paid_delay_live())
     print("raw-4 PUB-03/PUB-01 and A PUB-03 live shapes (4074f8f):", raw4_pub03_live())
     print("ledger confirmation and uncertainty live shapes:", ledger_invariants_live())
     print("per-product terms in one turn (raw-2 PUB-12 live, PER_ITEM):", per_item_terms())
