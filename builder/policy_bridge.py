@@ -639,6 +639,18 @@ def saved_line(p):
                                     "split_from": "text_message"}
                 sent["text_message"] = dict(tm, text=" ".join(rest))
                 notes.append(f"saved line: the brief's own {' '.join(own)!r} replaces the contract default; text_message {' '.join(rest)!r}")
+    for key in RESULT_SENTENCES:
+        line = sent.get(key) or {}
+        line.pop("after_each_success", None)   # timing is source-derived, never an extractor flag or max_times
+        for src in _sources(line):
+            q = _quote([src])
+            before = q.partition(line.get("text") or "")[0]
+            moments = re.split(r"\bafter\b", before, flags=re.I)
+            if line.get("text") and line["text"] in q and len(moments) > 1 and re.match(
+                    r"\s*(?:each|every) (?:successful (?:create_promise|(?:promise )?(?:write|record))|"
+                    r"(?:recorded|saved) promise|promise (?:is )?(?:recorded|saved))\b", moments[-1], re.I):
+                line["after_each_success"] = True
+                break
     return notes
 
 

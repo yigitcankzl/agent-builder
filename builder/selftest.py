@@ -279,7 +279,7 @@ def run_scenario(R, policy, name, knobs, oas_path, idq):
     wrong_calls = 0
     closed = None
     for i in range(MAX_STEPS):
-        ev = None if tool_ev else cust.next(st, tok)
+        ev = None if tool_ev or st.get('_resume_writes') else cust.next(st, tok)
         before = json.dumps({k: v for k, v in st.items() if k not in ("runs", "tok", "last_tok", "hangup") and not k.startswith("_")}, sort_keys=True, default=str)
         try:
             st, act = R.step(policy, st, ev, tool_ev, NOW, cv)

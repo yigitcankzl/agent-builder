@@ -372,6 +372,12 @@ def generate(rp, oas_path):
                     "name": "call_closed", "handler": "__function__:end_call",
                     "parameters": {"type": "object", "properties": {"message_mode": {"type": "string", "default": "none"}}}}}},
     }
+    if any((v or {}).get('after_each_success') for k, v in (rp.get('sentences') or {}).items()
+           if k in ('recorded', 'text_message')):
+        nodes['write_say'] = {"name": "write_say", "node_type": "conversation",
+                              "on_enter": {"type": "tts", "text": "{{say_next}}"}, "passthrough": True,
+                              "passthrough_default_transition": "hub_reset", "task_message": "No tool call is allowed.",
+                              "transitions": [_always("hub_reset")]}
     for t in used:
         nodes["t_" + t] = _api_node(t, tools[t], "hub")
     if "close_call" in tools:
@@ -408,6 +414,9 @@ def generate(rp, oas_path):
         if t in OPEN:
             hub_edges.append({"target_node": "t_" + t, "description": t, "condition": _cond(("route", "t_" + t), ("w_go_" + t, "go"))})
     hub_edges.append({"target_node": "exact_say", "description": "say", "condition": _cond(("route", "say"))})
+    if 'write_say' in nodes:
+        hub_edges.append({"target_node": "write_say", "description": "per-write notice",
+                          "condition": _cond(("route", "write_say"))})
     # A failed code_exec leaves hub_failure_count > 0 and a non-200 status, and does not apply the returned vars.
     # Same-target edges merge, so this OR joins the close edge and stays ahead of talk_post. greater_than is false
     # when the counter is unset, so a healthy hub (status 200, count 0) does not take it.

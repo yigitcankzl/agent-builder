@@ -125,7 +125,11 @@ def run_case(pol, c, events):
         return dict(ok=True)
 
     def settle(act):
-        while act.get("type") == "call_tool":
+        while act.get("type") == "call_tool" or act.get("resume_writes"):
+            if act.get("resume_writes"):
+                st_[0], act = R.step(pol, st_[0], None, None, now, cv)
+                said.append(act)
+                continue
             p = st_[0]["pending"]
             data = bank(act["tool"], act.get("args") or dict())
             te = dict(node=p["node"], success=p["snap_success"] + 1, failure=p["snap_failure"], status_code=200, ok="true", data=data)

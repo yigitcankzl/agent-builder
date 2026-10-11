@@ -5,7 +5,7 @@ concatenated into a Freya code node by hub_source). The policy is the bridge's t
 Every brief-specific value comes from the policy; the only literals are contract defaults (marked DEFAULT).
 
 Action shapes:
-  dict(type='say_exact', text=...)                     exact tts, never empty
+  dict(type='say_exact', text=..., resume_writes=True) exact tts; optional continuation without a user turn
   dict(type='speak_free', node='talk_pre'|'talk_post', hint=...)
   dict(type='call_tool', tool=..., args=dict(...))     canonical arg names; the generator maps them to the OAS body
   dict(type='close', outcome=..., reason=..., farewell=...)
@@ -839,7 +839,9 @@ def step(policy, st, event, tool_event, now, call_vars=None):
     today = _d(now)
     cv = dict(call_vars or dict())
     partial_answer = False
-    if tool_event and st.get('pending'):
+    if st.pop('_resume_writes', False):   # a per-write notice was spoken; continue without consuming user input
+        act = next_write(policy, st, cv)
+    elif tool_event and st.get('pending'):
         node = tool_event.get('node') or st['pending']['node']
         st['_tc'][node] = [int(tool_event.get('success') or 0), int(tool_event.get('failure') or 0)]
         act = on_tool(policy, st, tool_event, today, cv)
@@ -940,6 +942,11 @@ def on_tool(policy, st, te, today, cv):
     if op == 'promise':
         i = _index(st, pend['product_id'])
         st['products'][i]['status'] = 'persisted'
+        lines = [sentence(policy, k) for k in ('recorded', 'text_message')
+                 if ((policy.get('sentences') or dict()).get(k) or dict()).get('after_each_success')]
+        if any(lines):
+            st['_resume_writes'] = True
+            return dict(type='say_exact', text=' '.join(x for x in lines if x), resume_writes=True)
         return next_write(policy, st, cv)
     if op == 'note':
         i = _index(st, pend['product_id'])
@@ -1105,12 +1112,18 @@ def next_write(policy, st, cv):
     if any(p['status'] == 'persisted' for p in st['products']):
         st['_wrapup_said'] = True
         st['q'] = 'none'
-        sms = sentence(policy, 'text_message') or sentence(policy, 'sms_confirmation')
-        rec = sentence(policy, 'recorded') or sentence(policy, 'saved')
-        if not rec:
+        sent = policy.get('sentences') or dict()
+        sms = '' if (sent.get('text_message') or dict()).get('after_each_success') else \
+            sentence(policy, 'text_message') or sentence(policy, 'sms_confirmation')
+        rec_each = (sent.get('recorded') or dict()).get('after_each_success')
+        rec = '' if rec_each else sentence(policy, 'recorded') or sentence(policy, 'saved')
+        if not rec and not rec_each:
             words = ((policy.get('honesty_words') or dict()).get('words') or []) + ['saved']
             rec = '' if any(w in sms.lower() for w in words) else D_RECORDED   # the SMS line may already say it
         text = (rec + ' ' + sms).strip()
+        if not text:
+            o, r = precedence(policy, st)
+            return do_close(policy, st, o, r, D_FAREWELL)
         hook_point(st, 'on_promise_recorded')
         st['_last_ask'] = text
         return dict(type='say_exact', text=text.strip())
@@ -2924,7 +2937,7 @@ def hub_main(vars, policy):
     try:
         te = read_tool(vars, st)
         extra = [x.get('id') for x in policy.get('extra_topics') or [] if isinstance(x, dict) and x.get('id')]
-        ev = None if te else parse_event(vars.get('ev'), st, CONTRACT_TOPICS + extra)
+        ev = None if te or st.get('_resume_writes') else parse_event(vars.get('ev'), st, CONTRACT_TOPICS + extra)
         st2, act = step(policy, st, ev, te, now, cv)
         if ev:
             st2['last_tok'] = ev.get('n')
@@ -2933,7 +2946,7 @@ def hub_main(vars, policy):
         vars['hub_error'] = str(e)[:200]
     t = act.get('type')
     if t == 'say_exact':
-        vars['route'], vars['say_next'] = 'say', act['text']
+        vars['route'], vars['say_next'] = 'write_say' if act.get('resume_writes') else 'say', act['text']
     elif t == 'speak_free':
         vars['route'], vars['talk_hint'] = act.get('node') or 'talk_pre', act.get('hint') or ''
     elif t == 'call_tool':

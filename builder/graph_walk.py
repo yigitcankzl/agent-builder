@@ -368,7 +368,7 @@ def hub_actions(rep):
     ci = 0
     for h in rep['hub']:
         r = str(h.get('route') or '')
-        if r == 'say':
+        if r in ('say', 'write_say'):
             out.append(dict(type='say_exact', text=h.get('say_next')))
         elif r == 'close':
             out.append(dict(type='close', outcome=h.get('close_outcome'), reason=h.get('close_reason') or None, farewell=h.get('farewell')))

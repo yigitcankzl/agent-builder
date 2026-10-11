@@ -1002,7 +1002,11 @@ def raw5_loops_live():
 
     def writes(st, a):
         out = []
-        while a["type"] == "call_tool" and a["tool"] == "create_promise":
+        while (a["type"] == "call_tool" and a["tool"] == "create_promise") or a.get("resume_writes"):
+            if a.get("resume_writes"):
+                check(a["text"] == pol["sentences"]["text_message"]["text"], "per-write notice before continuing")
+                st, a = R.step(pol, st, None, None, NOW, CV)
+                continue
             out.append((a["args"]["product_id"], a["args"]["amount"], a["args"]["date"]))
             st, a = tool(pol, st, dict(ok=True))
         return out
