@@ -922,7 +922,58 @@ def ledger_invariants_live():
     return True
 
 
+def raw4_pub03_live():
+    """ours 4074f8f live shapes. raw-4 PUB-03 (8e37adfd): 'Yes, that's me, and about the...' (who=self, partial) then
+    'balance on my account.' (kind=other) closed not_reached: the partial yes is kept -> the security questions; with
+    confirm_who max_times 1 from 'ask, in these words' one non-answer never closes. A PUB-03 (e155 0726b8ca): a whole
+    third date in a cut-off turn is checked at once -> failed; (f4eb 9bfcde5c) two wrong dates, then only chatter to
+    the cap -> failed, not declined. raw-4 PUB-01 (340a8e32): a listed holiday is called a holiday."""
+    import json
+    from builder import policy_bridge as B
+    d = os.path.join(ROOT, "tests", "fixtures", "brief_reading", "raw-4-single")
+    raw4, _ = B.to_reducer(json.load(open(os.path.join(d, "extracted.json"))), os.path.join(ROOT, "tools", "openapi.json"),
+                           brief_text=open(os.path.join(d, "brief.md")).read())
+    check(raw4["sentences"]["confirm_who"]["max_times"] == 1, "raw-4 still bridges max_times 1 (else drop this case)")
+    cv = dict(customer_id="c_p3", first_name="Owen", last_name="Park", title="Mr", now=NOW)
+    for name, pol in dict(POL, raw4=raw4).items():
+        v = R.V(pol)
+        st = R.init_state(pol, cv)
+        st, a = say(pol, st, "kind=who;also=none;st=partial;prod=;who=self;party=")
+        check(a["type"] == "say_exact" and st["phase"] == "opening", f"{name}: partial -> continue: {a}")
+        st, a = say(pol, st, "kind=other;also=none;st=complete;prod=")
+        check(st["phase"] == "identity" and a["type"] == "say_exact" and st["q"].startswith("id_"), f"{name}: partial yes kept: {a}")
+        st = R.init_state(pol, cv)
+        st, a = say(pol, st, "kind=other;also=none;st=complete;prod=")
+        check(a["type"] == "say_exact" and st["phase"] == "opening", f"{name}: one non-answer re-asks the name: {a}")
+        # e155: third date whole in a cut-off turn
+        st = R.init_state(pol, cv)
+        st, a = say(pol, st, "kind=who;also=none;st=complete;prod=;who=self;party=")
+        for left, body in ((2, "ans=1991-07-12;d=12;m=7;y=1991"), (1, "ans=1992-08-21;d=21;m=8;y=1992")):
+            st, a = say(pol, st, "kind=identity;also=none;st=complete;prod=;field=date_of_birth;" + body)
+            st, a = tool(pol, st, dict(verified=False, all_verified=False, wrong_answers_left=left))
+        st2 = json.loads(json.dumps(st))
+        st, a = say(pol, st, "kind=identity;also=none;st=partial;prod=;field=date_of_birth;ans=;d=21;m=7;y=1990")
+        check(a["type"] == "call_tool" and a["args"]["answer"] == "1990-07-21", f"{name}: whole partial date checked: {a}")
+        st, a = tool(pol, st, dict(verified=False, all_verified=False, wrong_answers_left=0))
+        check(a["type"] == "close" and (a["outcome"], a["reason"]) == tuple(v["id_failed"]), f"{name}: third wrong -> failed: {a}")
+        # f4eb: no third date, chatter to the cap
+        st = st2
+        for _ in range(R.ID_OTHER_CAP + 1):
+            st, a = say(pol, st, "kind=other;also=none;st=complete;prod=")
+        check(a["type"] == "close" and (a["outcome"], a["reason"]) == tuple(v["id_failed"]), f"{name}: wrong then cap -> failed: {a}")
+    pd = dict(deadline="2026-10-21")
+    today = R._d("2026-10-14")
+    hol = R.date_verdict(raw4, today, pd, R._d("2026-10-16"))
+    line = R.fill_date(hol["say"], hol)
+    check(hol["reason"] == "non_business_day" and line.startswith("Friday 16 October is a holiday.") and "19 October" in line,
+          f"holiday named: {line}")
+    wk = R.date_verdict(raw4, today, pd, R._d("2026-10-17"))
+    check("is not a business day" in R.fill_date(wk["say"], wk), f"weekend line kept: {wk}")
+    return True
+
+
 if __name__ == "__main__":
+    print("raw-4 PUB-03/PUB-01 and A PUB-03 live shapes (4074f8f):", raw4_pub03_live())
     print("ledger confirmation and uncertainty live shapes:", ledger_invariants_live())
     print("per-product terms in one turn (raw-2 PUB-12 live, PER_ITEM):", per_item_terms())
     print("gate denial is the callback (PUB-03 live):", gate_denial_is_callback())

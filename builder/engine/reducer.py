@@ -788,7 +788,7 @@ def normalise(ev, st):
     if e.get('kind') in ('date', 'date_amount') and (st['phase'] == 'third_party' or
                                                       (st['phase'] in ('opening', 'identity') and str(e.get('tm') or '').strip())):
         e['kind'] = 'callback'           # a day with a time before the account is discussed is a call-time preference
-    if e.get('kind') == 'other' and st['q'] == 'confirm_name':
+    if e.get('kind') == 'other' and st['q'] == 'confirm_name' and not st.get('_who_partial'):
         e['kind'], e['who'] = 'who', 'unclear'
     # Live extractors sometimes preserve the secondary question in t= but omit also=topic.
     if e.get('kind') != 'topic' and e.get('t') in TOPIC_RANK and e.get('t') != 'other' and not e.get('also_t'):
@@ -1504,6 +1504,18 @@ def date_action(policy, sit):
 
 
 def date_verdict(policy, today, pd, named):
+    """raw-4 PUB-01: when the brief's holiday rule asks to 'say so', a listed holiday is called a holiday; a weekend,
+    and a brief that says nothing (kit A) or asks to say 'not a business day' (clean-1), keep 'not a business day'."""
+    out = day_verdict(policy, today, pd, named)
+    q = json.dumps([((policy.get('date_rules') or dict()).get('holiday') or dict()).get('source'),
+                    (policy.get('on_non_business_day') or dict()).get('source')]).lower()
+    if named.isoformat() in ((policy.get('business_days') or dict()).get('holidays') or []) and \
+            re.search(r'\bsay so\b', q) and 'not a business day' not in q:
+        out['say'] = out['say'].replace('<NAMED> is not a business day', '<NAMED> is a holiday')
+    return out
+
+
+def day_verdict(policy, today, pd, named):
     """The named day for one product -> dict(reason ok|non_business_day|after_deadline|refuse, named, accepted,
     deadline, sit, say). Situations in order: past, today_not_allowed, after_deadline, holiday, weekend."""
     dl = _d(pd['deadline'])
@@ -2184,7 +2196,14 @@ def on_user(policy, st, ev, today, cv):
             idt, qs = st['identity'], (policy.get('identity') or dict()).get('questions') or []
             fmt = str(qs[idt['idx']].get('format') or '') if idt['idx'] < len(qs) else ''
             if answer_format(fmt)[0] in ('date', 'digits'):
-                assemble_answer(st, idt['order'][idt['idx']], fmt, dict(ev, st='complete'))
+                field = idt['order'][idt['idx']]
+                ans, _ = assemble_answer(st, field, fmt, dict(ev, st='complete'))
+                if ans:      # a whole answer in a cut-off turn is checked now (e155 PUB-03: the third wrong date was lost)
+                    st['_last_args'] = dict(customer_id=cid(cv), field=field, answer=ans)
+                    return call(st, 'verify', 'verify_identity', dict(st['_last_args']))
+        if st['phase'] == 'opening' and st.get('q') != 'gate' and \
+                (ev.get('kind') == 'yes' or ev.get('kind') == 'who' and ev.get('who') == 'self'):
+            st['_who_partial'] = 'self'      # raw-4 PUB-03: 'Yes, that's me, and about the...' then the rest
         return dict(type='say_exact', text=sentence(policy, 'continue_line', D_CONTINUE))
     k = ev.get('kind')
     ph = st['phase']
@@ -2307,6 +2326,8 @@ def opening(policy, st, ev, today, cv):
         who = 'self'     # only the account holder raises the account (nightmare-1 PUB-09 live: the 'yes, it's me' was lost)
     elif k == 'topic':
         return topic_event(policy, st, ev, today, cv)
+    if k != 'who' and who is None and st.get('_who_partial') == 'self' and k not in ('no', 'identity'):
+        who = 'self'     # the rest of a cut-off 'yes, that's me...' keeps its yes
     if k != 'who' and who is None:
         return reask_name(policy, st, cv)    # an identity answer or anything else never confirms the name (rule 3)
     party = ev.get('party') or ''
@@ -2346,7 +2367,10 @@ def opening(policy, st, ev, today, cv):
 def reask_name(policy, st, cv, prefix=''):
     """Re-ask the name question, counted against its cap (rule 3); at the cap close on the unclear slot."""
     sq = (policy.get('sentences') or dict())
-    cap = int((sq.get('confirm_who') or sq.get('ask_identity') or dict()).get('max_times') or 2)
+    row = sq.get('confirm_who') or sq.get('ask_identity') or dict()
+    cap = int(row.get('max_times') or 2)
+    if cap < 2 and not re.search(r'\bonce\b', json.dumps(row.get('source') or '')):
+        cap = 2      # raw-4 PUB-03: 'ask, in these words' is not 'ask only once'; one non-answer never closes
     if st['counters']['confirm_name'] >= cap:
         o, r = V(policy)['unclear']
         return do_close(policy, st, o, r, D_FAREWELL)
@@ -2565,6 +2589,9 @@ def id_reask(policy, st):
     unclear slot (no refusal was said)."""
     st['_id_other'] = st.get('_id_other', 0) + 1
     if st['_id_other'] > ID_OTHER_CAP:
+        if st['identity'].get('wrong'):      # f4eb PUB-03: wrong answers then no third one -> the failed check
+            o, r = V(policy)['id_failed']
+            return do_close(policy, st, o, r, (id_fail_line(policy) + ' ' + D_FAREWELL).strip())
         o, r = id_unfinished(policy) if st.get('who') == 'self' else V(policy)['unclear']
         return do_close(policy, st, o, r, D_FAREWELL)
     idt, qs = st['identity'], (policy.get('identity') or dict()).get('questions') or []
