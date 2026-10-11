@@ -96,5 +96,22 @@ r = call("check_terms", gate_product="prod_123", gate_date="2026-10-19", gate_am
 ok("prod_123 -> rejected, gate_error names p1, p2", "p1, p2" in (r["gate_error"] or "") and r["gate_ok"] == "no", r)
 r = call("confirm", gate_action="readback", gate_terms="cc_4821:420:2026-10-19")
 ok("read-back terms cc_4821 -> p2", r["gate_status"] in ("readback", "repeat") and V["gate_terms"].startswith("p2:"), r)
+# live brief-a talkative fails (PUB-05 3c70f50b, PUB-06 89957a2d): once-only lines, no persuasion after hardship, offer cap
+offers = [call("next_offer", gate_product="p2", gate_event="first") for _ in range(3)]
+ok("an open offer is re-said once, the next 'first' moves on (early band: exhausted, no third say)",
+   [o["gate_status"] for o in offers] == ["offer", "offer", "exhausted"] and not offers[2]["gate_say"], offers)
+exec(CODE["say_once"], {"vars": V, "params": {"line": "hardship"}})
+ok("say_once hardship: allowed the first time", V["gate_status"] == "once_ok" and V["gate_np"] == "hardship", V["gate_status"])
+exec(CODE["say_once"], {"vars": V, "params": {"line": "hardship"}})
+ok("say_once hardship again: refused, told the close instead", V["gate_status"] == "already_said" and "no_promise/hardship" in V["gate_error"], V["gate_error"])
+st_before = V["gate_st"]
+r = call("next_offer", gate_product="p1", gate_event="first")
+ok("next_offer after hardship: NO OFFER, nothing said, gate state unchanged", r["gate_status"] == "no_persuasion" and not r["gate_say"]
+   and V["gate_st"] == st_before and "no_promise/hardship" in r["gate_error"], r)
+V.pop("gate_np"); V["np_topic"] = "yes"          # the extraction heard job loss, the model never called say_once
+r = call("next_offer", gate_product="p1", gate_event="first")
+ok("np_topic=yes from the extraction alone also blocks the offer", r["gate_status"] == "no_persuasion", r)
+spoken = [n["on_enter"]["text"] for n in WF["nodes"].values() if (n.get("on_enter") or {}).get("type") == "tts"]
+ok("no 'call is recorded' in spoken lines (PUB-10 6ffe9fde judge: honesty word)", not any("call is recorded" in t.lower() for t in spoken), spoken)
 print("PASS" if all(checks) else "FAIL")
 sys.exit(0 if all(checks) else 1)

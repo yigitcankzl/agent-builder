@@ -217,9 +217,98 @@ except Exception:
 """
 
 
-def gate_tool(tool, rp):
+def once_lines(rp):
+    """The lines the brief allows once, from the policy's events (their effect says once / one sentence / no
+    persuasion / no attempts): {topic: {after, close, np, quote}}. np: after it, no persuasion offer is allowed."""
+    import re
+    out = {}
+    for e in rp.get("events") or []:
+        eff = str(e.get("effect") or "")
+        if not e.get("topic") or not re.search(r"\bonce\b|one (short )?sentence|no persuasion|no attempts", eff, re.I):
+            continue
+        close = "/".join(x for x in (e.get("outcome"), e.get("reason")) if x)
+        out[e["topic"]] = {"after": eff + (f"; close as {close}" if close else ""), "close": close,
+                           "np": bool(re.search(r"no persuasion|no attempts", eff, re.I)),
+                           "quote": ((e.get("source") or [{}])[0] or {}).get("quote") or ""}
+    return out
+
+
+def once_tool(lines):
+    """say_once(line): the first call allows the line (the model says it); a repeat is refused, with what to do instead
+    in gate_error (shown in the prompt). A no-persuasion line also sets gate_np, which blocks next_offer."""
+    cat = {k: {"after": v["after"], "np": v["np"]} for k, v in lines.items()}
+    code = ("import json as _json\n"
+            f"_L = _json.loads({json.dumps(json.dumps(cat))})\n"
+            "try:\n"
+            "    _P = globals().get('params')\n"
+            "    _line = str((_P if isinstance(_P, dict) else dict()).get('line') or '').strip()\n"
+            "    _used = _json.loads(vars.get('gate_once') or '[]')\n"
+            "    vars['gate_say'], vars['gate_new'], vars['gate_ok'] = '', 'no', 'no'\n"
+            "    if _line not in _L:\n"
+            "        vars['gate_status'], vars['gate_error'] = 'unknown_line', 'say_once line must be one of: ' + ', '.join(_L)\n"
+            "    elif _line in _used:\n"
+            "        vars['gate_status'] = 'already_said'\n"
+            "        vars['gate_error'] = ('ALREADY SAID ONCE (' + _line + '): do not say or offer it again. Instead: ' + _L[_line]['after'])\n"
+            "    else:\n"
+            "        _used.append(_line)\n"
+            "        vars['gate_once'] = _json.dumps(_used)\n"
+            "        vars['gate_status'], vars['gate_ok'], vars['gate_error'] = 'once_ok', 'yes', ''\n"
+            "    if _line in _L and _L[_line]['np']:\n"
+            "        vars['gate_np'] = _line\n"
+            "except Exception as _e:\n"
+            "    vars['gate_status'], vars['gate_error'] = 'error', str(_e)[:150]\n")
+    return {"type": "function", "config": {"timeoutMs": 10000},
+            "function": {"name": "say_once", "handler": "__function__:code_exec",
+                         "description": ("Lines the brief allows ONCE per call: " + "; ".join(f"{k}: {v['after']}" for k, v in lines.items()) +
+                                         ". CALL say_once with the line BEFORE you say it (sympathy, the support offer, ...). "
+                                         "If the latest gate result says ALREADY SAID, do not say it again; do what it says instead."),
+                         "parameters": {"type": "object", "properties": {
+                             "code": {"type": "string", "default": code}, "timeout_ms": {"type": "number", "default": 5000},
+                             "line": {"type": "string", "enum": list(lines), "description": "one of: " + ", ".join(lines)}},
+                             "required": ["line"]}}}
+
+
+# next_offer only: (1) after a no-persuasion line (hardship ...) no offer is made at all: the gate state is restored and
+# the model is told the close instead; (2) an open offer is re-said at most once: a further 'first' becomes 'flat' (the
+# next attempt), so a talkative customer's non-answers move the call on instead of looping (live PUB-06 89957a2d).
+def offer_guard(lines):
+    np = {k: v["after"] for k, v in lines.items() if v["np"]}
+    pre = ("try:\n"
+           "    vars['_np_block'], vars['_st_backup'] = '', vars.get('gate_st') or ''\n"
+           f"    _NP = _json.loads({json.dumps(json.dumps(np))})\n"
+           "    if vars.get('np_topic') == 'yes' and _NP and not vars.get('gate_np'):\n"
+           "        vars['gate_np'] = list(_NP)[0]\n"
+           "    if vars.get('gate_np') in _NP:\n"
+           "        vars['_np_block'] = _NP[vars['gate_np']]\n"
+           "    _ev = str(vars.get('gate_event') or 'first')\n"
+           "    _fn = vars.get('gate_first_n')\n"
+           "    _fn = _json.loads(_fn) if isinstance(_fn, str) and _fn.startswith('{') else dict()\n"
+           "    _pk = str(vars.get('gate_product') or '')\n"
+           "    _n = int(_fn.get(_pk) or 0)\n"
+           "    if _ev == 'first':\n"
+           "        _n += 1\n"
+           "        if _n > 2:\n"
+           "            vars['gate_event'], _n = 'flat', 1\n"
+           "    else:\n"
+           "        _n = 1\n"
+           "    _fn[_pk] = _n\n"
+           "    vars['gate_first_n'] = _json.dumps(_fn)\n"
+           "except Exception:\n"
+           "    pass\n")
+    post = ("try:\n"
+            "    if vars.get('_np_block'):\n"
+            "        vars['gate_st'] = vars.get('_st_backup') or vars.get('gate_st')\n"
+            "        vars['gate_status'], vars['gate_ok'], vars['gate_say'], vars['gate_new'] = 'no_persuasion', 'no', '', 'no'\n"
+            "        vars['gate_error'] = 'NO OFFER: ' + str(vars.get('gate_np')) + ' was raised, the brief allows no persuasion. Instead: ' + vars['_np_block']\n"
+            "except Exception:\n"
+            "    pass\n")
+    return pre, post
+
+
+def gate_tool(tool, rp, lines=None):
     from builder.engine.gates import gate_source
-    code = prefix(tool) + (HEARD if tool == "confirm" else "") + gate_source(rp, GATE_NAME[tool]) + suffix()
+    pre, post = offer_guard(lines or {}) if tool == "next_offer" else ("", "")
+    code = prefix(tool) + (HEARD if tool == "confirm" else "") + pre + gate_source(rp, GATE_NAME[tool]) + post + suffix()
     props = {"code": {"type": "string", "default": code}, "timeout_ms": {"type": "number", "default": 15000}}
     props.update({k: PARAMS[k] for k in GATE_IN[tool]})
     return {"type": "function", "config": {"timeoutMs": 20000},
@@ -241,6 +330,16 @@ def gate_create_promise(t):
     return t
 
 
+import re as _re
+RECORDED = _re.compile(r"\b(this|the) call is (being )?recorded", _re.I)
+CHATTER = ("\n\nTALKATIVE CUSTOMERS: off-topic talk or a cut-off sentence is never a refusal, a no or an answer. Reply in a few "
+           "words if needed, then ask your last question again. Only an explicit refusal counts as declining or refusing. "
+           "Never repeat or rephrase an offer, a sympathy sentence or a support offer yourself.")
+ONCE_PROMPT = """
+- Lines the brief allows once (say_once): call say_once with the line BEFORE you say it. If the latest gate result says ALREADY SAID, do not say it again and do what it says instead (usually the close).
+- Never repeat an offer in your own words. If the customer gives no clear answer to an offer, call next_offer with first: it repeats the offer once, and after that it moves on to the next attempt. NO OFFER means no persuasion at all: follow the instruction in the gate error."""
+
+
 def _cond(var, val):
     return {"logic": "and", "conditions": [{"variable": var, "operator": "equals", "operand": val}]}
 
@@ -259,15 +358,27 @@ def wire(wf, rp):
     hosts = [k for k, n in nodes.items() if any((t.get("function") or {}).get("name") == "create_promise" for t in n.get("tools") or [])]
     if not hosts:
         raise ValueError("no node with create_promise")
-    gates = [gate_tool(t, rp) for t in GATE_IN]
+    lines = once_lines(rp)
+    gates = [gate_tool(t, rp, lines) for t in GATE_IN] + ([once_tool(lines)] if lines else [])
+    extra = [RB]
+    np_quotes = [v["quote"] for v in lines.values() if v["np"] and v["quote"]]
+    if np_quotes:      # sticky in code: the first gate run after a yes sets gate_np, which blocks every later offer
+        extra.append({"name": "np_topic", "type": "string", "enum_values": ["yes", "no"], "min_confidence": 0.6,
+                      "description": "yes if the customer has said at any point in this call something this rule covers: "
+                                     + " / ".join(np_quotes) + " Otherwise no."})
     wf["test_variables"] = dict(wf.get("test_variables") or {}, gate_say="", gate_new="no", gate_status="none", gate_ok="no",
                                 gate_out_date="", gate_out_amount="", gate_queue="", gate_error="")
+    wf["system_prompt"] = (wf.get("system_prompt") or "") + CHATTER
+    for k, n in nodes.items():         # the main path says "we keep a recording of this call": "recorded" is an honesty word
+        oe = n.get("on_enter") or {}
+        if isinstance(oe.get("text"), str):
+            oe["text"] = RECORDED.sub("we keep a recording of this call", oe["text"])
     for h in hosts:
         n = nodes[h]
         n["tools"] = [gate_create_promise(t) if (t.get("function") or {}).get("name") == "create_promise" else t
                       for t in n["tools"]] + gates
-        n["task_message"] = (n.get("task_message") or "") + PROMPT
-        n["extraction_schema"] = (n.get("extraction_schema") or []) + [RB]
+        n["task_message"] = (n.get("task_message") or "") + PROMPT + (ONCE_PROMPT if lines else "")
+        n["extraction_schema"] = (n.get("extraction_schema") or []) + extra
         orig = n.get("transitions") or []
         g1, g2, a1, a2 = h + "_g1", h + "_g2", h + "_gate_ack1", h + "_gate_ack2"
         for name in (g1, g2):
