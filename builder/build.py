@@ -196,6 +196,8 @@ def _hybrid(fb, wf, rp, openapi, trace, t_end, out_dir, slot):
         why = "no reducer policy"
     else:
         r = fb.wait(max(0, t_end - 150 - time.time()))
+        trace.log("hybrid_wait", waited_s=round(time.time() - t, 2))
+        t = time.time()      # wire_s below: the wiring alone
         if r.get("workflow") is None or r.get("errors"):
             why = "L3 candidate unusable: " + "; ".join((r.get("errors") or ["no workflow"])[:3])
         elif time.time() > t_end - 60:
@@ -253,7 +255,7 @@ def build(briefs, openapi, slot=None, freya_client=None, out_dir="submission", t
         trace.log("assumptions", **_assumptions(state.get("rp"), state.get("brep"), result))
         if not reason and fb[0]:
             fb[0].cancel()
-            trace.log("fallback_selection", candidate="main", l3="cancelled")
+            trace.log("fallback_selection", candidate=result.get("candidate", "main"), l3="cancelled")
         if reason and fb[0] and signal in L3_SIGNALS:
             wait = max(0, t_end - 150 - time.time())
             r = fb[0].wait(wait)
