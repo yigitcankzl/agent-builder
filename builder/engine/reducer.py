@@ -876,9 +876,7 @@ def step(policy, st, event, tool_event, now, call_vars=None):
             # A question interrupts the pending security ask; neither refusal nor chatter caps apply to it.
             row = event_row(policy, info if info != 'terms' else 'purpose') or dict()
             line = row.get('say') or (event_row(policy, 'purpose') or dict()).get('say') or caller_line(policy)
-            qs = (policy.get('identity') or dict()).get('questions') or []
-            q = qs[st['identity']['idx']].get('ask') or ''
-            act = dict(type='say_exact', text=(line + ' ' + q).strip())
+            act = dict(type='say_exact', text=line)
         else:
             act = on_user(policy, st, ev, today, cv) if ev else resay(st)
         if info and not identity_question:

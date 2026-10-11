@@ -22,8 +22,7 @@ class IdentityQuestionTests(unittest.TestCase):
     def question(self, pol, st, body, answer=None):
         before = copy.deepcopy(st)
         st, act = say(pol, st, body)
-        ask = pol["identity"]["questions"][before["identity"]["idx"]]["ask"]
-        self.assertEqual(act, dict(type="say_exact", text=(answer or R.caller_line(pol)) + " " + ask))
+        self.assertEqual(act, dict(type="say_exact", text=answer or R.caller_line(pol)))
         for key in ("identity", "q", "phase", "counters", "pending", "_last_ask", "_id_other", "_idp", "products"):
             self.assertEqual(st.get(key), before.get(key), key)
         self.assertNotIn("_info_next", st)
@@ -63,6 +62,34 @@ class IdentityQuestionTests(unittest.TestCase):
                     st = start(pol)
                     for _ in range(R.ID_OTHER_CAP + 2):
                         st = self.question(pol, st, body)
+
+    def test_pub12_questions_do_not_add_identity_reasks(self):
+        for name, pol in POL.items():
+            with self.subTest(policy=name):
+                st, act = say(pol, R.init_state(pol, CV), "kind=who;also=none;st=complete;prod=;who=self;party=")
+                spoken = [act["text"]]
+                st, act = say(pol, st, "kind=topic;also=none;st=complete;prod=;t=purpose")
+                spoken.append(act["text"])
+                self.assertEqual(st["q"], "id_date_of_birth")
+                st, act = say(pol, st, "kind=identity;also=none;st=complete;prod=;field=date_of_birth;ans=1990-01-01")
+                self.assertEqual(act["tool"], "verify_identity")
+                st, act = tool(pol, st, dict(verified=True, all_verified=False, wrong_answers_left=3))
+                spoken.append(act["text"])
+                st, act = say(pol, st, "kind=identity;also=none;st=complete;prod=;field=phone_last4;ans=4401")
+                self.assertEqual(act["tool"], "verify_identity")
+                st, act = tool(pol, st, dict(verified=False, all_verified=False, wrong_answers_left=2))
+                spoken.append(act["text"])
+                st, act = say(pol, st, "kind=other;also=purpose;st=complete;prod=")
+                spoken.append(act["text"])
+                self.assertEqual(st["q"], "id_phone_last4")
+                self.assertEqual(st["identity"]["wrong"], 1)
+                self.assertEqual(st["identity"]["refusals"], 0)
+                st, act = say(pol, st, "kind=identity;also=none;st=complete;prod=;field=phone_last4;ans=4410")
+                self.assertEqual(act["tool"], "verify_identity")
+                st, act = tool(pol, st, dict(verified=True, all_verified=True, wrong_answers_left=2))
+                self.assertEqual((st["verified"], act["tool"]), ("yes", "get_account"))
+                for question, count in zip(pol["identity"]["questions"], (1, 2)):
+                    self.assertEqual(sum(text.count(question["ask"]) for text in spoken), count)
 
     def test_policy_answer_and_exact_pending_question(self):
         pol = copy.deepcopy(POL["A+B"])
@@ -118,7 +145,7 @@ class IdentityQuestionTests(unittest.TestCase):
                             st = self.question(pol, st, "kind=topic;also=none;st=complete;prod=;t=purpose")
                     self.assertEqual((act["type"], act["outcome"], act["reason"]), ("close", *R.slot(pol, "id_failed")))
 
-    def test_packed_hub_reasks_without_consuming_identity_attempts(self):
+    def test_packed_hub_answers_without_reasking_or_consuming_identity_attempts(self):
         pol = POL["A+B"]
         code = G.pack_hub(R.hub_source(pol))
         st = start(pol)
@@ -127,7 +154,7 @@ class IdentityQuestionTests(unittest.TestCase):
             exec(compile(code, "identity-question-hub", "exec"), {"vars": vars_})
             self.assertFalse(vars_.get("hub_error"), vars_.get("hub_error"))
             self.assertEqual(vars_["route"], "say")
-            self.assertEqual(vars_["say_next"], R.caller_line(pol) + " " + pol["identity"]["questions"][idx]["ask"])
+            self.assertEqual(vars_["say_next"], R.caller_line(pol))
             st = json.loads(vars_["st"])
             self.assertEqual(st["identity"]["refusals"], 0)
             self.assertEqual(st["identity"]["wrong"], 0)

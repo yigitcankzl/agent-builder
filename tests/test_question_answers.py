@@ -6,7 +6,7 @@ because the built policy had no robot line).
 Shapes: kind=topic+also=X+t=Q, kind=X+also=topic+t=Q, kind=X+also=Q, kind=X+t=Q, and the partial forms. Phases:
 opening, identity, third party, statement/offer, read-back, wrap-up. Policies: A, and A without a robot line (the
 answer then falls back to the brief's own opening identity). The expected rest is the same event without the question,
-except security-stage questions re-ask the exact pending field without counting the interruption as an answer.
+except security-stage questions only get an answer, preserving the pending field without re-asking it.
 """
 import copy, os, sys
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -61,8 +61,7 @@ def run(name, pol):
                 if "st=partial" in body:     # a cut-off turn with a question: the answer, then the continue line
                     ok = text == want + " " + R.sentence(pol, "continue_line", R.D_CONTINUE)
                 elif st["phase"] == "identity" and str(st.get("q") or "").startswith("id_"):
-                    ask = pol["identity"]["questions"][st["identity"]["idx"]]["ask"]
-                    ok = act == dict(type="say_exact", text=want + " " + ask)
+                    ok = act == dict(type="say_exact", text=want)
                     ok = ok and all(s1.get(k) == st.get(k) for k in ("identity", "q", "counters", "pending", "_id_other"))
                 elif text is None:     # a tool call: the answer waits for the next spoken line, once
                     ok = act.get("type") == base.get("type") and (s1.get("_info_next") or "").count(want) == 1
