@@ -1740,6 +1740,17 @@ def accept_readback_change(policy, st, ev):
 def plan_guard(policy, st, ev):
     """One trust boundary for plan uncertainty, read-back invalidation, restoration and re-confirmation."""
     q, k, status = st.get('q'), ev.get('kind'), ev.get('st')
+    safety = st.get('_pending_safety')
+    if safety and status == 'complete':
+        has_amount = _num(ev.get('amt')) is not None
+        has_date = any(str(ev.get(x) or '').strip() for x in ('rel', 'd', 'm', 'wd')) or \
+            ev.get('wk') in ('this', 'next', 'after_next')
+        customer_terms = (k in ('date', 'date_amount', 'amount') or ev.get('also') in ('date', 'date_amount', 'amount')) and \
+            (has_amount or has_date)
+        st.pop('_pending_safety', None)
+        if not customer_terms:
+            ev.update(kind='topic', also='none', also_t='', t=safety)
+            k = 'topic'
     if status == 'complete' and ev.get('why') == 'restore' and q in ('readback', 'what_to_change'):
         st.pop('_uncertain_q', None)
         return restore_readback(policy, st)
@@ -1754,6 +1765,10 @@ def plan_guard(policy, st, ev):
     if status == 'partial':
         # a cut-off turn never acts and is never talked over: the continue line (on_user), the pieces kept; a bare yes
         # right after it re-asks the open question instead of agreeing / writing
+        topic = ev.get('t') if k == 'topic' else ev.get('also_t')
+        row = event_row(policy, topic) if topic == 'hardship' else None
+        if st.get('verified') == 'yes' and row and row.get('brief_topic'):
+            st['_pending_safety'] = topic
         if q in ('offer', 'pay_today', 'readback'):
             st['_uncertain_q'] = q
         if q == 'readback' and k in ('yes', 'no', 'accept', 'reject'):

@@ -206,6 +206,50 @@ def live_fixes(pol, name):
     return True
 
 
+def partial_hardship_live():
+    """A talkative PUB-05 hardship cut across turns blocks persuasion until either the safety flow is completed or
+    the customer supplies their own complete promise terms."""
+    pol = POL["A"]
+    st, _ = to_statement(pol)
+    attempts = [p["attempts"] for p in st["products"]]
+    spoken = []
+    for body in ("kind=topic;also=reject;st=partial;prod=;t=hardship;why=flat",
+                 "kind=other;also=none;st=partial;prod="):
+        st, a = say(pol, st, body)
+        spoken.append(a["text"])
+        check(a == dict(type="say_exact", text=R.D_CONTINUE), f"partial hardship must only wait: {a}")
+        check([p["attempts"] for p in st["products"]] == attempts and st["q"] == "pay_today",
+              f"partial hardship consumed persuasion: {st}")
+    st, a = say(pol, st, "kind=topic;also=none;st=complete;prod=;t=terms")
+    spoken.append(a["text"])
+    check(st["q"] == "support_offer" and st["counters"]["support_offered"] == 1,
+          f"completed fragment did not resolve the pending hardship: {a}")
+    check([p["attempts"] for p in st["products"]] == attempts and not any("pay" in x.lower() for x in spoken),
+          f"hardship flow emitted persuasion: {spoken}")
+
+    # Repeated partial hardship still has no effect; resolving it emits the one policy support offer only once.
+    st, _ = to_statement(pol)
+    for body in ("kind=topic;also=none;st=partial;prod=;t=hardship",
+                 "kind=topic;also=none;st=partial;prod=;t=hardship",
+                 "kind=other;also=none;st=partial;prod="):
+        st, a = say(pol, st, body)
+        check(a == dict(type="say_exact", text=R.D_CONTINUE), f"repeated partial hardship: {a}")
+    check(st["counters"]["support_offered"] == 0 and st["products"][0]["attempts"] == 0,
+          f"partial hardship changed counters: {st['counters']} / {st['products'][0]}")
+    st, first = say(pol, st, "kind=other;also=none;st=complete;prod=")
+    st, second = say(pol, st, "kind=topic;also=none;st=complete;prod=;t=hardship")
+    check(st["counters"]["support_offered"] == 1 and first["text"] not in second.get("farewell", ""),
+          f"sympathy/support repeated: {first} / {second}")
+
+    # Complete customer-led terms release the latch and use the existing promise path instead of forcing support.
+    st, _ = to_statement(pol)
+    st, a = say(pol, st, "kind=topic;also=none;st=partial;prod=;t=hardship")
+    st, a = say(pol, st, "kind=date;also=amount;st=complete;prod=;rel=;d=16;m=10;wd=fri;wk=none;vague=no;amt=540")
+    check(st["q"] == "readback" and st["counters"]["support_offered"] == 0 and "540.00" in a["text"],
+          f"customer-led promise was swallowed by hardship: {a}")
+    return True
+
+
 def pub06_and_malformed():
     """retest56 PUB-06: 'You tell me. Can I pay the minimum this Friday?' -> kind=date;also=restructure must take the
     promise path (only hardship and injection win from also=). PUB-05 967125c1: the platform regex threw away
@@ -1151,6 +1195,7 @@ def raw5_loops_live():
 if __name__ == "__main__":
     print("raw-5 loops: read-back restore, echo yes, subset, route, app line (q631 live):", raw5_loops_live())
     print("raw-4 PUB-08 paid-delay fallback:", raw4_paid_delay_live())
+    print("partial hardship blocks persuasion until resolved:", partial_hardship_live())
     print("raw-4 PUB-03/PUB-01 and A PUB-03 live shapes (4074f8f):", raw4_pub03_live())
     print("ledger confirmation and uncertainty live shapes:", ledger_invariants_live())
     print("per-product terms in one turn (raw-2 PUB-12 live, PER_ITEM):", per_item_terms())
