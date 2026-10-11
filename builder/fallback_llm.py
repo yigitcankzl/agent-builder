@@ -17,7 +17,7 @@ from builder.policy_extract import MODEL, parse_json, read_files
 from builder.oas import load_oas
 
 CODE_LIMIT = 131072                      # code_exec: code + data
-CAP_S = 600                              # the L3 thread's own cap (plan: 10 min)
+CAP_S = 15 * 60                          # leave five minutes of the final 20-minute build for selection and save
 
 PROMPT = """You write a Freya workflow (a phone agent) for the bank brief below. Output ONLY the workflow JSON object, nothing else.
 
