@@ -34,7 +34,10 @@ EVENTS = [
     "kind=topic;also=none;st=complete;prod=;t=human", "kind=topic;also=none;st=complete;prod=;t=paid", "kind=topic;also=none;st=complete;prod=;t=stop",
     "kind=topic;also=none;st=complete;prod=;t=terms", "kind=topic;also=none;st=complete;prod=;t=restructure",
     "kind=topic;also=none;st=complete;prod=2;t=dispute", "kind=topic;also=none;st=complete;prod=;t=change_promise", "kind=topic;also=none;st=complete;prod=;t=decline", "kind=topic;also=none;st=complete;prod=;t=robot",
-    "kind=other;also=none;st=none;prod=", "garbage;;==", ""]
+    "kind=other;also=none;st=none;prod=", "garbage;;==", "",
+    # raw-5 live shapes: restore at the day question, a yes that echoes a read-back amount, a yes naming one product
+    "kind=accept;also=none;st=complete;prod=;why=restore", "kind=yes;also=none;st=complete;prod=;amt=220",
+    "kind=yes;also=none;st=partial;prod=", "kind=accept;also=none;st=complete;prod=1", "kind=date;also=none;st=complete;prod=all;rel=;d=;m=;wd=;wk=none;vague=yes"]
 
 
 def tool_event(rng, st, account):
@@ -92,9 +95,16 @@ def props(n=3000, seed=11):
                 st["tok"] = tok
                 ev = R.parse_event("n=" + tok + ";src=user;" + body if body else "", st, TOPICS)
                 st2, act = R.step(pol, st, ev, None, NOW, CV)
+                half_yes = prev.get("_uncertain_q") == "readback" and prev.get("_rb_half_yes") and \
+                    prev.get("_last_ask") == R.D_RB_CLARIFY
                 if ev and ev.get("kind") == "yes" and prev.get("q") == "readback" and \
-                        prev.get("_readback_valid", True) and not prev.get("_uncertain_q"):
-                    approved = copy.deepcopy(prev["readback"]["items"])
+                        prev.get("_readback_valid", True) and (not prev.get("_uncertain_q") or half_yes):
+                    approved = copy.deepcopy(prev["readback"]["items"])     # the read-back, or its yes-or-no clarify
+                elif ev and ev.get("st") == "complete" and prev.get("q") == "exact_day" and \
+                        not prev.get("_readback_valid", True) and \
+                        ev.get("kind") in ("yes", "accept") and \
+                        ((prev.get("_rb_restore") or dict()).get("readback") or dict()).get("items"):
+                    approved = copy.deepcopy(prev["_rb_restore"]["readback"]["items"])   # the standing read-back
                 elif ev:
                     approved = None
                 if ev:
@@ -136,6 +146,9 @@ def props(n=3000, seed=11):
                     check(item is not None and item["date"] == act["args"]["date"] and
                           abs(float(R.api_amount(pol, item["amount"])) - float(act["args"]["amount"])) < 0.005,
                           f"create_promise without an identical explicit-yes read-back: {act}")
+                    if not prev.get("pending"):     # the first write: this one plus the queue is exactly the confirmed set
+                        check(set(st["_queue"]) | {act["args"]["product_id"]} == set(x["product_id"] for x in approved),
+                              f"writes are not the confirmed set: {act} {st['_queue']} {approved}")
             for p, pd in zip(st["products"], st.get("_pd") or []):
                 check(p["attempts"] <= len(pd["plan"]), "attempt cap")
             check(st["counters"]["confirm_name"] <= 2, "confirm_name cap")

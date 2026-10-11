@@ -779,6 +779,9 @@ def normalise(ev, st):
     if e.get('kind') == 'topic' and e.get('t') in QUESTION_TOPICS and e.get('also') in SUBSTANTIVE + ('date_amount', 'identity', 'who'):
         e['kind'], e['also'], e['also_t'] = e['also'], 'none', e['t']    # kind=topic;also=date;t=robot -> the date + the question
     k = e.get('kind')
+    if k == 'reject' and e.get('why') != 'too_much' and st.get('offer') and str(e.get('amt') or '').strip() and \
+            _num(e['amt']) is not None and _num(e['amt']) == _num(st['offer'].get('amount')):
+        e['why'] = 'too_much'            # raw-5 PUB-13 (bba4f0ac): 'no, not 300' names the amount as the problem
     if k == 'accept' and st['q'] not in ('none', 'readback', 'what_to_change'):
         e['kind'] = 'yes'
     if k == 'other' and e.get('st') == 'none' and st['q'] == 'help_first':
@@ -1124,6 +1127,7 @@ def start_readback(policy, st):
     st['phase'] = 'readback'
     st['_confirmed_readback'] = None
     st.pop('_uncertain_q', None)
+    st.pop('_rb_cut', None)
     st['_readback_valid'] = True
     st['readback'] = dict(items=items, asked=((st.get('readback') or dict()).get('asked') or 0) + 1)
     if len(st['products']) > 1:
@@ -1694,6 +1698,13 @@ def accept_readback_change(policy, st, ev):
         chosen = set(x['product_id'] for x in items)
     elif prod.isdigit() and 0 < int(prod) <= len(st['products']):
         chosen = set([st['products'][int(prod) - 1]['id']])
+        if len(items) > 1 and st.pop('_rb_cut', None) not in ('no', 'reject'):
+            # raw-5 #14: a yes naming one product never writes a subset: the full read-back once (after a cut-off no it
+            # selects that product, 8f7e05cb)
+            if st.get('_rb_subset'):
+                return ask(st, D_WHAT_CHANGE, 'what_to_change')
+            st['_rb_subset'] = True
+            return restore_readback(policy, st)
     elif len(items) == 1:
         chosen = set([items[0]['product_id']])
     else:
@@ -1715,12 +1726,21 @@ def plan_guard(policy, st, ev):
     if status == 'complete' and ev.get('why') == 'restore' and q in ('readback', 'what_to_change'):
         st.pop('_uncertain_q', None)
         return restore_readback(policy, st)
+    if status == 'complete' and q == 'exact_day' and (st.get('_rb_restore') or dict()).get('readback') and \
+            not st.get('_readback_valid', True) and \
+            (k == 'yes' or k == 'accept' and ev.get('why') == 'restore'):
+        # raw-5 PUB-13 (34c351f2 / cdf23d67): 'a day later?' at the read-back, then 'keep it as it was (yes, I confirm)'
+        # at the day question: the standing read-back (already asked once) is confirmed, no second 'Do you confirm?'
+        st.pop('_uncertain_q', None)
+        restore_readback(policy, st)
+        return yes_event(policy, st, None, dict(customer_id=st.get('_cid')))
     if status == 'partial':
         # a cut-off turn never acts and is never talked over: the continue line (on_user), the pieces kept; a bare yes
         # right after it re-asks the open question instead of agreeing / writing
         if q in ('offer', 'pay_today', 'readback'):
             st['_uncertain_q'] = q
         if q == 'readback' and k in ('yes', 'no', 'accept', 'reject'):
+            st['_rb_half_yes'], st['_rb_cut'] = k in ('yes', 'accept'), k
             return ask(st, D_RB_CLARIFY, q)    # a half yes / no to the read-back is a hedge on the decision (bb748cf5)
         return None
     if status == 'ambiguous':
@@ -1735,6 +1755,10 @@ def plan_guard(policy, st, ev):
         has_date = any(str(ev.get(x) or '').strip() for x in ('rel', 'd', 'm', 'wd', 'items')) or \
             ev.get('wk') in ('this', 'next', 'after_next') or ev.get('vague') == 'yes'
         has_amount = str(ev.get('amt') or '').strip()
+        rb_amts = [float(x['amount']) for x in ((st.get('readback') or dict()).get('items') or [])]
+        if q == 'readback' and k == 'yes' and ev.get('also') == 'none' and has_amount and not has_date and st.get('_readback_valid', True) and \
+                _num(has_amount) in rb_amts:
+            has_amount = ''      # raw-5 PUB-11 (d1189482): 'Yes, I confirm. 220 for the card' echoes the read-back
         if ev.get('also') in ('no', 'reject'):
             ev['kind'], k = 'no', 'no'
         elif has_date or has_amount:
@@ -1742,7 +1766,9 @@ def plan_guard(policy, st, ev):
         elif k == 'yes' and str(ev.get('prod') or '').isdigit():
             ev['kind'], k = 'accept', 'accept'
     uncertain = st.pop('_uncertain_q', None)
-    if uncertain == 'readback' and k == 'yes':
+    half_yes = st.pop('_rb_half_yes', False) and st.get('_last_ask') == D_RB_CLARIFY
+    if uncertain == 'readback' and k == 'yes' and not half_yes:
+        # a cut-off yes, then a yes to our 'yes or no?' clarify, confirms (raw-5 PUB-11 dc5afe27); else re-read
         rb = st.get('readback') or dict()
         if not st.get('_readback_valid', True):
             return ask(st, D_WHAT_CHANGE, 'what_to_change')
@@ -2112,9 +2138,12 @@ def topic_event(policy, st, ev, today, cv):
                 act = dict(act, text=line + ' ' + act['text'])
             return act
         return resay(st, line)
-    if t == 'change_promise':
+    if t == 'change_promise' and not st.get('_change_said'):
+        st['_change_said'] = True        # raw-5 #14b: the app line once, only on t=change_promise
         row = event_row(policy, 'change_promise')
         return dict(type='say_exact', text=(row or dict()).get('say') or D_CHANGE)
+    if t == 'change_promise':
+        return resay(st)
     if t in ('decline', 'purpose') and st['phase'] == 'opening':
         return reask_name(policy, st, cv)        # rule 3: a question first, the ask that follows is counted
     if t in ('decline', 'purpose') and st['q'] == 'offer' and (st.get('offer') or dict()).get('kind') in OUR_OFFERS:
@@ -2229,7 +2258,8 @@ def on_user(policy, st, ev, today, cv):
     if ph == 'identity':
         return identity(policy, st, ev, today, cv)
     if ph == 'wrapup':
-        if k == 'topic' and ev.get('t') == 'change_promise' or k in ('date', 'amount', 'date_amount'):
+        if k == 'topic' and ev.get('t') == 'change_promise' and not st.get('_change_said'):
+            st['_change_said'] = True
             row = event_row(policy, 'change_promise')
             return dict(type='say_exact', text=(row or dict()).get('say') or D_CHANGE)
         if st['_wrapup_said']:

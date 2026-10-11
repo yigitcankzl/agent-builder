@@ -972,7 +972,95 @@ def raw4_pub03_live():
     return True
 
 
+def raw5_loops_live():
+    """q631 raw-5 reps3 live shapes. PUB-13 (34c351f2 / cdf23d67): 'a day later?' at the read-back, then 'keep it as it
+    was (yes, I confirm)' at the day question looped to no_promise: the standing read-back is confirmed, no second
+    'Do you confirm?'. (bba4f0ac) 'No, not 300' to the 300 offer names the amount: too much -> floor, not refused.
+    PUB-11 (d1189482) 'Yes, I confirm. 220 for the card' echoes the read-back: a yes; (dc5afe27) a cut-off yes, our
+    yes-or-no clarify, then yes: confirmed; the car (routed by type) is never read back. #14: a yes naming one product
+    at a multi read-back re-reads the full read-back once, never a subset write; the app line only on change_promise."""
+    import json
+    from builder import policy_bridge as B
+    d = os.path.join(ROOT, "tests", "fixtures", "brief_reading", "raw-5-single")
+    pol, _ = B.to_reducer(json.load(open(os.path.join(d, "extracted.json"))), os.path.join(ROOT, "tools", "openapi.json"),
+                          brief_text=open(os.path.join(d, "brief.md")).read())
+    acc13 = [dict(product_id="p1", type="credit_card", card_last4="6604", past_due=300.0, days_late=4, minimum_payment=90.0),
+             dict(product_id="p2", type="personal_loan", past_due=900.0, days_late=20, instalment_amount=300.0)]
+    acc11 = [dict(product_id="p1", type="credit_card", card_last4="2288", past_due=220.0, days_late=9, minimum_payment=66.0),
+             dict(product_id="p2", type="personal_loan", past_due=640.0, days_late=9, instalment_amount=213.0),
+             dict(product_id="p3", type="car_loan", past_due=75.0, days_late=3, instalment_amount=25.0)]
+
+    def verified(acc):
+        st = R.init_state(pol, CV)
+        st, a = say(pol, st, "kind=who;also=none;st=complete;prod=;who=self;party=")
+        st, a = say(pol, st, "kind=identity;also=none;st=complete;prod=;field=date_of_birth;ans=1990-01-01;d=1;m=1;y=1990")
+        st, a = tool(pol, st, dict(verified=True, all_verified=False, wrong_answers_left=3))
+        st, a = say(pol, st, "kind=identity;also=none;st=complete;prod=;field=phone_last4;ans=1234")
+        st, a = tool(pol, st, dict(verified=True, all_verified=True, wrong_answers_left=3))
+        return tool(pol, st, dict(products=acc))
+
+    def writes(st, a):
+        out = []
+        while a["type"] == "call_tool" and a["tool"] == "create_promise":
+            out.append((a["args"]["product_id"], a["args"]["amount"], a["args"]["date"]))
+            st, a = tool(pol, st, dict(ok=True))
+        return out
+
+    def rb13():
+        st, a = verified(acc13)
+        st, a = say(pol, st, "kind=reject;also=none;st=complete;prod=;why=flat")
+        st, a = say(pol, st, "kind=date;also=amount;st=complete;prod=1;rel=;d=20;m=10;wd=tue;wk=none;vague=no;amt=120;refused=1")
+        st, a = say(pol, st, "kind=date;also=amount;st=complete;prod=2;rel=;d=19;m=10;wd=mon;wk=none;vague=no;amt=225")
+        check(st["q"] == "readback" and "120.00" in a["text"] and "225.00" in a["text"], f"PUB-13 read-back: {a}")
+        return st
+    want13 = [("p1", 120.0, "2026-10-20"), ("p2", 225.0, "2026-10-19")]
+    for last in ("kind=accept;also=none;st=complete;prod=;why=restore", "kind=yes;also=none;st=complete;prod="):
+        st = rb13()
+        st, a = say(pol, st, "kind=date;also=none;st=complete;prod=all;rel=;d=;m=;wd=;wk=none;vague=yes")
+        check(st["q"] == "exact_day", f"a day later? -> which day: {a}")
+        st, a = say(pol, st, "kind=accept;also=none;st=partial;prod=;why=restore")
+        st, a = say(pol, st, last)
+        check(writes(st, a) == want13, f"{last}: the standing read-back confirmed, both written: {a}")
+    # bba4f0ac: a no naming the offered amount is too much
+    st, a = verified(acc13)
+    st, a = say(pol, st, "kind=reject;also=none;st=complete;prod=;why=flat")
+    o = st["offer"]
+    st, a = say(pol, st, "kind=reject;also=none;st=complete;prod=;why=flat;amt=%s" % o["amount"])
+    check(st["products"][0]["status"] != "refused" and st["offer"] and st["offer"]["amount"] < o["amount"], f"too much -> floor: {a}")
+    # #14: one product named at the multi read-back
+    st = rb13()
+    st, a = say(pol, st, "kind=accept;also=none;st=complete;prod=1")
+    check(st["q"] == "readback" and "120.00" in a["text"] and "225.00" in a["text"] and not st.get("pending"), f"full read-back again: {a}")
+    st, a = say(pol, st, "kind=accept;also=none;st=complete;prod=1")
+    check(a["type"] == "say_exact" and not st.get("pending"), f"still no subset write: {a}")
+    # PUB-11: the car is routed, never read back; an echoed amount and a clarified cut-off yes confirm
+    want11 = [("p1", 220.0, "2026-10-19"), ("p2", 640.0, "2026-10-19")]
+    for turns in (["kind=yes;also=none;st=complete;prod=;amt=220"],
+                  ["kind=yes;also=none;st=partial;prod=;amt=", "kind=yes;also=none;st=complete;prod="]):
+        st, a = verified(acc11)
+        check("car loan" not in a.get("text", a.get("hint", "")).lower(), f"car not in the debt line: {a}")
+        st, a = say(pol, st, "kind=date;also=reject;st=complete;prod=all;rel=;d=16;m=;wd=fri;wk=none;vague=no")
+        check(st["q"] == "readback" and ("holiday" in a["text"] or "not a business day" in a["text"]), f"PUB-11 moved day: {a}")
+        check("car loan" not in a["text"].lower() and "75.00" not in a["text"], f"car never read back: {a}")
+        for t in turns:
+            st, a = say(pol, st, t)
+        check(writes(st, a) == want11, f"{turns}: confirmed once, both written: {a}")
+    # #14b: the app line only on t=change_promise, once
+    st = rb13()
+    st, a = say(pol, st, "kind=yes;also=none;st=complete;prod=")
+    writes(st, a)
+    st["q"], st["phase"] = "none", "wrapup"
+    st, a = say(pol, st, "kind=date;also=none;st=complete;prod=;rel=tomorrow;d=;m=;wd=;wk=none;vague=no")
+    check(a.get("text") != R.D_CHANGE, f"a date in the wrap-up is not the app line: {a}")
+    if st["phase"] != "closed":
+        st, a = say(pol, st, "kind=topic;also=none;st=complete;prod=;t=change_promise")
+        st, b = say(pol, st, "kind=topic;also=none;st=complete;prod=;t=change_promise")
+        check([a.get("text"), b.get("text")].count(R.D_CHANGE) <= 1, f"app line once: {a} {b}")
+    return True
+
+
 if __name__ == "__main__":
+    print("raw-5 loops: read-back restore, echo yes, subset, route, app line (q631 live):", raw5_loops_live())
     print("raw-4 PUB-03/PUB-01 and A PUB-03 live shapes (4074f8f):", raw4_pub03_live())
     print("ledger confirmation and uncertainty live shapes:", ledger_invariants_live())
     print("per-product terms in one turn (raw-2 PUB-12 live, PER_ITEM):", per_item_terms())
