@@ -104,6 +104,33 @@ DATE_RULES = ("last_business_day_this_week",   # rolls to the last business day 
               "deadline", "today", "next_business_day", "customer_named")
 AMOUNT_RULES = ("full", "floor", "floor_if_too_much_else_full", "same_as_previous")
 ATTEMPT_FLAGS = ("flat_refusal_uses_attempt", "proposal_never_refusal", "no_repeat_refused_offer", "stop_when_exhausted")
+CALLBACK_DAYS = ("today_or_next_business_day", "next_business_day_only", "today_only")
+
+
+def unsupported_rules(policy):
+    """Source rules the deterministic runtime cannot honor: reject, never substitute another rule."""
+    errors = list(policy.get("source_errors") or [])
+    errors += _band_errors(policy)
+    for typ, r in ((policy.get("products") or {}).get("route_by_type") or {}).items():
+        if r.get("invalid") or r.get("action") != "transfer" or r.get("note") is not False or not r.get("queue") or not (r.get("close") or {}).get("outcome"):
+            errors.append(f"products.route_by_type.{typ}: unsupported/unbound product transfer")
+    for band, steps in ((policy.get("attempts") or {}).get("plan") or {}).items():
+        for i, step in enumerate(steps):
+            for key, value in (("date_rule", "customer_named"), ("amount_rule", "same_as_previous")):
+                if step.get(key) == value:
+                    errors.append(f"attempts.plan.{band}[{i}].{key}={value!r} is unsupported by the reducer")
+    cb = (policy.get("writes") or {}).get("callback") or {}
+    if cb.get("days", CALLBACK_DAYS[0]) not in CALLBACK_DAYS:
+        errors.append(f"writes.callback.days={cb.get('days')!r} is unsupported by the reducer")
+    for key in ("inclusive", "after_now"):
+        if key in cb and not isinstance(cb[key], bool):
+            errors.append(f"writes.callback.{key} must be a boolean")
+    for key in ("start", "end"):
+        if key in cb and not re.fullmatch(r"(?:[01][0-9]|2[0-3]):[0-5][0-9]", str(cb[key])):
+            errors.append(f"writes.callback.{key} must be a valid HH:MM")
+    if str(cb.get("start", "00:00")) > str(cb.get("end", "23:59")):
+        errors.append("writes.callback.start must not be after end")
+    return errors
 
 
 def _src_items(src):
@@ -151,8 +178,20 @@ def bad_quotes(policy, brief_text):
     return out
 
 
-def _check_sections(policy):
+def _band_errors(policy):
     errs = []
+    for b in policy.get("deadline", {}).get("bands", []):
+        if b.get("rule") not in (None, "", "business_days_after_today", "calendar_days_after_today"):
+            errs.append(f"deadline.bands.{b.get('name')}.rule unknown")
+        if b.get("roll") not in (None, "", "previous", "next"):
+            errs.append(f"deadline.bands.{b.get('name')}.roll must be previous or next")
+        if (b.get("rule") or b.get("roll")) and not any(str(q or "").strip() and f != "default" for f, q in _src_items(b.get("source") or [])):
+            errs.append(f"deadline.bands.{b.get('name')}.source: a band override needs a quote")
+    return errs
+
+
+def _check_sections(policy):
+    errs = _band_errors(policy)
     for b in policy.get("deadline", {}).get("bands", []):
         for k in ("min_days_late", "attempts"):
             if k in b and not isinstance(b[k], int):

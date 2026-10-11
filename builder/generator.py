@@ -241,10 +241,15 @@ def _call_var_placeholders(text, call_vars):
     return re.sub(r"\{(\w+)\}", lambda m: "{{" + str(call_vars.get(m.group(1), m.group(1))) + "}}", text or "")
 
 
-# drop an empty or unresolved close reason (a promise/paid outcome sends none); no double braces in this code
-DROP_EMPTY_REASON = ("try:\n    b = config.get('body')\n    if isinstance(b, dict):\n"
-                     "        r = str(b.get('reason') or '')\n        if r == '' or chr(123) in r:\n"
-                     "            b.pop('reason', None)\nexcept Exception:\n    pass\n")
+def close_preprocess(spec):
+    # Optional fields use the OAS names; required fields must survive to request validation.
+    amap, _, _ = arg_map("close_call", spec)
+    optional = [f for f in amap if f not in spec["required"]]
+    return ("b = config.get('body')\nif isinstance(b, dict):\n"
+            f"    for f in {optional!r}:\n"
+            "        v = b.get(f)\n"
+            "        if v is None or v == '' or (isinstance(v, str) and chr(123) * 2 in v):\n"
+            "            b.pop(f, None)\n")
 
 
 CLOSE_RETRY = True      # a rejected close_call is retried once by the hub (graph_walk cases in tests/test_graph_walk.py)
@@ -370,8 +375,7 @@ def generate(rp, oas_path):
     if "close_call" in tools:
         cc = _api_node("close_call", tools["close_call"], "end", args_prefix="close",
                        extra_mapping=[{"path": "data.ok", "variable": "close_ok"}] if CLOSE_RETRY else ())
-        # the graph's close node too: a promise/paid close sends no reason ('' would break a reason enum)
-        cc["pre_actions"][0]["pre_process_code"] = DROP_EMPTY_REASON
+        cc["pre_actions"][0]["pre_process_code"] = close_preprocess(tools["close_call"])
         if CLOSE_RETRY:
             # a rejected close (an HTTP error or ok: false) goes back to the hub, which retries it once (route
             # close_retry) or ends (route end); an accepted close ends here as before
@@ -429,8 +433,7 @@ def generate(rp, oas_path):
     if "close_call" in tools:
         lc = _api_node("close_call", tools["close_call"], "end", args_prefix="close")["pre_actions"][0]
         lc["config"] = {"timeoutMs": 12000, "maxRetries": 0, "alwaysRunsAt": ["end_of_call"]}
-        # drop an empty or unresolved reason (a promise/paid outcome sends none); no double braces in this code
-        lc["pre_process_code"] = DROP_EMPTY_REASON
+        lc["pre_process_code"] = close_preprocess(tools["close_call"])
         wf["tools"] = [lc]
     return wf
 

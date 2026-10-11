@@ -105,7 +105,9 @@ def _rules_summary(policy):
         if isinstance(v, dict) and v.get("source"):
             out[k] = [s.get("quote") if isinstance(s, dict) else s for s in v["source"]][:6]
     for i, b in enumerate((policy.get("deadline") or {}).get("bands") or []):
-        out[f"deadline.bands[{i}]"] = {kk: b.get(kk) for kk in ("name", "min_days_late", "max_days_late", "days", "attempts")}
+        out[f"deadline.bands[{i}]"] = {kk: b.get(kk) for kk in ("name", "min_days_late", "max_days_late", "days", "attempts", "rule", "roll", "source")}
+    if (policy.get("products") or {}).get("route_by_type"):
+        out["products.route_by_type"] = policy["products"]["route_by_type"]
     for band, steps in ((policy.get("attempts") or {}).get("plan") or {}).items():
         out[f"attempts.plan.{band}"] = [(s.get("date_rule"), s.get("amount_rule"), ((s.get("source") or [{}])[0] or {}).get("quote")) for s in steps]
     return out
@@ -164,6 +166,9 @@ def _assumptions(rp, brep, result):
             "not_implemented_unmapped_topics": [f"{u.get('topic')}: {u.get('quote')}" for u in rp.get("unmapped_topics") or []],
             "api_mismatch": [f"{m.get('field')} {m.get('value')!r}: {m.get('action')}" for m in brep.get("api_mismatch") or []],
             "tools_blocked": [f"{t}: {v.get('why')}" for t, v in (rp.get("tool_status") or {}).items() if v.get("status") == "blocked"],
+            "unsupported_source_rules": [n for n in notes if "unsupported source rule" in n],
+            "unquoted_policy_fields": brep.get("source_gaps") or [],
+            "partial_agent": bool(result.get("partial")), "stripped_features": result.get("degraded") or [],
             "examiner": (result or {}).get("examiner"),
             "signals": [(result or {}).get("signal")] if (result or {}).get("signal") else [],
             "s1_sources": (result or {}).get("s1") or []}
@@ -376,9 +381,19 @@ def build(briefs, openapi, slot=None, freya_client=None, out_dir="submission", t
         trace.log("degraded_build", stripped=info, passed=not errs2, errors=errs2[:10])
         if errs2:
             return finish("degraded build still invalid", 2, "S5", next="L3", validator_errors=errs2[:10])
+        # A full L3 agent wins over a partial L2 agent, even if L2 passes static checks.
+        l3_errors = ["L3 unavailable"]
+        if fb[0]:
+            r3 = fb[0].wait(max(0, t_end - 150 - time.time()))
+            if r3.get("workflow") is not None and not r3.get("errors") and time.time() < t_end - 30:
+                return finish("main workflow invalid; selecting full L3 over partial L2", 2, "S5", next="L3")
+            l3_errors = r3.get("errors") or ["L3 has no usable workflow or save budget"]
+            fb[0].cancel()
+            fb[0] = None
+        trace.log("partial_agent", last_resort=True, stripped=info, l3_errors=l3_errors)
         rp, errs = rp2, []
         state.update(rp=rp)
-        result["degraded"] = info
+        result.update(degraded=info, partial=True)
     if errs:
         return finish("workflow invalid", 2, "S5", next="L2", validator_errors=errs[:10])
     tool_nodes = [k for k, n in wf["nodes"].items() if n["node_type"] == "api_request"]

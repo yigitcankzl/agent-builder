@@ -27,7 +27,11 @@ Use {"file": "default", "quote": ""} ONLY when the material says nothing at all 
  "business_days": {"weekdays": [ints, Monday=0 .. Sunday=6], "holidays": ["YYYY-MM-DD"], "source": Q},
  "weekday_words": {"next": "following_week" | "next_occurrence", "rule": "<the material's own definition, or usual meaning>", "source": Q},
  "deadline": {"rule": "business_days_after_today" | "calendar_days_after_today",
-              "bands": [{"name": str, "min_days_late": int, "max_days_late": int, "days": int, "attempts": int}], "source": Q},
+              "bands": [{"name": str, "min_days_late": int, "max_days_late": int, "days": int, "attempts": int,
+                         "rule": "business_days_after_today" | "calendar_days_after_today",
+                         "roll": "previous" | "next", "source": Q}], "source": Q},
+     <- band.rule and band.roll are optional overrides, with that band's exact source quote. Never collapse
+        different bands' business/calendar counting into one global rule. roll moves a closed calendar deadline.
  "earliest": {"allow_today": bool, "source": Q},
  "on_non_business_day": {"action": "next_business_day" | "previous_business_day" | "reject",
                          "say": "<short agent sentence; may use <NAMED> <DATE> <DEADLINE>>", "source": Q},
@@ -45,7 +49,11 @@ Use {"file": "default", "quote": ""} ONLY when the material says nothing at all 
                                 {"kind": "percent", "percent": number, "round": "up" | "down" | "nearest", "to": "cent" | "unit" | <increment number, e.g. 0.05>} |
                                 {"kind": "fixed", "amount": number} |
                                 {"kind": "max_fixed_percent", "amount": number, "percent": number, "round": .., "to": ..}},
-              "naming_by_type": {"<product type>": "<how to name it>"}, "order": str, "source": Q},
+              "naming_by_type": {"<product type>": "<how to name it>"},
+              "route_by_type": {"<product type>": {"action": "transfer", "queue": "<OAS queue>", "note": false, "source": Q}},
+              "order": str, "source": Q},
+     <- route_by_type is optional: a product always transferred instead of promised, not a conversational topic.
+        Put it here, never in writes.transfer.queue_map. Do not offer/read back/promise or note that product.
  "attempts": {"plan": {"<band name as in deadline.bands>": [{"date_rule": DATE_RULE, "amount_rule": AMOUNT_RULE, "source": Q}]},
               "flat_refusal_uses_attempt": {"value": bool, "source": Q},
               "proposal_never_refusal": {"value": bool, "source": Q},
@@ -128,6 +136,8 @@ Rules:
    exact string even if the tool API below lists a different one; the build checks enums afterwards.
 5. closing.table lists every outcome/reason pair the material allows (reason null where none is sent).
 6. deadline.bands: one entry per band, with the persuasion attempts allowed in that band in `attempts`.
+   If bands count days differently, give EACH band its own rule and source; calendar rollover is previous or next.
+   Product-type exceptions that transfer instead of promising go in products.route_by_type with their source.
 7. sentences: every sentence the material requires the agent to say word for word (quoted wording). Use these ids
    when they apply: confirm_who (the question that checks who is on the line), pay_today (the first ask to pay
    today), text_message (the line said after a recorded promise), farewell, debt_intro, id_fail, no_other_terms,

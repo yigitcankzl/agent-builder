@@ -137,7 +137,8 @@ def gap3():
     check(A(None)[0] == "floor_to_full" and A("full_only")[0] == "full_only", "acceptance default and full_only")
     check(A({"kind": "min_x", "min": 50})[0] == {"kind": "min_x", "min": 50}, "min_x keeps its min")
     check(A({"kind": "min_x"})[0] is None and A("half")[0] is None, "min_x without min / unknown kind refused")
-    p = {"products": {"floor_by_type": {"*": {"kind": "percent", "percent": 30, "round": "nearest", "to": "cent"}}},
+    p = {"products": {"floor_by_type": {"*": {"kind": "percent", "percent": 30, "round": "nearest", "to": "cent"}},
+                      "source": src("The floor for every product is 30 percent, rounded to cents.")},
          "amounts": {"acceptance": {"kind": "min_x", "min": 40}}}
     rp, rep = bridged(**p)
     check(rp["products"]["floor_by_type"].get("*", {}).get("percent") == 30, "'*' is kept as the any-type key")

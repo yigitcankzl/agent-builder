@@ -231,7 +231,7 @@ def vocab(policy):
                refused=pick('events stop (after verification)', pair(stop_after), 'refused'),
                hardship=pick('events hardship (declined)', pair(hard_decline), 'hardship'),
                dispute=pick('events dispute', pair(dispute_row), 'dispute'),
-               paid=pick('events paid', (pair(paid_row)[0], None)))
+               paid=pick('events paid', pair(paid_row) if paid_row else slot(policy, 'paid')))
     out['xfer'] = dict(restructuring=pick('events restructure', pair((rows('restructure') or [None])[0])),
                        human=pick('events human', pair((rows('human') or [None])[0])),
                        hardship=pick('events hardship (accepted)', pair(hard_accept)))
@@ -244,16 +244,16 @@ def vocab(policy):
     # the promise outcome: the closing-table row that no event, who rule or slot uses and whose "when" names a promise
     used = set(x[0] for x in (out['refused'], out['hardship'], out['dispute'], out['paid'], unclear, out['declined'],
                               out['id_failed']) if x[0]) | set(v[0] for v in out['xfer'].values() if v[0])
-    prom = slot(policy, 'promise')[0]
-    if not prom:   # the reason-less closing-table row that no event, who rule or slot uses
+    prom = slot(policy, 'promise')
+    if not prom[0]:   # the reason-less closing-table row that no event, who rule or slot uses
         for r in (policy.get('closing') or dict()).get('table') or []:
             if _none(r.get('outcome')) and _none(r.get('outcome')) not in used and not _none(r.get('reason')):
-                prom = _none(r.get('outcome'))
+                prom = pair(r)
                 break
-    if not prom:
+    if not prom[0]:
         log.append('promise outcome missing: unclear slot used')
-        prom = unclear[0]
-    out['promise'] = (prom, None)
+        prom = unclear
+    out['promise'] = prom
     others = [w for w in policy.get('who_rules') or [] if w.get('who') == 'other' and w.get('party', 'relative') in ('relative', '', None)]
     cb_ok = next((w for w in others if pair(w) != out['callback_failed'] and pair(w)[0]), others[0] if others else None)
     if not cb_ok or not pair(cb_ok)[0]:
@@ -544,11 +544,14 @@ def load_products(policy, st, rows, today):
         dl = int(float(r.get('days_late') or 0))
         band = _band(policy, dl)
         dline = deadline_for(today, dl, policy)
-        st['products'].append(dict(id=str(r.get('product_id')), status='open', attempts=0, floor_offered=False,
+        route = ((policy.get('products') or dict()).get('route_by_type') or dict()).get(str(r.get('type')))
+        st['products'].append(dict(id=str(r.get('product_id')), status='route_pending' if route else 'open', attempts=0, floor_offered=False,
                                    write_failures=0, offer=None, note=None))
         st['_pd'].append(dict(id=str(r.get('product_id')), type=str(r.get('type')), name=_name(policy, r), past_due=float(r.get('past_due') or 0),
                               days_late=dl, floor=_floor(policy, r), band=band.get('name'), deadline=iso(dline),
                               plan=_plan(policy, band), too_much=False, note_reason=None, refused_offers=[]))
+        if route:
+            st['_pd'][-1]['route'] = route
     distinct_names(st)
 
 
@@ -876,7 +879,7 @@ def on_tool(policy, st, te, today, cv):
         return verify_result(policy, st, data, cv)
     if op == 'account':
         load_products(policy, st, _account_rows(te, policy), today)
-        return account_statement(policy, st, today)
+        return account_statement(policy, st, today, cv)
     if op == 'promise':
         i = _index(st, pend['product_id'])
         st['products'][i]['status'] = 'persisted'
@@ -893,6 +896,9 @@ def on_tool(policy, st, te, today, cv):
         return do_close(policy, st, o, r, D_FAREWELL)
     if op == 'transfer':
         st['transfers'].append(dict(queue=st['_xfer_queue']))
+        if pend.get('product_id'):
+            st['products'][_index(st, pend['product_id'])]['status'] = 'routed'
+            return next_write(policy, st, cv)
         o, r = st['_xfer_close']
         return do_close(policy, st, o, r, D_FAREWELL)
     return resay(st)
@@ -928,6 +934,9 @@ def tool_failed(policy, st, te, today, cv):
         st['products'][i]['status'] = 'noted'
         return next_write(policy, st, cv)
     if pend['op'] == 'transfer':   # continue the call, never claim the transfer happened
+        if pend.get('product_id'):
+            st['products'][_index(st, pend['product_id'])]['status'] = 'route_failed'
+            return next_write(policy, st, cv)
         return resay(st)
     if pend['op'] == 'callback':
         o, r = V(policy)['callback_failed']
@@ -974,12 +983,15 @@ def verify_result(policy, st, data, cv):
     return ask(st, qs[idt['idx']].get('ask') or D_SAFE, 'id_' + idt['order'][idt['idx']])
 
 
-def account_statement(policy, st, today):
-    lines = [debt_intro(policy)] + [product_line(pd) for pd in st['_pd']]
-    if len(st['products']) == 1:
-        p, pd = _p(st, 0)
+def account_statement(policy, st, today, cv=None):
+    active = _open_products(st)
+    if not active:
+        return next_write(policy, st, cv or dict(customer_id=st.get('_cid')))
+    lines = [debt_intro(policy)] + [product_line(st['_pd'][i]) for i in active]
+    if len(active) == 1:
+        p, pd = _p(st, active[0])
         p['status'], p['offer'] = 'proposed', dict(amount=pd['past_due'], date=iso(today))
-        st['cur'] = 0
+        st['cur'] = active[0]
         st['offer'] = dict(product_ids=[p['id']], amount=pd['past_due'], date=iso(today), kind='full')
         text = ' '.join(x for x in lines + [pay_today_question(policy)] if x)
     else:
@@ -1017,6 +1029,14 @@ def next_write(policy, st, cv):
                 pd['_noted_try'] = True
                 st['_last_args'] = dict(customer_id=cid(cv), product_id=p['id'], reason=pd['note_reason'])
                 return call(st, 'note', 'add_note', dict(st['_last_args']), product_id=p['id'])
+    for p, pd in zip(st['products'], st['_pd']):
+        if p['status'] == 'route_pending':
+            r = pd['route']
+            p['status'] = 'routing'
+            st['_xfer_queue'] = r['queue']
+            st['_xfer_close'] = [r['close']['outcome'], r['close'].get('reason')]
+            st['_last_args'] = dict(customer_id=cid(cv), queue=r['queue'])
+            return call(st, 'transfer', 'transfer_to_agent', dict(st['_last_args']), product_id=p['id'])
     if any(p['status'] == 'persisted' for p in st['products']):
         st['_wrapup_said'] = True
         st['q'] = 'none'
@@ -1895,6 +1915,8 @@ def topic_event(policy, st, ev, today, cv):
         st['_q_prev'], st['_ask_prev'] = st['q'], st.get('_last_ask') or ''
         return ask(st, (row or dict()).get('say') or D_HELP_FIRST, 'help_first')
     if st['q'] == 'support_offer' and t in TOPIC_INFO + ('decline', 'purpose', 'hardship'):
+        if t in TOPIC_INFO and (event_row(policy, t) or dict()).get('continuation_only') and ev.get('also') not in ('reject', 'no'):
+            return resay(st, info_line(policy, st, t))
         line = ''        # PUB-05: "no, can I get a discount?" declines the support offer; it is never offered again
         if t == 'terms' and st.get('_terms_n', 0) < 1:
             st['_terms_n'] = 1
@@ -2030,6 +2052,10 @@ def on_user(policy, st, ev, today, cv):
             return do_close(policy, st, o, r, D_FAREWELL)
         return resay(st)
     # negotiation / readback / account
+    if ev.get('prod') and str(ev['prod']).isdigit():
+        i = _valid_prod(st, ev, None)
+        if i is not None and st['_pd'][i].get('route'):
+            return after_resolved(policy, st, today, cv)
     if policy.get('per_item') and len(st['products']) > 1 and ev.get('items') and k != 'topic':
         return items_event(policy, st, ev, today, cv)     # its own refused= handling: never counted twice
     consume_bulk_refusals(policy, st, ev)
@@ -2173,13 +2199,16 @@ D_JUST_CHECK = 'Just to be sure:'
 
 
 def _callback_ok(policy, st, d, tm, today, now_time):
+    if not re.fullmatch(r'(?:[01][0-9]|2[0-3]):[0-5][0-9]', tm):
+        return False
     cb = (policy.get('writes') or dict()).get('callback') or dict()
     nb = add_business_days(today, 1, policy)
-    days = [today, nb] if cb.get('days', 'today_or_next_business_day') else [today, nb]
+    days = {'today_or_next_business_day': [today, nb], 'next_business_day_only': [nb],
+            'today_only': [today]}.get(cb.get('days', 'today_or_next_business_day'), [])
     if d not in days or not is_business_day(d, policy) and d != today:
         return False
     start, end = cb.get('start', '00:00'), cb.get('end', '23:59')
-    if not (start <= tm <= end):
+    if not ((start <= tm <= end) if cb.get('inclusive', True) else (start < tm < end)):
         return False
     if cb.get('after_now', True) and d == today and tm <= now_time:
         return False
@@ -2611,8 +2640,7 @@ CLOSE_PREF = dict(refused=('refused', 'dispute', 'hardship', 'write'), dispute=(
 
 def close_retry(policy, st, data):
     """close_call came back rejected (ok false or an error): the same outcome once more, with the reason the error
-    allows (contract-closest by the close's family: refused, dispute, hardship, write failure), else the outcome's
-    first reason in the closing table. -> (outcome, reason) or None when already retried."""
+    explicitly allows, otherwise preserving the source outcome/reason pair. -> pair or None when already retried."""
     if st.get('_close_retried'):
         return None
     st['_close_retried'] = True
@@ -2620,6 +2648,8 @@ def close_retry(policy, st, data):
     text = json.dumps(data) if not isinstance(data, str) else data
     m = re.search(r'reasons?[^:]*:\s*([a-z_ ,]+)', text, re.I)
     allowed = [x.strip() for x in re.split(r'[ ,]+', m.group(1)) if x.strip() and x.strip() not in ('and', 'or')] if m else []
+    if r in allowed:
+        return o, r
     fam = next((k for k in ('dispute', 'hardship', 'write_failed') if tuple(v[k]) == (o, r)), 'refused')
     names = dict(refused=v['refused'][1], dispute=v['dispute'][1], hardship=v['hardship'][1], write=v['write_failed'][1])
     for key in CLOSE_PREF[fam]:
@@ -2628,9 +2658,7 @@ def close_retry(policy, st, data):
                 return o, cand
     if allowed:
         return o, allowed[0]
-    row = next((x for x in (policy.get('closing') or dict()).get('table') or [] if _none(x.get('outcome')) == o
-                and _none(x.get('reason')) and _none(x.get('reason')) != r), None)
-    return o, (_none(row.get('reason')) if row else None)
+    return o, r
 
 
 def close_hub(vars, policy, st):
