@@ -821,6 +821,7 @@ NOTE_REFUSED = 'refused'     # DEFAULT: the contract product status as the note 
 SELF_TOPICS = ('dispute', 'paid', 'hardship', 'restructure', 'change_promise', 'terms')   # imply the speaker is the customer
 TOPIC_OVERRIDE = ('injection', 'hardship')   # the only topics that win from also=
 TOPIC_INFO = ('scam', 'robot', 'unknown_info', 'terms')   # an answer line; a substantive also= is still handled
+QUESTION_TOPICS = TOPIC_INFO + ('purpose',)   # questions answered first wherever they sit in the event
 SUBSTANTIVE = ('date_amount', 'date', 'amount', 'accept', 'yes', 'reject', 'no', 'callback')
 
 
@@ -830,6 +831,7 @@ def step(policy, st, event, tool_event, now, call_vars=None):
     st['runs'] = st.get('runs', 0) + 1
     today = _d(now)
     cv = dict(call_vars or dict())
+    partial_answer = False
     if tool_event and st.get('pending'):
         node = tool_event.get('node') or st['pending']['node']
         st['_tc'][node] = [int(tool_event.get('success') or 0), int(tool_event.get('failure') or 0)]
@@ -841,12 +843,25 @@ def step(policy, st, event, tool_event, now, call_vars=None):
                                        no_delta=True), today, cv)
     else:
         ev = normalise(event, st)
-        info = ev.get('also_t') if ev and ev.get('kind') != 'topic' and ev.get('also_t') in TOPIC_INFO + ('purpose',) else None
+        # ONE question rule (PUB-02 compound, PUB-04 kind=date;also=topic;t=robot, partial turns): a question topic anywhere in
+        # the event (also=, t=, or kind=topic in a cut-off turn) is answered first, then the rest of the event is handled
+        info = None
+        if ev and ev.get('kind') != 'topic':
+            info = next((x for x in (ev.get('also_t'), ev.get('t')) if x in QUESTION_TOPICS), None)
+        elif ev and ev.get('st') == 'partial' and ev.get('t') in QUESTION_TOPICS:
+            info = ev.get('t')
+        if info and ev.get('st') == 'partial':
+            partial_answer = True
+            ev = dict(ev, _question=info)     # answered + the continue line: never the plan guard's nudge / clarify
+            if ev.get('kind') in (None, '', 'other'):
+                ev = dict(ev, kind='topic', t=info)   # a question is not cut-off offer chatter
         if info:       # PUB-04: a date (or any event) plus "are you a robot?": the event once, the answer line first
             ev = dict(ev, also='none', also_t='')
         act = on_user(policy, st, ev, today, cv) if ev else resay(st)
         if info:
-            line = caller_line(policy) if info == 'purpose' and st.get('verified') != 'yes' else info_line(policy, st, info)
+            # 'what is this about?' before verification: the brief's own answer, else who is calling (951431e, PUB-02)
+            line = caller_line(policy) if info == 'purpose' and st.get('verified') != 'yes' and not (
+                event_row(policy, 'purpose') or dict()).get('say') else info_line(policy, st, info)
             if line:
                 st['_info_next'] = ((st.get('_info_next') or '') + ' ' + line).strip()
     if st.get('_info_next') and act.get('type') in ('say_exact', 'close'):   # an answer line waits for a spoken line
@@ -855,7 +870,7 @@ def step(policy, st, event, tool_event, now, call_vars=None):
     if act.get('type') == 'say_exact' and not str(act.get('text') or '').strip():
         act = dict(type='say_exact', text=sentence(policy, 'safe_repeat', D_SAFE))
     # never loop on one tts line: the same words more than RESAY_CAP + 1 times in a row break the loop by stage
-    if act.get('type') == 'say_exact' and act['text'] != sentence(policy, 'continue_line', D_CONTINUE):
+    if act.get('type') == 'say_exact' and act['text'] != sentence(policy, 'continue_line', D_CONTINUE) and not partial_answer:
         st['_said_n'] = st.get('_said_n', 0) + 1 if act['text'] == st.get('_said_last') else 1
         st['_said_last'] = act['text']
         if st['_said_n'] > RESAY_CAP + 1:
@@ -1949,7 +1964,7 @@ def info_line(policy, st, t):
     if t == 'terms':
         st['_terms_n'] = st.get('_terms_n', 0) + 1
         return brief_sentence(policy, 'no_other_terms', D_NO_TERMS) if st['_terms_n'] == 1 else ''
-    return (event_row(policy, t) or dict()).get('say') or ''
+    return (event_row(policy, t) or dict()).get('say') or (D_PROTECT if t == 'purpose' else '')
 
 
 def compose(spec, vals):
@@ -2151,7 +2166,7 @@ def topic_event(policy, st, ev, today, cv):
 
 # ---------------------------------------------------------------- per-phase user handling
 def on_user(policy, st, ev, today, cv):
-    guarded = plan_guard(policy, st, ev)
+    guarded = None if ev.get('_question') else plan_guard(policy, st, ev)
     if guarded:
         return guarded
     if ev.get('st') == 'partial':

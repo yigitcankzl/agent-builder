@@ -365,7 +365,8 @@ def validate(wf, rp, oas_path, unstable_quotes=()):
             if e.get("say") and INSTRUCTION.search(str(e["say"])):
                 errs.append(f"15: {coll} {e.get('topic') or e.get('who')} say is instruction prose: {str(e['say'])[:60]!r}")
     # 16 code_exec input limit (code + data <= 128 KB on the platform): the hub code must leave room for the data
-    limit_kb = float(os.environ.get("HUB_LIMIT_KB", "45"))
+    #    (the printed vars stay under 9 KB, the input under ~15 KB; 60 KB keeps 50 KB spare)
+    limit_kb = float(os.environ.get("HUB_LIMIT_KB", "60"))
     hub = nodes.get("hub") or {}
     for a in hub.get("pre_actions") or []:
         code = (((a.get("function") or {}).get("parameters") or {}).get("properties") or {}).get("code", {}).get("default", "")

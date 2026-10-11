@@ -133,7 +133,7 @@ def sizes():
     for f in sorted(os.listdir(D)):
         src = R.hub_source(json.load(open(os.path.join(D, f))))
         packed = len(base64.b64encode(zlib.compress(src.encode(), 9))) + 220
-        check(packed <= 45000, f"{f}: packed {packed} > 45000")
+        check(packed <= 60000, f"{f}: packed {packed} > 60000")
         out[f.split(".")[0]] = "%.1f KB" % (packed / 1000.0)
     return out
 
