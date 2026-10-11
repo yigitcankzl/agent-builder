@@ -27,9 +27,9 @@ as the answer: every rule, sentence, field and value must come from THIS brief a
 Required:
 - Top-level keys: initial_node, system_prompt, nodes, global_nodes, test_variables, and tools for lifecycle tools. No agent_config.
   No null anywhere: leave an optional field out instead.
-- The first node confirms the person and runs the identity check the brief asks for, with the identity tool, before anything
-  about the account or the reason for the call is said. Move to the next node on the tool's result (a transition on the
-  response variable, as in EXAMPLE), never on what the customer says.
+- Follow the brief's identity state exactly. If the brief says the caller is already identified, never ask identity questions;
+  start with the first required API call using the supplied call variable. Otherwise perform exactly the checks the brief asks.
+  Move on from an API node only on mapped response values, never on what the customer says.
 - The next node(s) handle the rest of the call with EVERY other tool of the tool API as an api_call function tool:
   url = the server URL + the path, method as in the API, body properties with exactly the API's field names, `enum` exactly the
   API's allowed values, `required` as in the API, and `"default": "{{customer_id}}"` for customer_id. The tool that records how
@@ -38,6 +38,11 @@ Required:
   order, how many attempts, deadlines and limits, what to offer and what never to offer, exact sentences the brief requires
   (quote them), what to do for third parties, hardship, disputes, payments already made, requests for a human, and how each
   ending maps to the API's outcome and reason values. Never say something is recorded unless the tool succeeded.
+- API results are not reliably visible to a later node. Whenever a value returned by one API is needed for dialogue, routing,
+  or a later API request, put it in that API node's response_mapping and explicitly include the mapped `{{variable}}` in the
+  downstream node's task_message or tool default. This includes arrays and identifiers selected from them. Never tell a later
+  node merely to copy a value "from the conversation above". Trace every required downstream request field back to either a
+  call variable, a customer answer, or a response_mapping; no required request field may be left for the model to guess.
 - Spoken text (on_enter tts) may use {{x}} only for keys you put in test_variables, and test_variables holds the brief's call
   variables with sample values.
 - Code (if any) has no {{ }} and stays small. No knowledge base, no transfer_call nodes unless the tool API has no transfer tool.
