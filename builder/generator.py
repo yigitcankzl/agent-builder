@@ -83,12 +83,14 @@ def arg_map(tool, spec):
     m = {f: f for f in props if f in canon}
     left_c = [c for c in canon if c not in m.values()]
     left_f = [f for f in props if f not in m]
-    for c in list(left_c):
-        cands = [f for f in left_f if (c in _tokens(f) or c in _tokens((props[f] or {}).get("description", "")))]
-        if len(cands) == 1:
-            m[cands[0]] = c
-            left_c.remove(c)
-            left_f.remove(cands[0])
+    # names before descriptions: gen-010's reason_code says "every outcome except promise" and must not take 'outcome'
+    for named in (lambda f: _tokens(f), lambda f: _tokens((props[f] or {}).get("description", ""))):
+        for c in list(left_c):
+            cands = [f for f in left_f if c in named(f)]
+            if len(cands) == 1:
+                m[cands[0]] = c
+                left_c.remove(c)
+                left_f.remove(cands[0])
     # structural binding by the field's schema shape, only when exactly one remaining field fits
     for c in list(left_c):
         fit = SHAPES.get(c)

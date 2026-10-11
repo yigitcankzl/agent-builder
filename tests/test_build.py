@@ -157,10 +157,18 @@ if __name__ == "__main__":
         check(r9["exit_code"] == 0 and r9.get("fallback_used") == "L3" and r9["main_signal"] == "EXTRACT" and len(fr.saved) == 1, r9)
         check(sel and sel[0]["candidate"] == "llm" and [e["candidate"] for e in ev9 if e["event"] == "save"] == ["llm"], "one save, of the L3 candidate")
         print("ok L3: main path failed (EXTRACT) -> L3 saved once, exit 0, fallback_used=L3")
-        # Frozen raw-4 extraction: customer_named is backed only by an amount quote. It gets one focused retry; a
-        # supported customer_named answer remains a loud S5 because the deterministic reducer does not implement it.
+        # Frozen raw-4 extraction: customer_named is backed only by an amount quote ("Ask for the full past_due.").
+        # The brief's quoted general rule (a date after the deadline -> offer on the deadline) resolves it: main path.
         raw4_dir = os.path.join(ROOT, "tests", "fixtures", "brief_reading", "raw-4-single")
         raw4 = json.load(open(os.path.join(raw4_dir, "extracted.json")))
+        r9a = build([os.path.join(raw4_dir, "brief.md")], OAS, "raw4-general-date", MockFreya(), os.path.join(tmp, "sub9a"),
+                    os.path.join(tmp, "tr"), 1, 1500, lambda *a: (json.loads(json.dumps(raw4)), {"seconds": 0, "quotes_rejected": 0,
+                    "quotes_repaired": 0, "quotes_unverified": 0, "errors": [], "oas_warnings": [], "core_missing": []}), fallback=FakeL3)
+        check(r9a["exit_code"] == 0 and not r9a.get("fallback_used") and r9a.get("api_mismatch") == 0, r9a)
+        print("ok raw-4: an undated attempt takes the brief's quoted general date rule -> main path, no L3")
+        # Without that general rule the step gets one focused retry; a supported customer_named answer remains a loud
+        # S5 because the deterministic reducer does not implement it.
+        raw4["date_rules"].pop("after_deadline")
         raw4_report = {"seconds": 0, "quotes_rejected": 0, "quotes_repaired": 0, "quotes_unverified": 0,
                        "errors": [], "oas_warnings": [], "core_missing": []}
         seen = []

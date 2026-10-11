@@ -11,7 +11,7 @@ Nothing from any specific brief is written in this file.
 import argparse, json, os, re, subprocess, sys, time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from builder.engine.date_policy import AMOUNT_RULES, DATE_RULES, bad_quotes, core_missing, validate
+from builder.engine.date_policy import AMOUNT_RULES, DATE_RULES, DATE_RULES_TEXT, N_DAYS_RULE, bad_quotes, core_missing, date_rule_known, validate
 from builder.oas import load_oas
 
 MODEL = os.environ.get("POLICY_MODEL", "claude-opus-5-5")   # pinned for reproducibility; POLICY_MODEL overrides
@@ -147,7 +147,8 @@ Rules:
    yes; the close tool is the last tool call; say goodbye before closing; a tool result decides success.
 10. attempts.plan: for each band, one entry per persuasion attempt, in order. DATE_RULE is one of: DATE_RULES_LIST.
     Use customer_named only when that step's source says the customer names, chooses, proposes or suggests the date/day;
-    an amount quote or a general date constraint does not support customer_named.
+    an amount quote or a general date constraint does not support customer_named. <n>_business_days_after_today /
+    <n>_calendar_days_after_today (e.g. 2_business_days_after_today) only when that step's source states that count.
     AMOUNT_RULE is one of: AMOUNT_RULES_LIST (floor_if_too_much_else_full = the floor if the customer already said
     the full amount is too much, else the full amount). Also fill the four attempts flags, each with its quote.
 12. human_request: when the customer asks for a person, which transfer queue is used, and whether the material lets
@@ -277,6 +278,12 @@ def _get(obj, path):
     return obj
 
 
+NUM_WORDS = (("one", 1), ("two", 2), ("three", 3), ("four", 4), ("five", 5), ("six", 6), ("seven", 7), ("eight", 8),
+             ("nine", 9), ("ten", 10), ("eleven", 11), ("twelve", 12))
+ORDINALS = {1: "first", 2: "second", 3: "third", 4: "fourth", 5: "fifth", 6: "sixth", 7: "seventh", 8: "eighth",
+            9: "ninth", 10: "tenth"}
+
+
 def date_rule_supported(value, source):
     """True when a step's own quote says the date represented by its date_rule."""
     src = source if isinstance(source, list) else [source]
@@ -293,6 +300,12 @@ def date_rule_supported(value, source):
         "customer_named": (rf"\b(?:date|day) (?:that |the )?(?:customer|person|caller|they) {chosen}\b|"
                            rf"\b(?:customer|person|caller|they) {chosen}(?: [a-z]+){{0,3}} (?:date|day)\b"),
     }
+    m = N_DAYS_RULE.match(str(value or ""))
+    if m:     # '2_business_days_after_today' <- "2 business days after today" / "two business days from today" / "the 2nd business day after today"
+        n = int(m.group(1))
+        words = dict((v, k) for k, v in NUM_WORDS)
+        num = rf"(?:{n}(?:st|nd|rd|th)?|{words.get(n, str(n))}|{ORDINALS.get(n, str(n))})"
+        return bool(re.search(rf"\b{num}\s+{m.group(2)}\s+days?\s+(?:after|from)\s+today\b", text, re.I))
     return bool(re.search(cues.get(value, r"(?!)"), text, re.I))
 
 
@@ -318,7 +331,7 @@ def extract(paths, openapi=None, trace_path=None, repair=True, sink=None, deadli
     trace = _Forward(sink, deadline) if sink is not None else Trace(trace_path)
     files, oas = read_files(paths), oas_summary(openapi)
     block = material_block(files, oas)
-    instr = INSTRUCTIONS.replace("DATE_RULES_LIST", " | ".join(DATE_RULES)).replace("AMOUNT_RULES_LIST", " | ".join(AMOUNT_RULES))
+    instr = INSTRUCTIONS.replace("DATE_RULES_LIST", DATE_RULES_TEXT).replace("AMOUNT_RULES_LIST", " | ".join(AMOUNT_RULES))
     policy = parse_json(call_claude(instr + "\nSCHEMA:\n" + SCHEMA + "\n\nMATERIAL:\n" + block, "extract policy from brief", trace))
     # runtime variable names are the builder's own wiring convention, not brief content
     policy.setdefault("inputs", {"iso_var": "date_iso", "spec_var": "date_spec", "products_var": "products",
@@ -402,7 +415,8 @@ def reextract_fields(paths, mismatches, openapi=None, sink=None, deadline=None):
         verified = not bad_quotes({"x": {"source": [it.get("source") or {}]}}, files)
         supported = by_path[pth].get("evidence") != "date_rule" or date_rule_supported(it.get("value"), [it.get("source") or {}])
         res[pth] = {"value": it.get("value"), "source": it.get("source"), "why": it.get("why"),
-                    "accepted": bool(verified and supported and it.get("value") in (by_path[pth]["oas_enum"] or []))}
+                    "accepted": bool(verified and supported and (it.get("value") in (by_path[pth]["oas_enum"] or []) or
+                                                                   by_path[pth].get("evidence") == "date_rule" and date_rule_known(it.get("value"))))}
     return res
 
 

@@ -17,7 +17,7 @@ to_reducer(policy, oas_path, stable_unmapped=None) -> (reducer_policy, report)
 import copy, json, os, re, sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from builder.engine.date_policy import DATE_RULES, _norm, bad_quotes, validate, unsupported_rules
+from builder.engine.date_policy import DATE_RULES, DATE_RULES_TEXT, date_rule_known, _norm, bad_quotes, validate, unsupported_rules
 from builder.policy_extract import date_rule_supported, oas_summary
 from builder.oas import load_oas
 
@@ -103,6 +103,21 @@ def response_fields(oas_path, tool):
     return out
 
 
+def product_exception(text, typ):
+    """A brief paragraph that transfers every product of a type with no note ("Car loans are the exception. ... no note
+    on the car. Transfer every car loan to the new_plan queue.") -> a route {action, queue, note: False, source}."""
+    words = typ.replace("_", " ")
+    for para in re.split(r"\n", text or ""):
+        m = re.search(rf"\btransfer (?:every|each|all)\b[^.;]*?\b{words}s?\b[^.;]*?\bto (?:the )?([A-Za-z_]+) queue\b", para, re.I)
+        if not m or not re.search(r"\bno note\b|\bdo not (?:write|add|record) a? ?note\b", para, re.I):
+            continue
+        head = words.split()[0]
+        quotes = [x.strip() for x in re.split(r"(?<=[.!?])\s+", para) if x.strip() and re.search(rf"\b{head}", x, re.I)]
+        return {"action": "transfer", "queue": m.group(1), "note": False,
+                "source": [{"file": "brief", "quote": re.sub(r"^[A-Z][a-z]+:\s+", "", q)} for q in quotes]}
+    return None
+
+
 def _ptype(t):
     return re.sub(r"[\s-]+", "_", str(t).strip().lower())
 
@@ -136,16 +151,36 @@ def normalize_time(value):
     return f"{hour:02d}:{minute:02d}"
 
 
+def _states_a_date(src):
+    """Does a quote name any attempt date (any date rule's cue, or an 'n business/calendar days after today')?"""
+    return any(date_rule_supported(v, src) for v in DATE_RULES) or bool(
+        re.search(r"\b(?:business|calendar|working) days? (?:after|from) today\b", _quote(src), re.I))
+
+
+def _quote(src):
+    return " ".join(str(s.get("quote") or "") if isinstance(s, dict) else str(s or "") for s in src or [])
+
+
 def guard_attempt_date_rules(p, mism, notes):
-    """An attempt date rule is unanswered until its own quote supports that value."""
+    """An attempt date rule is unanswered until its own quote supports that value. A step whose own quote states no
+    date at all ("Ask for the full past_due.") takes the brief's general date rule when it is quoted: a date after the
+    deadline answered with an offer on the deadline -> 'deadline'."""
+    after = (p.get("date_rules") or {}).get("after_deadline") if isinstance(p.get("date_rules"), dict) else None
+    general = after.get("source") or [] if isinstance(after, dict) and after.get("action") == "offer_deadline" else []
+    general = general if date_rule_supported("deadline", general) else []
     for band, steps in ((p.get("attempts") or {}).get("plan") or {}).items():
         for i, step in enumerate(steps):
-            value = step.get("date_rule")
-            if value in DATE_RULES and date_rule_supported(value, step.get("source") or []):
+            value, src = step.get("date_rule"), step.get("source") or []
+            if date_rule_known(value) and date_rule_supported(value, src):
                 continue
             path = f"attempts.plan.{band}[{i}].date_rule"
+            if general and not _states_a_date(src):
+                step["date_rule"], step["source"] = "deadline", list(src) + list(general)
+                notes.append(f"{path}: {value!r} has no date in its own quote; the brief's general date rule "
+                             f"({_quote(general)[:80]!r}) -> 'deadline'")
+                continue
             mism.append({"policy_path": path, "value": value, "field": "attempts.date_rule",
-                         "oas_enum": list(DATE_RULES), "action": "reextract", "evidence": "date_rule",
+                         "oas_enum": DATE_RULES_TEXT.split(" | "), "action": "reextract", "evidence": "date_rule",
                          "band": band, "index": i})
             step["date_rule"] = None
             error = f"{path}={value!r} has no quote supporting that date rule"
@@ -1441,15 +1476,16 @@ def to_reducer(policy, oas_path, stable_unmapped=None, brief_text=None):
     w = p.setdefault("writes", {})
     tr = w.get("transfer") or {}
     e_q = _enum(oas, "transfer_to_agent", "queue")
-    qmap = {}
+    qmap, dropped_types = {}, set()
     for sit, q in list((tr.get("queue_map") or {}).items()):
         if not _sources(tr, w.get("source")):
             notes.append(f"ASSUMPTION transfer.queue_map.{sit}: no supporting brief quote; dropped")
             tr["queue_map"].pop(sit)
             continue
         if types and _ptype(sit) in types:
-            notes.append(f"ASSUMPTION transfer.queue_map.{sit}: product type, not a topic; dropped")
+            notes.append(f"ASSUMPTION transfer.queue_map.{sit}: product type, not a topic; recovering products.route_by_type")
             tr["queue_map"].pop(sit)
+            dropped_types.add(_ptype(sit))
             continue
         v = resolve(f"writes.transfer.queue_map.{sit}", q, "transfer_to_agent.queue", e_q)
         if v:
@@ -1497,6 +1533,14 @@ def to_reducer(policy, oas_path, stable_unmapped=None, brief_text=None):
                 routes[typ] = {"action": "transfer", "queue": m.group(1), "note": False, "source": src}
                 notes.append(f"products.route_by_type.{typ}: recovered from the quoted product exception")
                 break
+    for typ in sorted(set(types or ()) - set(routes)):     # the brief's own paragraph (raw-5 h677/h791 lost the route)
+        r = product_exception(brief_text, typ)
+        if r:
+            routes[typ] = r
+            notes.append(f"products.route_by_type.{typ}: recovered from the quoted product exception")
+        elif typ in dropped_types:
+            p.setdefault("source_errors", []).append(f"products.route_by_type.{typ}: a quoted product transfer could not be bound")
+            notes.append(f"ASSUMPTION products.route_by_type.{typ}: queue_map named the product type but no quoted exception binds it")
     bound_routes = {}
     for typ, r in routes.items():
         typ = _ptype(typ)
@@ -1520,7 +1564,10 @@ def to_reducer(policy, oas_path, stable_unmapped=None, brief_text=None):
     cb = w.get("callback")
     if isinstance(cb, dict):
         for key in ("start", "end"):
-            if key in cb:
+            if key in cb and cb[key] in (None, ""):     # no window stated (raw-2): no bound on that side, never S5
+                cb.pop(key)
+                notes.append(f"ASSUMPTION writes.callback.{key}: the brief states no callback window; unbounded")
+            elif key in cb:
                 normalized = normalize_time(cb[key])
                 if normalized is not None and normalized != cb[key]:
                     notes.append(f"writes.callback.{key}: normalized {cb[key]!r} to {normalized!r}")

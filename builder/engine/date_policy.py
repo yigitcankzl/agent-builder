@@ -102,6 +102,12 @@ CORE = ("identity", "products", "deadline", "closing")
 # Generic persuasion vocabulary (contract §7 attempts). Extend only with generic options, never brief values.
 DATE_RULES = ("last_business_day_this_week",   # rolls to the last business day of next week if today is that day
               "deadline", "today", "next_business_day", "customer_named")
+N_DAYS_RULE = re.compile(r"^(\d+)_(business|calendar)_days_after_today$")   # reducer.plan_date: '2_business_days_after_today'
+DATE_RULES_TEXT = " | ".join(DATE_RULES) + " | <n>_business_days_after_today | <n>_calendar_days_after_today"
+
+
+def date_rule_known(value):
+    return value in DATE_RULES or bool(isinstance(value, str) and N_DAYS_RULE.match(value))
 AMOUNT_RULES = ("full", "floor", "floor_if_too_much_else_full", "same_as_previous")
 ATTEMPT_FLAGS = ("flat_refusal_uses_attempt", "proposal_never_refusal", "no_repeat_refused_offer", "stop_when_exhausted")
 CALLBACK_DAYS = ("today_or_next_business_day", "next_business_day_only", "today_only")
@@ -214,8 +220,8 @@ def _check_sections(policy):
             elif isinstance(bands[band].get("attempts"), int) and len(steps) != bands[band]["attempts"]:
                 errs.append(f"attempts.plan[{band}] has {len(steps)} steps, band allows {bands[band]['attempts']}")
             for s in steps:
-                if s.get("date_rule") not in DATE_RULES:
-                    errs.append(f"attempts.plan[{band}] date_rule {s.get('date_rule')!r} not in {DATE_RULES}")
+                if not date_rule_known(s.get("date_rule")):
+                    errs.append(f"attempts.plan[{band}] date_rule {s.get('date_rule')!r} not in {DATE_RULES_TEXT}")
                 if s.get("amount_rule") not in AMOUNT_RULES:
                     errs.append(f"attempts.plan[{band}] amount_rule {s.get('amount_rule')!r} not in {AMOUNT_RULES}")
         for f in ATTEMPT_FLAGS:
