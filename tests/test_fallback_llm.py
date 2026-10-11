@@ -12,6 +12,11 @@ class FallbackPromptContract(unittest.TestCase):
     def test_already_identified_callers_are_not_reverified(self):
         self.assertIn("If the brief says the caller is already identified", PROMPT)
 
+    def test_examples_and_partial_turns_are_preserved(self):
+        self.assertIn("example scenarios and their expected behaviours as acceptance tests", PROMPT)
+        self.assertIn("A cut-off or partial caller utterance is never a refusal", PROMPT)
+        self.assertIn("resume its unsaid required items", PROMPT)
+
 
 if __name__ == "__main__":
     unittest.main()

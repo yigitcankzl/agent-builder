@@ -43,6 +43,11 @@ Required:
   downstream node's task_message or tool default. This includes arrays and identifiers selected from them. Never tell a later
   node merely to copy a value "from the conversation above". Trace every required downstream request field back to either a
   call variable, a customer answer, or a response_mapping; no required request field may be left for the model to guess.
+- Treat client-provided example scenarios and their expected behaviours as acceptance tests: mentally trace every one through
+  the graph before returning JSON. If the caller already requested an action, do not ask whether they want that action again;
+  proceed to any options, preview, or confirmation the brief requires. A cut-off or partial caller utterance is never a refusal
+  or permission to end the call: ask them to continue and preserve the pending task. If a required spoken sequence is interrupted
+  or too long for one turn, resume its unsaid required items before making an offer, changing topic, or calling the next API.
 - Spoken text (on_enter tts) may use {{x}} only for keys you put in test_variables, and test_variables holds the brief's call
   variables with sample values.
 - Code (if any) has no {{ }} and stays small. No knowledge base, no transfer_call nodes unless the tool API has no transfer tool.
