@@ -1423,6 +1423,30 @@ def to_reducer(policy, oas_path, stable_unmapped=None, brief_text=None):
     slots = {"unclear": row(*WHO_CUES["unclear"]), "declined": row("declin\\w*"), "id_failed": row("fail\\w*"),
              "busy": row("busy", "voicemail"), "callback_failed": row("no callback"),
              "write_failed": row("service\\w*", "error")}
+    # Identity's sourced pair is authoritative; an optional absent reason is not a missing close family.
+    idn = p.setdefault("identity", {})
+    failure_row = next((r for r in live
+        if re.search(r"\b(identity|verification|security)\b", str(r.get("when", "")), re.I)
+        and re.search(r"\b(wrong|fail\w*)\b", str(r.get("when", "")), re.I)), slots["id_failed"])
+    failure = idn.get("on_fail") or failure_row
+    if failure:
+        bound = {}
+        for key, enum in (("outcome", e_out), ("reason", e_rsn)):
+            value = failure.get(key) or None
+            bound[key] = resolve(f"identity.on_fail.{key}", value, f"close_call.{key}", enum) if value else None
+            if (value and bound[key] is None) or (key == "outcome" and not value):
+                p.setdefault("source_errors", []).append(f"identity.on_fail.{key}: sourced close cannot bind to close_call")
+        if not failure.get("reason") and failure_row and failure_row["outcome"] == bound["outcome"]:
+            bound["reason"] = failure_row["reason"]
+        spec = oas_tools(oas_path).get("close_call", {"props": {}, "required": []})
+        reason_field = next((f for f, role in arg_map("close_call", spec)[0].items() if role == "reason"), None)
+        if reason_field in (spec.get("required") or []) and not bound["reason"]:
+            mism.append({"policy_path": "identity.on_fail.reason", "value": failure.get("reason"),
+                         "field": "close_call." + reason_field, "oas_enum": e_rsn, "action": "block"})
+            p.setdefault("source_errors", []).append(f"identity.on_fail.reason: close_call.{reason_field} required but no bindable sourced reason")
+        slots["id_failed"] = bound
+        if idn.get("on_fail"):
+            idn["on_fail"].update(bound)
     # Success rows may require a reason too; preserve the sourced pair, not just its outcome.
     nulls = [r for r in live if not r["reason"]]
     paid_row = next((r for r in live if re.search(r"\b(paid|settled|already)\b", str(r.get("when", "")) + " " + str(r["outcome"]), re.I)), None)
@@ -1433,7 +1457,6 @@ def to_reducer(policy, oas_path, stable_unmapped=None, brief_text=None):
     slots.update(promise=promise_row, paid=paid_row)
     cl["slots"] = {k: ({"outcome": v["outcome"], "reason": v["reason"]} if v else None) for k, v in slots.items()}
     # ---- identity: a required field outside the enum is BLOCKED; it is never skipped silently (safety rule 2)
-    idn = p.setdefault("identity", {})
     e = _enum(oas, "verify_identity", "field")
     blocked = []
     for i, q in enumerate(idn.get("questions") or []):

@@ -15,6 +15,7 @@ from builder.degrade import degrade
 from builder.engine import reducer as R
 from builder.graph_walk import oas_schema, validate as validate_body, walk
 from builder.validate_workflow import validate
+from tests.test_graph_walk import FIX, bank_for, compare
 
 OAS = os.path.join(ROOT, "tools/openapi.json")
 with open(OAS) as f:
@@ -129,6 +130,110 @@ class AuditRegressions(unittest.TestCase):
         self.assertIn("cause", cfg["body"], "required fields cannot be silently dropped")
         rp, _ = P.to_reducer(RAW, path)
         self.assertTrue(any("close_call.cause required" in e for e in validate(G.generate(rp, path), rp, path)))
+
+    def identity_failure_raw(self, reason=None):
+        # Raw-5's sourced failure pair; the remaining, unrelated policy is the saved Brief A extraction.
+        raw = copy.deepcopy(RAW)
+        source = [{"file": "brief.md", "quote": "Three wrong answers end it."},
+                  {"file": "brief.md", "quote": "The office word is failed_id, and we do not state the account."}]
+        raw["identity"]["source"] = source
+        raw["identity"]["on_fail"] = {"outcome": "not_verified", "reason": reason}
+        for row in raw["closing"]["table"]:
+            if row.get("reason") == "failed":
+                row.update(outcome="not_verified", reason=reason, when="three wrong identity answers", source=source)
+        return raw
+
+    def identity_failure_walk(self, raw, path, api, reason):
+        rp, report = P.to_reducer(raw, path)
+        self.assertFalse(report["errors"], report["errors"])
+        self.assertEqual(rp["closing"]["slots"]["id_failed"], {"outcome": "not_verified", "reason": reason})
+        case = next(c for c in FIX["cases"] if c["id"] == "PUB-03")
+        events = [s["event"] for s in case["steps"] if s["source"] == "user"]
+        rep = walk(G.generate(rp, path), api, case["call_variables"], events, bank_for(case))
+        self.assertEqual(rep["errors"], [], rep["errors"])
+        self.assertTrue(rep["ended"])
+        self.assertEqual(sum(c["tool"] == "verify_identity" for c in rep["calls"]), 3)
+        self.assertFalse(any(c["tool"] == "get_account" for c in rep["calls"]))
+        calls = [c for c in rep["calls"] if c["tool"] == "close_call"]
+        self.assertEqual([c["node"] for c in calls], ["t_close_call", "lifecycle:close_call"])
+        expected = {"customer_id": case["call_variables"]["customer_id"], "outcome": "not_verified"}
+        field = "cause" if "cause" in G.oas_tools(path)["close_call"]["props"] else "reason"
+        if reason is not None:
+            expected[field] = reason
+        schema = oas_schema(api, G.oas_tools(path)["close_call"]["url"])
+        for call in calls:
+            self.assertEqual(call["body"], expected)
+            self.assertEqual(validate_body(api, schema, call["body"]), [])
+        return rep
+
+    def test_raw5_identity_failure_without_optional_reason(self):
+        for renamed in (False, True):
+            with self.subTest(renamed=renamed):
+                path, api = self.api(renamed=renamed)
+                self.identity_failure_walk(self.identity_failure_raw(), path, api, None)
+
+    def test_identity_failure_required_sourced_alias_pair(self):
+        path, api = self.api(renamed=True, required=True)
+        api["paths"]["/close_call"]["post"]["requestBody"]["content"]["application/json"]["schema"]["properties"]["cause"]["enum"].append("bad_identity")
+        with open(path, "w") as f:
+            json.dump(api, f)
+        raw = self.identity_failure_raw("wrong_answers")
+        raw["identity"]["on_fail"]["outcome"] = "failed_id"
+        raw["aliases"] += [
+            {"field": "close_call.outcome", "brief_value": "failed_id", "api_value": "not_verified",
+             "source": [{"file": "codes.csv", "quote": "failed_id,not_verified"}]},
+            {"field": "close_call.reason", "brief_value": "wrong_answers", "api_value": "bad_identity",
+             "source": [{"file": "codes.csv", "quote": "wrong_answers,bad_identity"}]}]
+        raw["identity"]["source"].append({"file": "brief.md", "quote": "Close failed_id with reason wrong_answers."})
+        self.identity_failure_walk(raw, path, api, "bad_identity")
+
+    def test_identity_failure_sourced_only_in_closing_table(self):
+        path, api = self.api(renamed=True)
+        raw = self.identity_failure_raw()
+        raw["identity"].pop("on_fail")
+        self.identity_failure_walk(raw, path, api, None)
+        path, api = self.api(renamed=True, required=True)
+        raw = self.identity_failure_raw("failed")
+        raw["identity"]["on_fail"]["reason"] = None
+        self.identity_failure_walk(raw, path, api, "failed")
+
+    def test_identity_failure_unbindable_pair_requires_safe_degrade(self):
+        for reason, outcome, required, renamed in ((None, "not_verified", True, False),
+                                                   (None, "not_verified", True, True),
+                                                   ("unmapped_failure", "not_verified", False, True),
+                                                   (None, "unmapped_identity_failure", False, True)):
+            with self.subTest(reason=reason, outcome=outcome, required=required, renamed=renamed):
+                path, _ = self.api(renamed=renamed, required=required)
+                raw = self.identity_failure_raw(reason)
+                raw["identity"]["on_fail"]["outcome"] = outcome
+                rp, report = P.to_reducer(raw, path)
+                self.assertTrue(any(m["action"] == "block" and m["policy_path"].startswith("identity.on_fail")
+                                    for m in report["api_mismatch"]), report)
+                errors = validate(G.generate(rp, path), rp, path)
+                self.assertTrue(any(e.startswith("24:") and "identity.on_fail" in e for e in errors), errors)
+                self.assertIsNone(degrade(rp, errors)[0])
+                # Even a matching OAS enum value elsewhere is not a source for a missing failure reason.
+                if required:
+                    self.assertIsNone(rp["closing"]["slots"]["id_failed"]["reason"])
+                    with patch.object(B, "reextract_fields", return_value={}), \
+                         patch("builder.binding_assist.assist", side_effect=AssertionError("unexpected model call")):
+                        rep = {k: [] for k in ("quotes_rejected", "quotes_repaired", "quotes_unverified", "errors", "oas_warnings", "core_missing")}
+                        result = B.build([os.path.join(ROOT, "briefs/brief-a.md")], path, "id-failed", None,
+                                         os.path.join(self.tmp.name, "sub"), os.path.join(self.tmp.name, "trace"),
+                                         1, 1500, lambda *a: (copy.deepcopy(raw), dict(rep, seconds=0)),
+                                         fallback=None, examiner=None)
+                    self.assertEqual(result["exit_code"], 2, result)
+                    self.assertTrue(result["fallback_required"])
+                    self.assertEqual(result["next"], "L3")
+                    self.assertNotIn("export", result)
+                    self.assertFalse(os.path.exists(os.path.join(self.tmp.name, "sub")))
+
+    def test_public_pub03_identity_close_unchanged(self):
+        path, api = self.api()
+        rep = self.identity_failure_walk(RAW, path, api, "failed")
+        from builder.graph_walk import hub_actions
+        case = next(c for c in FIX["cases"] if c["id"] == "PUB-03")
+        self.assertEqual(compare([s["action"] for s in case["steps"]], hub_actions(rep)), [])
 
     def test_renamed_enum_checked_by_bridge_and_validator(self):
         path, _ = self.api(renamed=True)
