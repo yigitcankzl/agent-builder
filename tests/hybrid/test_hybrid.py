@@ -49,39 +49,49 @@ r = call("check_terms", gate_product="p1", gate_date="2026-10-15", gate_amount="
 ok("Thu 15 Oct full amount passes, nothing to say", r["gate_status"] == "ok" and r["gate_ok"] == "yes" and r["gate_new"] == "no", r)
 offers = [call("next_offer", gate_product="p1", gate_event=e) for e in ("first", "flat", "flat", "flat")]
 ok("late band: two offers, then exhausted, no extra offer", [o["gate_status"] for o in offers][:2] == ["offer", "offer"] and offers[2]["gate_status"] == "exhausted" and offers[3]["gate_status"] == "exhausted" and not offers[3]["gate_say"], offers)
-ok("create_promise with no read-back is blocked", "blocked.invalid" in pre()["url"], V.get("gate_status"))
+ok("create_promise with no read-back is blocked", "not-confirmed" in pre()["url"], V.get("gate_status"))
 r = call("confirm", gate_action="readback", gate_terms="p1:2125.10:2026-10-15")
 ok("read-back spoken with the confirm question", r["gate_status"] == "readback" and r["gate_new"] == "yes" and V["rb_answer"] == "other", r)
-ok("create_promise with no yes heard after the read-back is blocked", "blocked.invalid" in pre()["url"], V.get("rb_answer"))
+ok("create_promise with no yes heard after the read-back is blocked", "not-confirmed" in pre()["url"], V.get("rb_answer"))
+# live v6 PUB-07: the extractor's yes came at 0.593 and was discarded; the last utterance is the fallback
+V["extractor.speech"] = "Yes, I confirm."
+cfg = pre("p1")
+ok("rb_answer still 'other' but the last utterance is a clear yes -> the write passes", "invalid" not in cfg["url"] and cfg["body"]["date"] == "2026-10-15", cfg)
+V["extractor.speech"] = "Yes, but wait, can I change the date?"
+ok("a yes with a change in it does not count", "not-confirmed" in pre("p1")["url"], V["extractor.speech"])
+V["extractor.speech"] = "OK. Bye."
+ok("'OK. Bye.' does not count", "not-confirmed" in pre("p1")["url"], V["extractor.speech"])
+V.pop("extractor.speech")
+ok("the min_confidence of rb_answer is 0.35", next(e for e in HOST["extraction_schema"] if e["name"] == "rb_answer")["min_confidence"] == 0.35, None)
 r = call("confirm", gate_action="yes")
 ok("a stray confirm yes/next is a no-op (live pieces: parallel yes+next raced)", r["gate_status"] == "noop" and not r["gate_say"], r)
 call("confirm", gate_action="next")
-ok("and grants nothing", "blocked.invalid" in pre()["url"], V.get("gate_status"))
+ok("and grants nothing", "not-confirmed" in pre()["url"], V.get("gate_status"))
 V["rb_answer"] = "yes"          # the extraction heard the customer's yes
 cfg = pre("p1")
-ok("yes heard -> create_promise passes with the read-back's terms (model's amount/date ignored)", "blocked" not in cfg["url"] and cfg["body"]["amount"] == 2125.10 and cfg["body"]["date"] == "2026-10-15" and cfg["body"]["product_id"] == "p1", cfg)
+ok("yes heard -> create_promise passes with the read-back's terms (model's amount/date ignored)", "invalid" not in cfg["url"] and cfg["body"]["amount"] == 2125.10 and cfg["body"]["date"] == "2026-10-15" and cfg["body"]["product_id"] == "p1", cfg)
 cfg = pre("p1")
-ok("the bank-failure retry passes again with the same terms", "blocked" not in cfg["url"] and cfg["body"]["date"] == "2026-10-15", cfg)
+ok("the bank-failure retry passes again with the same terms", "invalid" not in cfg["url"] and cfg["body"]["date"] == "2026-10-15", cfg)
 call("check_terms", gate_product="p1", gate_date="2026-10-14", gate_amount="2125.10")
-ok("different terms for that product void the read-back -> blocked", "blocked.invalid" in pre("p1")["url"], V.get("gate_status"))
+ok("different terms for that product void the read-back -> blocked", "not-confirmed" in pre("p1")["url"], V.get("gate_status"))
 # live PUB-01 47b66117: read-back -> "a day later?" (change) -> "keep it as it was, yes I confirm" -> blocked -> read back again
 r = call("confirm", gate_action="readback", gate_terms="p2:420:2026-10-19")
 call("confirm", gate_action="change")
 V["rb_answer"] = "yes"          # the extraction heard "yes, I confirm" right after the change
-ok("a yes after a change (voided read-back) cannot write", "blocked.invalid" in pre("p2")["url"], V.get("gate_status"))
+ok("a yes after a change (voided read-back) cannot write", "not-confirmed" in pre("p2")["url"], V.get("gate_status"))
 r = call("confirm", gate_action="readback", gate_terms="p2:420:2026-10-19")
 ok("read back again (as not_confirmed tells the model)", r["gate_status"] == "readback" and "19 October" in r["gate_say"] and V["rb_answer"] == "other", r)
 V["rb_answer"] = "yes"
 cfg = pre("p2")
-ok("and the write goes through with p2 420 on 19 Oct", "blocked" not in cfg["url"] and cfg["body"]["product_id"] == "p2" and cfg["body"]["date"] == "2026-10-19", cfg)
+ok("and the write goes through with p2 420 on 19 Oct", "invalid" not in cfg["url"] and cfg["body"]["product_id"] == "p2" and cfg["body"]["date"] == "2026-10-19", cfg)
 call("confirm", gate_action="readback", gate_terms="p1:2125.10:2026-10-15|p2:420:2026-10-19")
 V["rb_answer"] = "yes"
 cfg = pre("credit_card")
-ok("two products in the read-back + an unknown product_id -> wrong_product with the ids", "blocked.invalid/product/p1,p2" in cfg["url"], cfg)
+ok("two products in the read-back + an unknown product_id -> wrong_product with the ids", "wrong-product-use-p1-or-p2.invalid" in cfg["url"], cfg)
 res = {"status": "error", "message": "DNS resolution failed for '" + cfg["url"] + "'"}
 exec(CP["post_process_code"], {"result": res, "vars": V})
-ok("... told as NOT a failure, with the ids", res["status"] == "wrong_product" and "p1,p2" in res["what_to_do_next"], res)
-res = {"status": "error", "error": "URL validation failed", "message": "DNS resolution failed for 'blocked.invalid'", "status_code": 400}
+ok("... told as NOT a failure, with the ids", res["status"] == "wrong_product" and "p1, p2" in res["what_to_do_next"], res)
+res = {"status": "error", "error": "URL validation failed", "message": "DNS resolution failed for 'not-confirmed-read-back-and-ask-again.invalid'", "status_code": 400}
 exec(CP["post_process_code"], {"result": res, "vars": V})
 ok("a blocked write reads as not_confirmed, never a service error", res["status"] == "not_confirmed" and "NOT a failure" in res["what_to_do_next"] and "service_error" in res["what_to_do_next"], res)
 res = {"status": "success", "data": {"ok": False, "error": "temporary failure"}}

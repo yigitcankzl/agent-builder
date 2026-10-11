@@ -162,13 +162,15 @@ GATES (code decides these; never compute them yourself):
 - A route status means this product goes to a person: transfer with the queue {{gate_queue}}, no offer, no read-back.
 - Never say recorded, scheduled, booked or transferred before the tool returned ok true.
 - One tool call at a time: wait for each result before the next call.
-- A missing confirmation is never a failure: if create_promise says the terms were not confirmed, read the terms back with confirm (gate_action=readback) and ask again. Do not close the call and do not say it could not be saved. service_error only when the bank itself failed twice.
+- A missing confirmation is never a failure: if create_promise says the terms were not confirmed, or returns an error naming not-confirmed-read-back-and-ask-again, read the terms back with confirm (gate_action=readback) and ask again. An error naming wrong-product-use-... means call create_promise again with one of those product ids. Neither is a failure: do not close the call and do not say it could not be saved. service_error only when the bank itself answered ok false twice.
 - If the customer changes the terms and then goes back to the earlier ones, call confirm with gate_action=readback and those terms; the system reads them back and the customer confirms again.
 Latest gate result: status {{gate_status}}, ok {{gate_ok}}, date {{gate_out_date}}, amount {{gate_out_amount}}, sentence: {{gate_say}}, error: {{gate_error}}
 
 MODEL-OWNED RULES: everything else in this prompt (opening, identity, third parties, callbacks, hardship, disputes, transfers, the closing outcome and reason) is yours to follow exactly as written; the gates cover only dates, amounts, offers and the read-back."""
 
-RB = {"name": "rb_answer", "type": "string", "enum_values": ["yes", "no", "other"], "min_confidence": 0.6,
+# min_confidence 0.35: a clear "Yes, I confirm." came back as yes at 0.593 once a second field shared the node's
+# extraction (live v6 PUB-07 d8f32d92), and a discarded yes blocks the write.
+RB = {"name": "rb_answer", "type": "string", "enum_values": ["yes", "no", "other"], "min_confidence": 0.35,
       "description": "The customer's answer to the agent's last read-back question (Do you confirm?). yes ONLY for an explicit "
                      "yes, I confirm, or correct to that read-back. no for a no. other for everything else, including OK, fine, "
                      "bye, a question, or an answer to anything that is not the read-back."}
@@ -178,6 +180,7 @@ RB = {"name": "rb_answer", "type": "string", "enum_values": ["yes", "no", "other
 # the product the model names (or the only one); nothing else the model sends is used.
 CP_PRE = """try:
     import json as _json
+    import re as _re2
     st = vars.get('gate_st')
     st = _json.loads(st) if isinstance(st, str) and st else (st if isinstance(st, dict) else dict())
     rb = st.get('_rb') or dict()
@@ -185,25 +188,32 @@ CP_PRE = """try:
     b = config.get('body')
     pid = str(b.get('product_id') or '').strip()
     pick = [t for t in terms if str(t[0]) == pid] or (terms if len(terms) == 1 else [])
-    if not terms or rb.get('voided') or vars.get('rb_answer') != 'yes':
-        config['url'] = 'https://blocked.invalid/create_promise'
+    heard = vars.get('rb_answer') == 'yes'
+    if not heard and vars.get('rb_answer') in (None, '', 'other'):
+        import re as _re
+        sp = str(vars.get('extractor.speech') or '').lower()
+        heard = bool(_re.search(r"\\b(yes|yeah|yep|i confirm|confirmed|correct|that's right|that is right)\\b", sp)) and not _re.search(r"\\b(no|not|change|wait)\\b", sp)
+    if not terms or rb.get('voided') or not heard:
+        config['url'] = 'https://not-confirmed-read-back-and-ask-again.invalid/'
     elif not pick:
-        config['url'] = 'https://blocked.invalid/product/' + ','.join(str(t[0]) for t in terms)
+        config['url'] = 'https://wrong-product-use-' + '-or-'.join(_re2.sub('[^a-z0-9]', '', str(t[0]).lower()) for t in terms) + '.invalid/'
     else:
         b['product_id'], b['amount'], b['date'] = str(pick[0][0]), float(pick[0][1]), str(pick[0][2])
 except Exception:
-    config['url'] = 'https://blocked.invalid/create_promise'
+    config['url'] = 'https://not-confirmed-read-back-and-ask-again.invalid/'
 """
 CP_POST = """
 try:
     if isinstance(result, dict):
         d = result.get('data')
-        if 'blocked.invalid/product/' in str(result):
-            ids = str(result).split('blocked.invalid/product/')[1].split("'")[0].split('"')[0]
+        # a blocked write is a transport error on the platform: post_process does NOT run then (live v6), the model sees
+        # only the error text, so the url host itself says what to do; this branch covers a platform that does run it
+        if 'wrong-product-use-' in str(result):
+            ids = str(result).split('wrong-product-use-')[1].split('.invalid')[0].replace('-or-', ', ')
             result.pop('error', None)
             result['status'] = 'wrong_product'
             result['what_to_do_next'] = 'NOT saved, NOT a failure: call create_promise again with product_id one of: ' + ids
-        elif 'blocked.invalid' in str(result):
+        elif 'not-confirmed-read-back' in str(result):
             result.pop('error', None)
             result['status'] = 'not_confirmed'
             result['message'] = 'Not sent to the bank: these terms have no confirmed read-back. This is NOT a service error.'
