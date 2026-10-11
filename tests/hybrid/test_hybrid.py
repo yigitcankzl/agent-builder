@@ -22,10 +22,8 @@ for k, x in dict(product_id="p2", type="credit_card", past_due=420.0, days_late=
 
 
 def call(tool, **args):
-    for k in hybrid.GATE_IN[tool]:
-        V.pop(f"{tool}_args.{k}", None)
-    V.update({f"{tool}_args.{k}": v for k, v in args.items()})
-    exec(CODE[tool], {"vars": V})
+    V.update({f"{tool}_args.{k}": "STALE" for k in hybrid.GATE_IN[tool]})    # the platform's lagging copy: ignored
+    exec(CODE[tool], {"vars": V, "params": dict(args)})                      # the current args (probe2)
     return {k: V.get(k) for k in ("gate_status", "gate_ok", "gate_say", "gate_out_date", "gate_out_amount", "gate_new", "gate_error")}
 
 

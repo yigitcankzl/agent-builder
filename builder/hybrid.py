@@ -2,8 +2,10 @@
 code_exec tools the dialogue model must call, and a create_promise that the platform blocks unless confirm_gate granted it.
 
 Platform facts this relies on (live probe tests/hybrid/probe.py, 2026-10-11):
-- a model-called code_exec tool gets its arguments as vars['<tool>_args.<name>']; the model sees only
-  "Code executed successfully", never what the code wrote;
+- a model-called code_exec tool gets the CURRENT call's arguments in the global dict `params` (vars['<tool>_args.<name>']
+  is written after the code ran: it holds the previous call's); the model sees only "Code executed successfully";
+- an api_call pre_process_code runs on a model-called tool: it blocks the call by a url rewrite (nothing reaches the
+  bank) and rewrites the body (probe2);
 - routing is evaluated right after the tool call, on the vars the code wrote: a gate with a sentence routes to a say
   node that speaks {{gate_say}} (tts), and the customer's next turn routes back to the host node;
 - a {{var}} written by code resolves in task_message from the next turn on.
@@ -27,9 +29,10 @@ GATE_NAME = {"check_terms": "date_amount_gate", "next_offer": "attempt_gate", "c
 def prefix(tool):
     names = GATE_IN[tool]
     return ("try:\n"
-            "    _g = globals()\n"
+            "    _P = globals().get('params')\n"
+            "    _P = _P if isinstance(_P, dict) else dict()\n"
             f"    for _k in {names!r}:\n"
-            f"        _v = _g.get(_k) if _k in _g else vars.get('{tool}_args.' + _k, vars.get(_k))\n"
+            "        _v = _P.get(_k)\n"
             "        vars[_k] = '' if _v is None else str(_v)\n"
             "    if not vars.get('gate_account'):\n"
             "        for _p in ('get_account_response.data', 'get_account_data', 'get_account_response'):\n"
@@ -157,8 +160,13 @@ def _cond(var, val):
 
 def wire(wf, rp):
     """L3 workflow + reducer policy -> the hybrid workflow. Every node that has create_promise gets the three gate
-    tools, the gated create_promise, the GATES prompt, the rb_answer extraction and a say loop:
-    host --(gate_new=yes)--> <host>_gate_ack (code: gate_new=no) --> <host>_gate_say (tts {{gate_say}}) --(next turn)--> host."""
+    tools, the gated create_promise, the GATES prompt and the rb_answer extraction. The gate's sentence is spoken by
+    routing, in the same turn as the tool call:
+        host --(gate_new=yes)--> ack1 (code: gate_new=no) --> host_g1 (a full copy of host whose on_enter speaks {{gate_say}})
+        host_g1 --(gate_new=yes)--> ack2 --> host_g2 --(gate_new=yes)--> ack1 --> host_g1 ...
+    The copies converse on their own, so no turn starts with a transition back: the platform evaluates the routing
+    after a tool call only when no transition was taken earlier in the turn (live proof 2), and a say node that routes
+    back to the host on the next turn made every later gate sentence one turn late."""
     wf = copy.deepcopy(wf)
     nodes = wf["nodes"]
     hosts = [k for k, n in nodes.items() if any((t.get("function") or {}).get("name") == "create_promise" for t in n.get("tools") or [])]
@@ -173,21 +181,22 @@ def wire(wf, rp):
                       for t in n["tools"]] + gates
         n["task_message"] = (n.get("task_message") or "") + PROMPT
         n["extraction_schema"] = (n.get("extraction_schema") or []) + [RB]
-        ack, say = h + "_gate_ack", h + "_gate_say"
-        n["transitions"] = [{"target_node": ack, "description": "a gate has a sentence to say", "condition": _cond("gate_new", "yes")}] + \
-            (n.get("transitions") or [])
-        nodes[ack] = {
-            "name": ack, "node_type": "code", "passthrough": True, "passthrough_default_transition": say, "on_enter": {"type": "silent"},
-            "pre_actions": [{"type": "function", "function": {"name": "code_exec", "handler": "__function__:code_exec", "parameters": {
-                "type": "object", "properties": {"code": {"type": "string", "default": "vars['gate_new'] = 'no'\n"},
-                                                 "timeout_ms": {"type": "number", "default": 5000}}}}}],
-            "transitions": [{"target_node": say, "description": "always", "condition": {"operator": "always"}}]}
-        nodes[say] = {
-            "name": say, "node_type": "conversation", "on_enter": {"type": "tts", "text": "{{gate_say}}"},
-            "on_enter_first_entry_only": False, "max_node_turns": 3,
-            "task_message": "You just said: {{gate_say}} Wait for the customer's answer.", "tools": [],
-            "extraction_schema": [RB],
-            "transitions": [{"target_node": h, "description": "always", "condition": {"operator": "always"}}]}
+        orig = n.get("transitions") or []
+        g1, g2, a1, a2 = h + "_g1", h + "_g2", h + "_gate_ack1", h + "_gate_ack2"
+        for name in (g1, g2):
+            c = copy.deepcopy(n)
+            c.update(name=name, on_enter={"type": "tts", "text": "{{gate_say}}"}, on_enter_first_entry_only=False)
+            nodes[name] = c
+        for node, ack, to in ((h, a1, g1), (g1, a2, g2), (g2, a1, g1)):
+            nodes[node]["transitions"] = [{"target_node": ack, "description": "a gate has a sentence to say",
+                                           "condition": _cond("gate_new", "yes")}] + copy.deepcopy(orig)
+        for ack, to in ((a1, g1), (a2, g2)):
+            nodes[ack] = {
+                "name": ack, "node_type": "code", "passthrough": True, "passthrough_default_transition": to, "on_enter": {"type": "silent"},
+                "pre_actions": [{"type": "function", "function": {"name": "code_exec", "handler": "__function__:code_exec", "parameters": {
+                    "type": "object", "properties": {"code": {"type": "string", "default": "vars['gate_new'] = 'no'\n"},
+                                                     "timeout_ms": {"type": "number", "default": 5000}}}}}],
+                "transitions": [{"target_node": to, "description": "always", "condition": {"operator": "always"}}]}
     return wf
 
 
