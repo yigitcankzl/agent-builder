@@ -614,8 +614,9 @@ def product_line(pd):
 
 def offer_line(pd, amount, date, floor_clause=False):
     s = 'Could you pay ' + money(amount) + ' for your ' + pd['name'] + ' on ' + say_date(_d(date)) + '?'
-    if floor_clause:
+    if floor_clause and not pd.get('overdue_said'):     # the floor offer with its clause is stated once per product
         s += ' ' + D_OVERDUE
+        pd['overdue_said'] = True
     return s
 
 
@@ -697,8 +698,9 @@ def reask_line(st):
     if st.get('q') == 'readback':
         return last
     parts = re.split(r'(?<=[.?!])\s+', last.strip())
-    if len(parts) > 1 and parts[-1].endswith('?'):
-        return parts[-1]
+    qs = [x for x in parts if x.endswith('?')]
+    if len(parts) > 1 and qs:     # the question only: an offer's 'The rest stays overdue.' is never re-said
+        return qs[-1]
     return last
 
 
@@ -2190,8 +2192,9 @@ def on_user(policy, st, ev, today, cv):
     if guarded:
         return guarded
     if ev.get('st') == 'partial':
-        if offer_is_open(st) and ev.get('kind') in (None, '', 'other'):
-            return offer_chatter(st)     # a cut-off chat is not a second statement of the offer
+        # a cut-off chat at an open offer is not an answer: the continue line, never the offer again, and it does not
+        # count toward the non-answer cap (A PUB-06 talkative dc18dc2c/9d011e5d: four cut-offs burnt an attempt and
+        # the floor was offered a second time)
         if st['phase'] == 'identity' and ev.get('kind') == 'identity' and str(st.get('q') or '').startswith('id_'):
             idt, qs = st['identity'], (policy.get('identity') or dict()).get('questions') or []
             fmt = str(qs[idt['idx']].get('format') or '') if idt['idx'] < len(qs) else ''

@@ -112,7 +112,8 @@ def offer_chatter_live():
         check(a["type"] == "say_exact", f"chatter must not go to free talk: {a}")
         check("637.50" not in said and "overdue" not in said.lower() and "Could you pay" not in said,
               f"the offer was stated again after {body}: {said}")
-        check(said == R.D_OFFER_NUDGE, f"neutral re-ask: {said}")
+        # a cut-off chat gets the continue line (it is no non-answer: floor once, dc18dc2c); a whole one the nudge
+        check(said == (R.D_CONTINUE if "st=partial" in body else R.D_OFFER_NUDGE), f"neutral re-ask: {said}")
         check(st["q"] == "offer", f"the offer stays the open question: {st['q']}")
     return True
 
